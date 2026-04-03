@@ -42,7 +42,7 @@ weasyprint==63.1                 # HTML → PDF renderer
 qrcode[pil]==8.0                 # QR code image generator
 
 # --- Email ---
-jinja2==3.1.4                    # HTML email templates
+jinja2==3.1.6                    # HTML email templates
 
 # --- Logging ---
 structlog==24.4.0                # Structured JSON logging
