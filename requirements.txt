@@ -1,0 +1,52 @@
+# ============================================================
+# AiDerm Cliniq — Production Dependencies
+# ============================================================
+
+# --- Web Framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.32.1        # ASGI server with websocket support
+
+# --- Database ---
+sqlalchemy[asyncio]==2.0.36      # ORM with async support
+asyncpg==0.30.0                  # Async PostgreSQL driver
+psycopg2-binary==2.9.10          # Sync driver (Alembic migrations only)
+alembic==1.14.0                  # Database migrations
+
+# --- Auth ---
+python-jose[cryptography]==3.3.0 # JWT encoding/decoding
+passlib[bcrypt]==1.7.4           # Password hashing
+httpx==0.27.2                    # HTTP client (Google OAuth token exchange)
+
+# --- Validation & Settings ---
+pydantic==2.10.3
+pydantic-settings==2.6.1         # BaseSettings with .env support
+
+# --- Task Queue ---
+celery[redis]==5.4.0             # Async task queue
+redis==5.2.1                     # Redis client (Celery broker + cache)
+
+# --- Rate Limiting ---
+slowapi==0.1.9                   # FastAPI rate limiter
+
+# --- File Storage ---
+google-cloud-storage==2.19.0     # GCS SDK
+
+# --- AI Providers ---
+google-generativeai==0.8.3       # Gemini SDK
+openai==1.59.3                   # OpenAI SDK
+
+# --- PDF Generation ---
+weasyprint==63.1                 # HTML → PDF renderer
+
+# --- QR Codes ---
+qrcode[pil]==8.0                 # QR code image generator
+
+# --- Email ---
+jinja2==3.1.4                    # HTML email templates
+
+# --- Logging ---
+structlog==24.4.0                # Structured JSON logging
+
+# --- Utilities ---
+python-multipart==0.0.20         # Multipart form data (file uploads)
+pillow==11.0.0                   # Image processing (HEIC conversion, thumbnails)

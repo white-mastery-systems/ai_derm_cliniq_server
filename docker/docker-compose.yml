@@ -1,0 +1,133 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AiDerm Cliniq — Full Stack
+#
+# Services:
+#   db        — PostgreSQL 16
+#   redis     — Redis 7 (Celery broker + rate-limit backend)
+#   api       — FastAPI server (uvicorn)
+#   worker    — Celery worker (AI tasks)
+#   flower    — Celery task monitor (dev only)
+#
+# Usage:
+#   docker compose up                    # start everything
+#   docker compose up api worker         # start without flower
+#   docker compose logs -f api           # follow API logs
+#   docker compose exec api alembic upgrade head   # run migrations manually
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  APP_ENV: ${APP_ENV:-development}
+  SECRET_KEY: ${SECRET_KEY}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dermuser}:${POSTGRES_PASSWORD:-dermpass}@db:5432/${POSTGRES_DB:-dermdb}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  GCS_BUCKET_NAME: ${GCS_BUCKET_NAME}
+  GCS_CREDENTIALS_FILE: ${GCS_CREDENTIALS_FILE:-}
+  GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  DEBUG: ${DEBUG:-false}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000}
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dermuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dermpass}
+      POSTGRES_DB: ${POSTGRES_DB:-dermdb}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dermuser} -d ${POSTGRES_DB:-dermdb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── FastAPI API Server ───────────────────────────────────────────────────────
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    env_file:
+      - ../.env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      # Mount GCP credentials file (path set in .env)
+      - ${GCS_CREDENTIALS_FILE:-/dev/null}:/app/gcp_credentials.json:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # ── Celery Worker ────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    env_file:
+      - ../.env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ${GCS_CREDENTIALS_FILE:-/dev/null}:/app/gcp_credentials.json:ro
+    deploy:
+      replicas: 1          # scale to 2+ for production load
+
+  # ── Flower (Celery monitor) — dev only ───────────────────────────────────────
+  flower:
+    image: mher/flower:2.0
+    restart: unless-stopped
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+    profiles:
+      - dev                # only starts with: docker compose --profile dev up
+
+volumes:
+  postgres_data:
+  redis_data:

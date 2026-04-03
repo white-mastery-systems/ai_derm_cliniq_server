@@ -1,0 +1,64 @@
+# ─── Git ──────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ─── Python cache ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ─── Virtual Environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+ENV/
+env/
+
+# ─── Secrets & credentials ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*-credentials.json
+*-service-account.json
+secrets/
+
+# ─── Testing & dev tools ──────────────────────────────────────────────────────
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# ─── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Logs & local data ────────────────────────────────────────────────────────
+*.log
+logs/
+uploads/
+media/
+tmp/
+temp/
+docker/volumes/
+postgres_data/
+redis_data/
+
+# ─── Docs & non-runtime files ─────────────────────────────────────────────────
+*.md
+docs/
+*.ipynb
+.ipynb_checkpoints/
+
+# ─── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

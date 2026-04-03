@@ -1,0 +1,47 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AiDerm Cliniq — Celery Worker
+# Shares the same dependency layer as the API server.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 1: dependency builder ───────────────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --upgrade pip \
+ && pip install --prefix=/install --no-cache-dir -r requirements.txt
+
+
+# ── Stage 2: runtime image ────────────────────────────────────────────────────
+FROM python:3.12-slim AS runtime
+
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /install /usr/local
+
+COPY src/ ./src/
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+USER appuser
+
+# One worker process per container; scale horizontally via docker-compose replicas
+# --loglevel=info keeps Celery logs visible in container stdout
+CMD ["celery", "-A", "src.workers.celery_app:celery_app", "worker", \
+     "--loglevel=info", "--concurrency=4", "-Q", "ai,default"]
