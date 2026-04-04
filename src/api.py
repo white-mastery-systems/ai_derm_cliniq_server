@@ -49,12 +49,12 @@ def include_all_routers(app: FastAPI) -> None:
     # ------------------------------------------------------------------ #
 
     # Cases — /api/v1/cases
-    # from src.cases.controller import router as cases_router
-    # app.include_router(cases_router, prefix="/api/v1/cases", tags=["Cases"])
+    from src.cases.controller import router as cases_router
+    app.include_router(cases_router, prefix="/api/v1/cases", tags=["Cases"])
 
-    # Images — nested under cases
-    # from src.images.controller import router as images_router
-    # app.include_router(images_router, prefix="/api/v1/cases", tags=["Images"])
+    # Images — /api/v1/cases/{case_id}/images
+    from src.images.controller import router as images_router
+    app.include_router(images_router, prefix="/api/v1/cases/{case_id}/images", tags=["Images"])
 
     # Conversations — /api/v1/cases/{case_id}/chat
     # from src.conversations.controller import router as conv_router

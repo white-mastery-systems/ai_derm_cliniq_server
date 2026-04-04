@@ -37,6 +37,7 @@ os.environ.setdefault("SECRET_KEY", "test-secret-key-do-not-use-in-production-32
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
 os.environ.setdefault("DEBUG", "false")
+os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "100000")  # Disable effective rate limiting in tests
 
 # ------------------------------------------------------------------ #
 # STEP 2: Now safe to import src modules.
@@ -133,6 +134,52 @@ async def app_client() -> AsyncGenerator[AsyncClient, None]:
             assert response.status_code == 200
     """
     app = create_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        yield client
+
+
+@pytest_asyncio.fixture
+async def db_app_client(test_engine) -> AsyncGenerator[AsyncClient, None]:
+    """
+    An async HTTP client with the DB session dependency overridden to use
+    the test engine (same engine where test tables were created).
+
+    WHY IS THIS NEEDED?
+    --------------------
+    The FastAPI app has its own module-level engine (src/database/core.py).
+    That engine is a separate SQLite in-memory instance from `test_engine`.
+    Without this override, routes would query an empty database with no tables.
+
+    By overriding get_async_session, all `Depends(get_async_session)` calls
+    in route handlers are redirected to sessions backed by `test_engine`.
+
+    Use this fixture for all auth/user/case endpoint integration tests.
+    """
+    from src.database.core import get_async_session
+
+    session_factory = async_sessionmaker(
+        bind=test_engine,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+
+    async def override_get_session() -> AsyncGenerator[AsyncSession, None]:
+        async with session_factory() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+
+    app = create_app()
+    app.dependency_overrides[get_async_session] = override_get_session
+
     async with AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",

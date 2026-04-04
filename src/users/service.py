@@ -1,0 +1,185 @@
+"""
+users/service.py — User Profile Business Logic
+================================================
+
+Three operations:
+1. get_profile   — load User + role-specific profile (no lazy load)
+2. update_profile — apply PATCH fields to User + PatientProfile/DoctorProfile
+3. soft_delete   — set is_active=False (not a hard DB delete)
+
+ASYNC RELATIONSHIP LOADING
+---------------------------
+SQLAlchemy async does not support lazy loading. If we access
+`user.patient_profile` without explicitly loading it, we get MissingGreenlet.
+
+Solution: use `selectinload()` in the SELECT query so SQLAlchemy fetches
+the relationship in a second SQL IN-query within the same async context.
+This is the standard async-safe pattern.
+
+PATCH SEMANTICS
+---------------
+We only apply fields that were explicitly sent in the request.
+Pydantic's model_dump(exclude_none=True) gives us only the non-None fields.
+We apply shared fields (full_name, phone) to User.
+Role-specific fields go to the appropriate profile row.
+"""
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from src.exceptions import UserNotFoundException
+from src.logger import get_logger
+from src.models.doctor_profile import DoctorProfile
+from src.models.patient_profile import PatientProfile
+from src.models.user import User, UserRole
+from src.users.schemas import ProfileUpdateRequest, UserProfileResponse
+
+logger = get_logger(__name__)
+
+# ------------------------------------------------------------------ #
+# Helpers
+# ------------------------------------------------------------------ #
+
+async def _load_user_with_profile(db: AsyncSession, user_id: str) -> User:
+    """
+    Load a User and eagerly fetch the appropriate profile relationship.
+
+    selectinload issues one extra SELECT … WHERE user_id IN (…) query.
+    It is async-safe and avoids MissingGreenlet from lazy loading.
+    """
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id)
+        .options(
+            selectinload(User.patient_profile),
+            selectinload(User.doctor_profile),
+        )
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException()
+    return user
+
+
+def _build_profile_response(user: User) -> UserProfileResponse:
+    """
+    Construct UserProfileResponse without accessing any lazy-loaded attributes.
+    All relationships must already be loaded by _load_user_with_profile.
+    """
+    return UserProfileResponse(
+        id=user.id,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role.value,
+        is_active=user.is_active,
+        is_verified=user.is_verified,
+        patient_profile=user.patient_profile if user.role == UserRole.PATIENT else None,
+        doctor_profile=user.doctor_profile if user.role == UserRole.DOCTOR else None,
+    )
+
+
+# ------------------------------------------------------------------ #
+# get_profile
+# ------------------------------------------------------------------ #
+
+async def get_profile(db: AsyncSession, user_id: str) -> UserProfileResponse:
+    """
+    Return the full profile for the given user_id.
+
+    Used by: GET /api/v1/users/me
+    """
+    user = await _load_user_with_profile(db, user_id)
+    return _build_profile_response(user)
+
+
+# ------------------------------------------------------------------ #
+# update_profile
+# ------------------------------------------------------------------ #
+
+async def update_profile(
+    db: AsyncSession,
+    user_id: str,
+    request: ProfileUpdateRequest,
+) -> UserProfileResponse:
+    """
+    Apply PATCH updates to User + profile row.
+
+    PATCH semantics: only explicitly provided fields are written.
+    Role-specific fields silently ignored for the wrong role.
+
+    Used by: PATCH /api/v1/users/me
+    """
+    user = await _load_user_with_profile(db, user_id)
+
+    # --- Shared fields (apply to User row) ---
+    if request.full_name is not None:
+        user.full_name = request.full_name
+    if request.phone is not None:
+        _apply_phone(user, request.phone)
+
+    # --- Role-specific fields ---
+    if user.role == UserRole.PATIENT:
+        _apply_patient_fields(user.patient_profile, request)
+    elif user.role == UserRole.DOCTOR:
+        _apply_doctor_fields(user.doctor_profile, request)
+
+    logger.info("profile_updated", user_id=user_id, role=user.role.value)
+    return _build_profile_response(user)
+
+
+def _apply_phone(user: User, phone: str) -> None:
+    """Phone lives on the profile row, not on User. Route to the right model."""
+    if user.patient_profile:
+        user.patient_profile.phone = phone
+    elif user.doctor_profile:
+        user.doctor_profile.phone = phone if hasattr(user.doctor_profile, "phone") else None
+
+
+def _apply_patient_fields(profile: PatientProfile | None, req: ProfileUpdateRequest) -> None:
+    if profile is None:
+        return
+    if req.date_of_birth is not None:
+        profile.date_of_birth = req.date_of_birth
+    if req.gender is not None:
+        profile.gender = req.gender
+
+
+def _apply_doctor_fields(profile: DoctorProfile | None, req: ProfileUpdateRequest) -> None:
+    if profile is None:
+        return
+    if req.specialization is not None:
+        profile.specialization = req.specialization
+    if req.license_number is not None:
+        profile.license_number = req.license_number
+    if req.clinic_name is not None:
+        profile.clinic_name = req.clinic_name
+    if req.notifications_enabled is not None:
+        profile.notifications_enabled = req.notifications_enabled
+
+
+# ------------------------------------------------------------------ #
+# soft_delete
+# ------------------------------------------------------------------ #
+
+async def soft_delete(db: AsyncSession, user_id: str) -> None:
+    """
+    Soft-delete an account by setting is_active=False.
+
+    WHY SOFT DELETE?
+    -----------------
+    Hard-deleting a user cascades to cases, images, messages, reports —
+    destroying permanent medical records. Soft-delete preserves the data
+    while preventing the user from logging in.
+
+    An admin can reactivate the account if needed.
+
+    Used by: DELETE /api/v1/users/me
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException()
+
+    user.is_active = False
+    logger.info("user_soft_deleted", user_id=user_id)
