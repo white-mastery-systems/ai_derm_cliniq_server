@@ -65,16 +65,16 @@ def include_all_routers(app: FastAPI) -> None:
     app.include_router(ai_router, prefix="/api/v1/cases/{case_id}/ai", tags=["AI Analysis"])
 
     # Doctor Review — /api/v1/cases/{case_id}/review
-    # from src.doctor_review.controller import router as review_router
-    # app.include_router(review_router, prefix="/api/v1/cases", tags=["Doctor Review"])
+    from src.doctor_review.controller import router as review_router
+    app.include_router(review_router, prefix="/api/v1/cases/{case_id}", tags=["Doctor Review"])
+
+    # QR Codes — /api/v1/qr
+    from src.qr.controller import router as qr_router
+    app.include_router(qr_router, prefix="/api/v1/qr", tags=["QR Codes"])
 
     # Reports — /api/v1/cases/{case_id}/report
     # from src.reports.controller import router as reports_router
     # app.include_router(reports_router, prefix="/api/v1/cases", tags=["Reports"])
-
-    # QR Codes — /api/v1/qr
-    # from src.qr.controller import router as qr_router
-    # app.include_router(qr_router, prefix="/api/v1/qr", tags=["QR Codes"])
 
     # Admin — /api/v1/admin
     # from src.admin.controller import router as admin_router

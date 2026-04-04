@@ -1,0 +1,251 @@
+"""
+doctor_review/service.py — Doctor Review Business Logic
+========================================================
+
+Three operations:
+1. create_review  — doctor starts reviewing a case
+2. update_review  — doctor updates/completes their review
+3. get_review     — patient or doctor reads the review
+
+ACCESS RULES
+------------
+- Only the assigned doctor (case.doctor_id) can create/update the review.
+  A case is assigned either via QR scan (auto-assign) or admin PATCH.
+- Both the patient who owns the case and the assigned doctor can read the review.
+- Other users get 404 (case enumeration prevention).
+
+ONE REVIEW PER CASE
+-------------------
+DoctorReview has a UNIQUE constraint on case_id.
+Attempting to create a second review → 409 Conflict.
+
+COMPLETING THE REVIEW
+---------------------
+When PATCH sets review_status=COMPLETED:
+- review.reviewed_at is recorded
+- If clinical_status is provided → case.clinical_status is updated
+  (this is what drives the coloured badge in the patient History screen)
+
+WHY NOT MERGE CREATE + UPDATE INTO ONE ENDPOINT?
+-------------------------------------------------
+Separating POST (create) from PATCH (update) gives the Flutter app
+clear semantics:
+- POST → "I'm starting this review" (creates the row, returns 201)
+- PATCH → "I'm updating my review" (updates fields, returns 200)
+
+Flutter can check for 409 on POST to detect "already created" and
+fall back to PATCH.
+"""
+
+from datetime import datetime, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from src.exceptions import (
+    CaseNotFoundException,
+    ConflictException,
+    ForbiddenException,
+    NotFoundException,
+)
+from src.logger import get_logger
+from src.models.base import new_uuid
+from src.models.case import Case
+from src.models.doctor_review import DoctorReview, ReviewStatus
+from src.models.user import User, UserRole
+from src.doctor_review.schemas import (
+    CreateReviewRequest,
+    DoctorReviewResponse,
+    UpdateReviewRequest,
+)
+
+logger = get_logger(__name__)
+
+
+def _to_response(review: DoctorReview) -> DoctorReviewResponse:
+    """Convert ORM row to response schema."""
+    return DoctorReviewResponse(
+        id=review.id,
+        case_id=review.case_id,
+        doctor_id=review.doctor_id,
+        confirmed_diagnosis=review.confirmed_diagnosis,
+        review_notes=review.review_notes,
+        treatment_plan_json=review.treatment_plan_json,
+        review_status=review.review_status,
+        reviewed_at=review.reviewed_at,
+        created_at=review.created_at,
+        updated_at=review.updated_at,
+    )
+
+
+async def _load_case_for_doctor(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+) -> Case:
+    """
+    Load a case and verify the doctor is assigned to it.
+
+    Returns the case or raises 404 (case enumeration prevention).
+    Raises 403 if doctor is not assigned.
+    """
+    result = await db.execute(
+        select(Case)
+        .where(Case.id == case_id)
+        .options(selectinload(Case.doctor_review))
+    )
+    case = result.scalar_one_or_none()
+
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    if case.doctor_id != doctor.id:
+        raise ForbiddenException(
+            message="You are not assigned to this case. "
+                    "Scan the patient's QR code to gain access."
+        )
+    return case
+
+
+async def create_review(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+    request: CreateReviewRequest,
+) -> DoctorReviewResponse:
+    """
+    Doctor creates a review for an assigned case.
+
+    Raises 403 if the doctor is not assigned to the case.
+    Raises 409 if a review already exists for this case.
+    """
+    if doctor.role != UserRole.DOCTOR:
+        raise ForbiddenException(message="Only doctors can create reviews")
+
+    case = await _load_case_for_doctor(db, doctor, case_id)
+
+    if case.doctor_review is not None:
+        raise ConflictException(
+            message="A review already exists for this case. Use PATCH to update it."
+        )
+
+    review = DoctorReview(
+        id=new_uuid(),
+        case_id=case_id,
+        doctor_id=doctor.id,
+        confirmed_diagnosis=request.confirmed_diagnosis,
+        review_notes=request.review_notes,
+        treatment_plan_json=request.treatment_plan_json,
+        review_status=request.review_status,
+    )
+
+    if request.review_status == ReviewStatus.COMPLETED:
+        review.reviewed_at = datetime.now(tz=timezone.utc)
+
+    db.add(review)
+    await db.flush()
+    await db.refresh(review)
+    logger.info("doctor_review_created", case_id=case_id, doctor_id=doctor.id)
+    return _to_response(review)
+
+
+async def update_review(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+    request: UpdateReviewRequest,
+) -> DoctorReviewResponse:
+    """
+    Doctor updates their review (partial update — only provided fields change).
+
+    When review_status → COMPLETED:
+    - reviewed_at is set
+    - If clinical_status is provided → updates case.clinical_status
+
+    Raises 403 if doctor is not assigned to the case.
+    Raises 404 if no review exists yet (create it first with POST).
+    """
+    if doctor.role != UserRole.DOCTOR:
+        raise ForbiddenException(message="Only doctors can update reviews")
+
+    case = await _load_case_for_doctor(db, doctor, case_id)
+
+    if case.doctor_review is None:
+        raise NotFoundException(
+            message="No review found for this case. Create one first with POST /review."
+        )
+
+    review = case.doctor_review
+
+    # Apply partial updates — only override fields that were explicitly provided
+    if request.confirmed_diagnosis is not None:
+        review.confirmed_diagnosis = request.confirmed_diagnosis
+    if request.review_notes is not None:
+        review.review_notes = request.review_notes
+    if request.treatment_plan_json is not None:
+        review.treatment_plan_json = request.treatment_plan_json
+
+    if request.review_status is not None:
+        review.review_status = request.review_status
+        if request.review_status == ReviewStatus.COMPLETED and review.reviewed_at is None:
+            review.reviewed_at = datetime.now(tz=timezone.utc)
+
+    # Update case clinical_status when doctor completes review
+    if request.clinical_status is not None:
+        case.clinical_status = request.clinical_status
+        logger.info(
+            "clinical_status_updated",
+            case_id=case_id,
+            clinical_status=request.clinical_status.value,
+        )
+
+    logger.info(
+        "doctor_review_updated",
+        case_id=case_id,
+        doctor_id=doctor.id,
+        review_status=review.review_status.value,
+    )
+    return _to_response(review)
+
+
+async def get_review(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+) -> DoctorReviewResponse:
+    """
+    Read the doctor review for a case.
+
+    Access:
+    - The patient who owns the case
+    - The doctor assigned to the case
+
+    Returns 404 if the case doesn't exist, the user doesn't have access,
+    or no review has been created yet.
+    """
+    result = await db.execute(
+        select(Case)
+        .where(Case.id == case_id)
+        .options(selectinload(Case.doctor_review))
+    )
+    case = result.scalar_one_or_none()
+
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    # Access control: patient who owns the case, or the assigned doctor
+    if user.role == UserRole.PATIENT and case.patient_id != user.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
+        raise ForbiddenException(
+            message="You are not assigned to this case."
+        )
+
+    if case.doctor_review is None:
+        raise NotFoundException(
+            message="No review has been submitted for this case yet."
+        )
+
+    return _to_response(case.doctor_review)
