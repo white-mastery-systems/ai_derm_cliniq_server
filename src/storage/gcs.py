@@ -27,7 +27,6 @@ Calling any GCS function raises StorageException with a clear message.
 This lets the server start and run non-image routes in dev without GCS.
 """
 
-import io
 from datetime import timedelta
 from functools import lru_cache
 from typing import BinaryIO
@@ -166,6 +165,36 @@ def get_signed_url(gcs_path: str, expiry_minutes: int = 30) -> str:
     except Exception as exc:
         logger.error("gcs_signed_url_failed", path=gcs_path, error=str(exc))
         raise StorageException(message=f"Failed to generate signed URL: {exc}") from exc
+
+
+def download_bytes(gcs_path: str) -> bytes:
+    """
+    Download an object from GCS and return its raw bytes.
+
+    Used by Celery tasks to fetch image data for Gemini analysis.
+
+    Parameters
+    ----------
+    gcs_path : Full GCS object path (same value stored in CaseImage.gcs_path)
+
+    Returns
+    -------
+    bytes — raw file contents
+
+    Raises
+    ------
+    StorageException — credentials missing or download failed
+    """
+    try:
+        blob = _bucket().blob(gcs_path)
+        data = blob.download_as_bytes()
+        logger.info("gcs_download_ok", path=gcs_path, size_bytes=len(data))
+        return data
+    except StorageException:
+        raise
+    except Exception as exc:
+        logger.error("gcs_download_failed", path=gcs_path, error=str(exc))
+        raise StorageException(message=f"Download failed: {exc}") from exc
 
 
 def build_image_path(case_id: str, image_id: str, extension: str) -> str:

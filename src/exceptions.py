@@ -195,6 +195,12 @@ class AIServiceException(AppException):
     message = "The AI service is temporarily unavailable"
 
 
+class AIProviderException(AppException):
+    status_code = 503
+    error_code = "AI_PROVIDER_ERROR"
+    message = "The AI provider returned an error or is not configured"
+
+
 class StorageException(AppException):
     status_code = 503
     error_code = "STORAGE_ERROR"
