@@ -44,7 +44,11 @@ celery_app = Celery(
     "aiderm_cliniq",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["src.workers.tasks.analysis", "src.workers.tasks.questions"],
+    include=[
+        "src.workers.tasks.analysis",
+        "src.workers.tasks.questions",
+        "src.workers.tasks.reports",
+    ],
 )
 
 celery_app.conf.update(
