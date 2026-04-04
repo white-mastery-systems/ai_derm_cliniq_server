@@ -57,8 +57,8 @@ def include_all_routers(app: FastAPI) -> None:
     app.include_router(images_router, prefix="/api/v1/cases/{case_id}/images", tags=["Images"])
 
     # Conversations — /api/v1/cases/{case_id}/chat
-    # from src.conversations.controller import router as conv_router
-    # app.include_router(conv_router, prefix="/api/v1/cases", tags=["Conversations"])
+    from src.conversations.controller import router as conv_router
+    app.include_router(conv_router, prefix="/api/v1/cases/{case_id}/chat", tags=["Conversations"])
 
     # AI Analysis — /api/v1/cases/{case_id}/ai
     from src.ai.controller import router as ai_router
