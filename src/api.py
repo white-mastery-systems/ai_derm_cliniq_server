@@ -76,6 +76,14 @@ def include_all_routers(app: FastAPI) -> None:
     from src.reports.controller import router as reports_router
     app.include_router(reports_router, prefix="/api/v1/cases/{case_id}", tags=["Reports"])
 
+    # Todos — /api/v1/cases/{case_id}/todos
+    from src.todos.controller import router as todos_router
+    app.include_router(todos_router, prefix="/api/v1/cases/{case_id}/todos", tags=["Todos"])
+
+    # Entities (SNOMED) — /api/v1/cases/{case_id}/entities
+    from src.entities.controller import router as entities_router
+    app.include_router(entities_router, prefix="/api/v1/cases/{case_id}", tags=["Entities"])
+
     # Admin — /api/v1/admin
     from src.admin.controller import router as admin_router
     app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])

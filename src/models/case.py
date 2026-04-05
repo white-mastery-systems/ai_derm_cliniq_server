@@ -288,6 +288,12 @@ class Case(TimestampMixin, Base):
         back_populates="case",
         cascade="all, delete-orphan",
     )
+    todos: Mapped[list["Todo"]] = relationship(  # noqa: F821
+        "Todo",
+        back_populates="case",
+        cascade="all, delete-orphan",
+        order_by="Todo.created_at",
+    )
 
     def __repr__(self) -> str:
         return (

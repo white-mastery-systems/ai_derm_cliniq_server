@@ -35,6 +35,7 @@ from src.models.patient_profile import PatientProfile
 from src.models.qr_token import QRToken
 from src.models.refresh_token import RefreshToken
 from src.models.snomed_mapping import SnomedMapping
+from src.models.todo import Todo
 from src.models.user import User, UserRole
 from src.models.visual_description import VisualDescription
 
@@ -69,4 +70,6 @@ __all__ = [
     "SnomedMapping",
     "QRToken",
     "RefreshToken",
+    # Todos
+    "Todo",
 ]

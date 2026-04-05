@@ -530,7 +530,7 @@ class TestSnomedMapping:
     async def test_snomed_insert(self, db_session: AsyncSession):
         mapping = SnomedMapping(
             id=new_uuid(),
-            diagnosis_text="Psoriasis",
+            diagnosis_text="__test_model_psoriasis__",
             snomed_code="9014002",
             snomed_term="Psoriasis (disorder)",
         )
@@ -538,14 +538,14 @@ class TestSnomedMapping:
         await db_session.flush()
 
         result = await db_session.execute(
-            select(SnomedMapping).where(SnomedMapping.diagnosis_text == "Psoriasis")
+            select(SnomedMapping).where(SnomedMapping.diagnosis_text == "__test_model_psoriasis__")
         )
         fetched = result.scalar_one()
         assert fetched.snomed_code == "9014002"
 
     async def test_diagnosis_text_unique(self, db_session: AsyncSession):
-        m1 = SnomedMapping(id=new_uuid(), diagnosis_text="Eczema")
-        m2 = SnomedMapping(id=new_uuid(), diagnosis_text="Eczema")
+        m1 = SnomedMapping(id=new_uuid(), diagnosis_text="__test_model_eczema__")
+        m2 = SnomedMapping(id=new_uuid(), diagnosis_text="__test_model_eczema__")
         db_session.add(m1)
         await db_session.flush()
 
