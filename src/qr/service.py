@@ -53,6 +53,7 @@ from src.models.case import AiStatus, Case
 from src.models.qr_token import QRToken
 from src.models.user import User, UserRole
 from src.qr.schemas import GenerateQRRequest, QRScanResponse, QRTokenResponse
+from src.workers.tasks.email import send_visit_email_task
 
 logger = get_logger(__name__)
 
@@ -102,6 +103,13 @@ async def generate_qr(
     db.add(qr_token)
 
     logger.info("qr_generated", case_id=request.case_id, expires_at=expires_at)
+
+    # Fire-and-forget: send visit summary email with QR code attachment
+    try:
+        send_visit_email_task.delay(request.case_id, token_value)
+    except Exception as exc:
+        # Redis may be unavailable in dev — log and continue, never block QR generation
+        logger.warning("email_task_enqueue_failed", case_id=request.case_id, error=str(exc))
 
     return QRTokenResponse(
         token=token_value,

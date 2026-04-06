@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     GMAIL_USER: str = ""
     GMAIL_APP_PASSWORD: str = ""
+    FRONTEND_URL: str = "https://aidermcliniq.com"   # Base URL embedded in visit emails
 
     # ------------------------------------------------------------------ #
     # CORS
