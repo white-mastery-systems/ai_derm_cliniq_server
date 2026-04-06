@@ -476,3 +476,119 @@ class TestDoctorStats:
             "/api/v1/cases/doctors/me/stats", headers=auth_header(token)
         )
         assert resp.status_code == 403
+
+
+# ================================================================== #
+# POST /api/v1/cases/{case_id}/consent
+# ================================================================== #
+
+class TestConsentEndpoint:
+
+    async def test_patient_can_give_consent(self, db_app_client: AsyncClient):
+        token, _ = await register_and_login_patient(db_app_client, "con01")
+        case_resp = await db_app_client.post(
+            "/api/v1/cases", headers=auth_header(token), json=case_payload()
+        )
+        case_id = case_resp.json()["id"]
+
+        resp = await db_app_client.post(
+            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["consent_given"] is True
+        assert body["already_given"] is False
+        assert body["consent_given_at"] is not None
+        assert body["case_id"] == case_id
+
+    async def test_consent_is_idempotent(self, db_app_client: AsyncClient):
+        """Calling consent twice returns already_given=True on second call."""
+        token, _ = await register_and_login_patient(db_app_client, "con02")
+        case_resp = await db_app_client.post(
+            "/api/v1/cases", headers=auth_header(token), json=case_payload()
+        )
+        case_id = case_resp.json()["id"]
+
+        first = await db_app_client.post(
+            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
+        )
+        second = await db_app_client.post(
+            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
+        )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["already_given"] is False
+        assert second.json()["already_given"] is True
+        # Timestamp must not change on second call
+        # Strip trailing Z/+00:00 before comparing — SQLite round-trips
+        # timezone-aware datetimes as naive strings on the second read.
+        first_ts = first.json()["consent_given_at"].rstrip("Z").rstrip("+00:00")
+        second_ts = second.json()["consent_given_at"].rstrip("Z").rstrip("+00:00")
+        assert first_ts == second_ts
+
+    async def test_consent_is_reflected_in_case_detail(self, db_app_client: AsyncClient):
+        """After giving consent, GET /cases/{id} shows consent_given=True."""
+        token, _ = await register_and_login_patient(db_app_client, "con03")
+        case_resp = await db_app_client.post(
+            "/api/v1/cases", headers=auth_header(token), json=case_payload()
+        )
+        case_id = case_resp.json()["id"]
+        assert case_resp.json()["consent_given"] is False
+
+        await db_app_client.post(
+            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
+        )
+
+        detail = await db_app_client.get(
+            f"/api/v1/cases/{case_id}", headers=auth_header(token)
+        )
+        assert detail.json()["consent_given"] is True
+        assert detail.json()["consent_given_at"] is not None
+
+    async def test_other_patient_cannot_give_consent(self, db_app_client: AsyncClient):
+        """Another patient cannot give consent for someone else's case."""
+        token_a, _ = await register_and_login_patient(db_app_client, "con04a")
+        token_b, _ = await register_and_login_patient(db_app_client, "con04b")
+
+        case_resp = await db_app_client.post(
+            "/api/v1/cases", headers=auth_header(token_a), json=case_payload()
+        )
+        case_id = case_resp.json()["id"]
+
+        resp = await db_app_client.post(
+            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token_b)
+        )
+        assert resp.status_code == 404
+
+    async def test_doctor_cannot_give_patient_consent(self, db_app_client: AsyncClient):
+        """Doctors cannot call the consent endpoint."""
+        p_token, _ = await register_and_login_patient(db_app_client, "con05p")
+        d_token, _ = await register_and_login_doctor(db_app_client, "con05d")
+
+        case_resp = await db_app_client.post(
+            "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
+        )
+        case_id = case_resp.json()["id"]
+
+        resp = await db_app_client.post(
+            f"/api/v1/cases/{case_id}/consent", headers=auth_header(d_token)
+        )
+        assert resp.status_code == 403
+
+    async def test_unauthenticated_consent_returns_401(self, db_app_client: AsyncClient):
+        token, _ = await register_and_login_patient(db_app_client, "con06")
+        case_resp = await db_app_client.post(
+            "/api/v1/cases", headers=auth_header(token), json=case_payload()
+        )
+        case_id = case_resp.json()["id"]
+
+        resp = await db_app_client.post(f"/api/v1/cases/{case_id}/consent")
+        assert resp.status_code == 401
+
+    async def test_consent_for_nonexistent_case_returns_404(self, db_app_client: AsyncClient):
+        token, _ = await register_and_login_patient(db_app_client, "con07")
+        resp = await db_app_client.post(
+            "/api/v1/cases/nonexistent-case-id/consent", headers=auth_header(token)
+        )
+        assert resp.status_code == 404

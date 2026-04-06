@@ -167,3 +167,18 @@ class DoctorStatsResponse(BaseModel):
     in_progress: int
     completed_today: int
     total_assigned: int
+
+
+class ConsentResponse(BaseModel):
+    """
+    POST /api/v1/cases/{case_id}/consent
+
+    Returned after the patient records consent.
+    already_given=True means the call was a no-op (idempotent).
+    """
+    case_id: str
+    consent_given: bool
+    consent_given_at: datetime
+    already_given: bool = Field(
+        description="True if consent was already recorded before this call"
+    )

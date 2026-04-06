@@ -21,6 +21,7 @@ FLOW
 """
 
 from fastapi import APIRouter, Depends, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.dependencies import get_current_user, require_patient
@@ -31,6 +32,7 @@ from src.conversations.schemas import (
     QuestionsGeneratedResponse,
     SubmitAnswersRequest,
 )
+from src.conversations.stream import chat_stream_generator
 from src.database.core import get_async_session
 from src.models.user import User
 
@@ -78,3 +80,45 @@ async def get_history(
     db: AsyncSession = Depends(get_async_session),
 ) -> ConversationHistoryResponse:
     return await service.get_history(db, user, case_id)
+
+
+@router.get(
+    "/stream",
+    summary="Real-time SSE stream for chat events",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "description": "Server-Sent Events stream",
+            "content": {"text/event-stream": {}},
+        }
+    },
+)
+async def stream_chat(
+    case_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> StreamingResponse:
+    """
+    Open a persistent SSE connection to receive real-time chat events.
+
+    Events emitted:
+    - **status_update** — ai_status changed (pending → processing → completed)
+    - **questions_ready** — AI questions appeared for the current round
+    - **round_complete** — Patient answers recorded, new round starting
+    - **conversation_complete** — All rounds done, case summary ready
+    - **ping** — Heartbeat every 15 seconds (keep-alive)
+    - **error** — Fatal error or stream timeout (5 minutes)
+
+    The Flutter app opens this once after triggering analysis and keeps
+    it open until `conversation_complete` or `error` is received.
+    Answers are submitted via the existing `POST /answers` endpoint — not
+    via this stream.
+    """
+    return StreamingResponse(
+        chat_stream_generator(db, case_id, user),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disable nginx buffering
+        },
+    )

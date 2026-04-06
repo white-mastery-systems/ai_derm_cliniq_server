@@ -84,7 +84,17 @@ def auth_header(token: str) -> dict:
 
 
 def fake_jpeg() -> bytes:
-    return b"\xff\xd8\xff\xe0" + b"\x00" * 100
+    """Real JPEG that passes image quality checks (brightness, sharpness, size)."""
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (400, 400), color=(200, 200, 200))
+    draw = ImageDraw.Draw(img)
+    for x in range(0, 400, 20):
+        draw.line([(x, 0), (x, 400)], fill=(20, 20, 20), width=2)
+    for y in range(0, 400, 20):
+        draw.line([(0, y), (400, y)], fill=(20, 20, 20), width=2)
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 def gcs_patches():

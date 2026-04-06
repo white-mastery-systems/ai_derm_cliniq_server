@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import NullPool
 
-from src.ai import gemini_client
+from src.ai.llm_router import call_llm, extract_json
 from src.ai.prompts.doctor_review_prompts import DoctorReviewPrompts
 from src.config import settings
 from src.exceptions import AIProviderException
@@ -400,8 +400,8 @@ def generate_report_task(self, case_id: str) -> None:
                     age=age,
                     sex=sex,
                 )
-                response_text = gemini_client.call_gemini(prompt)
-                parsed = gemini_client.extract_json(response_text)
+                response_text = call_llm(prompt)
+                parsed = extract_json(response_text)
                 summary_data = parsed.get("summary", {})
             except (AIProviderException, Exception) as exc:
                 # Non-fatal — report is still generated without AI summary

@@ -94,6 +94,12 @@ class TooManyImagesException(AppException):
     message = "Case already has the maximum number of images"
 
 
+class ImageQualityException(AppException):
+    status_code = 400
+    error_code = "IMAGE_QUALITY_FAILED"
+    message = "Image did not pass quality checks"
+
+
 # ------------------------------------------------------------------ #
 # 401 Unauthorized
 # ------------------------------------------------------------------ #

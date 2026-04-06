@@ -99,8 +99,23 @@ async def create_case_with_consent(client: AsyncClient, token: str) -> str:
 
 
 def fake_jpeg() -> bytes:
-    """Minimal JPEG-like bytes for upload tests."""
-    return b"\xff\xd8\xff\xe0" + b"\x00" * 100  # JPEG magic bytes + padding
+    """
+    Generate a real JPEG that passes image quality checks.
+
+    Uses Pillow to create a sharp 400×400 grid image — bright enough,
+    sharp enough, and the right size to pass brightness, blur, and
+    dimension checks in src/images/quality.py.
+    """
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (400, 400), color=(200, 200, 200))
+    draw = ImageDraw.Draw(img)
+    for x in range(0, 400, 20):
+        draw.line([(x, 0), (x, 400)], fill=(20, 20, 20), width=2)
+    for y in range(0, 400, 20):
+        draw.line([(0, y), (400, y)], fill=(20, 20, 20), width=2)
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 def gcs_patches():

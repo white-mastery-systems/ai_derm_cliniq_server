@@ -38,10 +38,12 @@ from src.exceptions import (
     CaseNotFoundException,
     ForbiddenException,
     ImageNotFoundException,
+    ImageQualityException,
     InvalidFileTypeException,
     FileTooLargeException,
     TooManyImagesException,
 )
+from src.images.quality import validate_image_quality
 from src.images.schemas import ImageListResponse, ImageResponse
 from src.logger import get_logger
 from src.models.base import new_uuid
@@ -117,7 +119,8 @@ async def upload_image(
     2. Consent given
     3. MIME type allowed
     4. File size ≤ limit
-    5. Image count < max
+    5. Image quality (brightness, sharpness, min dimensions)
+    6. Image count < max
 
     Raises:
         CaseNotFoundException     — case not found or not owned by patient
@@ -158,7 +161,10 @@ async def upload_image(
                     f"exceeds limit of {settings.MAX_IMAGE_SIZE_MB} MB"
         )
 
-    # 5. Image count limit
+    # 5. Image quality validation (brightness, sharpness, min dimensions)
+    validate_image_quality(raw_bytes, filename=file.filename or "")
+
+    # 6. Image count limit
     count_result = await db.execute(
         select(func.count()).where(CaseImage.case_id == case_id)
     )

@@ -184,6 +184,53 @@ async def create_case(
 
 
 # ------------------------------------------------------------------ #
+# Consent
+# ------------------------------------------------------------------ #
+
+async def give_consent(
+    db: AsyncSession,
+    patient: User,
+    case_id: str,
+) -> "ConsentResponse":
+    """
+    Record that the patient has given informed consent for this case.
+
+    Idempotent: if consent was already given, returns already_given=True
+    without modifying the timestamp (preserves the original consent record).
+
+    Only the patient who owns the case can give consent.
+
+    Raises:
+        CaseNotFoundException — case not found or not owned by patient
+    """
+    from src.cases.schemas import ConsentResponse
+
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+
+    if case is None or case.patient_id != patient.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    already_given = case.consent_given
+
+    if not already_given:
+        now = datetime.now(tz=timezone.utc)
+        case.consent_given = True
+        case.consent_given_at = now
+        await db.flush()
+        logger.info("consent_recorded", case_id=case_id, patient_id=patient.id)
+    else:
+        logger.info("consent_already_given", case_id=case_id, patient_id=patient.id)
+
+    return ConsentResponse(
+        case_id=case_id,
+        consent_given=True,
+        consent_given_at=case.consent_given_at,
+        already_given=already_given,
+    )
+
+
+# ------------------------------------------------------------------ #
 # List
 # ------------------------------------------------------------------ #
 

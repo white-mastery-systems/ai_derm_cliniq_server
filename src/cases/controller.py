@@ -26,6 +26,7 @@ from src.cases.schemas import (
     CaseCreateRequest,
     CaseResponse,
     CaseUpdateRequest,
+    ConsentResponse,
     DoctorStatsResponse,
     PaginatedCasesResponse,
 )
@@ -118,6 +119,27 @@ async def delete_case(
     db: AsyncSession = Depends(get_async_session),
 ) -> None:
     await service.soft_delete_case(db, user, case_id)
+
+
+@router.post(
+    "/{case_id}/consent",
+    response_model=ConsentResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Patient records informed consent for a case",
+)
+async def give_consent(
+    case_id: str,
+    patient: User = Depends(require_patient),
+    db: AsyncSession = Depends(get_async_session),
+) -> ConsentResponse:
+    """
+    Record that the patient has read and accepted the consent terms.
+
+    Must be called before images can be uploaded to this case.
+    Idempotent — safe to call multiple times; returns already_given=True
+    if consent was already recorded.
+    """
+    return await service.give_consent(db, patient, case_id)
 
 
 @router.patch(

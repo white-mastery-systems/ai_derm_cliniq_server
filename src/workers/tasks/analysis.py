@@ -55,7 +55,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from src.ai import gemini_client
+from src.ai.llm_router import call_llm, extract_json
 from src.ai.prompts.image_analysis_prompts import ImageAnalysisPrompts
 from src.config import settings
 from src.exceptions import AIProviderException, StorageException
@@ -206,11 +206,11 @@ def inspect_images_task(self, case_id: str) -> str:
                     await _fail_case(session, case_id, f"Could not download image: {exc}")
                 raise Ignore() from exc
 
-        # Call Gemini inspect gate
+        # Call LLM inspect gate (with automatic fallback)
         try:
             prompt = ImageAnalysisPrompts.inspect_images()
-            response_text = gemini_client.call_gemini(prompt, images=image_bytes)
-            result = gemini_client.extract_json(response_text)
+            response_text = call_llm(prompt, images=image_bytes)
+            result = extract_json(response_text)
         except AIProviderException as exc:
             async with factory() as session:
                 await _fail_case(session, case_id, f"AI provider error: {exc}")
@@ -288,25 +288,25 @@ def analyse_images_task(self, case_id: str) -> dict:
                     await _fail_case(session, case_id, f"Could not download image: {exc}")
                 raise Ignore() from exc
 
-        # Call Gemini: visual description
+        # Call LLM: visual description (with automatic fallback)
         try:
             desc_prompt = ImageAnalysisPrompts.get_description().format(
                 personal_particulars=personal_particulars
             )
-            desc_text = gemini_client.call_gemini(desc_prompt, images=image_bytes)
-            description_json = gemini_client.extract_json(desc_text)
+            desc_text = call_llm(desc_prompt, images=image_bytes)
+            description_json = extract_json(desc_text)
         except AIProviderException as exc:
             async with factory() as session:
                 await _fail_case(session, case_id, f"Description AI call failed: {exc}")
             raise Ignore() from exc
 
-        # Call Gemini: first differential
+        # Call LLM: first differential (with automatic fallback)
         try:
             diag_prompt = ImageAnalysisPrompts.generate_first_differential().format(
                 personal_particulars=personal_particulars
             )
-            diag_text = gemini_client.call_gemini(diag_prompt, images=image_bytes)
-            diagnosis_json = gemini_client.extract_json(diag_text)
+            diag_text = call_llm(diag_prompt, images=image_bytes)
+            diagnosis_json = extract_json(diag_text)
         except AIProviderException as exc:
             async with factory() as session:
                 await _fail_case(session, case_id, f"Differential AI call failed: {exc}")
