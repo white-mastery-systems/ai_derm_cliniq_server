@@ -136,6 +136,12 @@ class InsufficientRoleException(AppException):
     message = "Your role does not allow this action"
 
 
+class DoctorPendingApprovalException(AppException):
+    status_code = 403
+    error_code = "DOCTOR_PENDING_APPROVAL"
+    message = "Your doctor account is pending admin approval. You will be notified once approved."
+
+
 # ------------------------------------------------------------------ #
 # 404 Not Found
 # ------------------------------------------------------------------ #

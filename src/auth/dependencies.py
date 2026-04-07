@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.auth.jwt import decode_access_token
 from src.database.core import get_async_session
 from src.exceptions import (
+    DoctorPendingApprovalException,
     InsufficientRoleException,
     InvalidTokenException,
     UnauthorizedException,
@@ -152,7 +153,12 @@ async def require_patient(user: User = Depends(get_current_user)) -> User:
 
 async def require_doctor(user: User = Depends(get_current_user)) -> User:
     """
-    Dependency: route is only accessible to DOCTOR-role users.
+    Dependency: route is only accessible to DOCTOR-role users who have been
+    approved by an admin (is_verified=True).
+
+    Unverified doctors receive 403 DOCTOR_PENDING_APPROVAL — not a role error.
+    This tells the Flutter app to show a "pending approval" screen instead of
+    a generic "insufficient role" error.
 
     Usage:
         @router.post("/cases/{case_id}/review")
@@ -163,6 +169,8 @@ async def require_doctor(user: User = Depends(get_current_user)) -> User:
         raise InsufficientRoleException(
             message="This endpoint requires the 'doctor' role"
         )
+    if not user.is_verified:
+        raise DoctorPendingApprovalException()
     return user
 
 

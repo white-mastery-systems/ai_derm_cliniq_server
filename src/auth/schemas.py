@@ -176,10 +176,21 @@ class UserResponse(BaseModel):
 
 class RegisterResponse(BaseModel):
     """
-    POST /api/v1/auth/register/* response.
-    Includes tokens so the user is logged in immediately after registration.
+    POST /api/v1/auth/register/patient response.
+    Includes tokens so the patient is logged in immediately after registration.
     """
     user: UserResponse
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+
+
+class DoctorRegisterResponse(BaseModel):
+    """
+    POST /api/v1/auth/register/doctor response.
+
+    Doctors are NOT logged in immediately — they must wait for admin approval.
+    No tokens are issued. The Flutter app should show a "pending approval" screen.
+    """
+    user: UserResponse
+    message: str = "Registration successful. Your account is pending admin approval. You will be able to log in once an admin verifies your account."

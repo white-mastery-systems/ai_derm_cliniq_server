@@ -191,16 +191,18 @@ async def register_patient(
 async def register_doctor(
     db: AsyncSession,
     request: DoctorRegisterRequest,
-) -> tuple[User, TokenResponse]:
+) -> User:
     """
-    Create a new doctor account.
+    Create a new doctor account — pending admin approval.
 
     Steps:
     1. Check email uniqueness
-    2. Create User row (DOCTOR role)
+    2. Create User row (DOCTOR role, is_verified=False)
     3. Create DoctorProfile row
-    4. Issue refresh token
-    5. Return (user, token_response)
+    4. Return User — NO tokens issued until admin approves
+
+    The doctor cannot log in until an admin sets is_verified=True via
+    PATCH /api/v1/admin/users/{user_id}.
 
     Raises:
         EmailAlreadyRegisteredException — if email is taken
@@ -209,15 +211,15 @@ async def register_doctor(
     if await _get_user_by_email(db, request.email):
         raise EmailAlreadyRegisteredException()
 
-    # 2. Create User
+    # 2. Create User (is_active=False until admin approves)
     hashed_pw = await asyncio.to_thread(hash_password, request.password)
     user = User(
         email=request.email,
         full_name=request.full_name,
         role=UserRole.DOCTOR,
         password_hash=hashed_pw,
-        is_active=True,
-        is_verified=False,
+        is_active=False,      # Cannot log in until admin activates
+        is_verified=False,    # Cannot access doctor endpoints until admin verifies
     )
     db.add(user)
     await db.flush()
@@ -232,13 +234,9 @@ async def register_doctor(
     )
     db.add(profile)
 
-    # 4. Issue refresh token
-    raw_refresh = generate_refresh_token()
-    await _create_refresh_token_row(db, user.id, raw_refresh)
+    logger.info("doctor_registered_pending_approval", user_id=user.id, email=user.email)
 
-    logger.info("doctor_registered", user_id=user.id, email=user.email)
-
-    return user, _build_token_response(user, raw_refresh)
+    return user
 
 
 # ------------------------------------------------------------------ #
@@ -436,7 +434,10 @@ async def google_auth(
             )
         else:
             # 3b. Brand new user — create account
-            resolved_role = UserRole(role) if role in UserRole._value2member_map_ else UserRole.PATIENT
+            # Only patient and doctor are allowed via OAuth — never admin.
+            # Explicitly whitelist to prevent role escalation attacks.
+            _allowed_oauth_roles = {UserRole.PATIENT.value, UserRole.DOCTOR.value}
+            resolved_role = UserRole(role) if role in _allowed_oauth_roles else UserRole.PATIENT
             user = User(
                 email=google_info.email,
                 full_name=google_info.full_name,

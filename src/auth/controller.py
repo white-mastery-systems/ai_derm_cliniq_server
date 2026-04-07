@@ -30,12 +30,13 @@ STATUS CODES
 204 No Content → logout (success, nothing to return)
 """
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth import service
 from src.auth.schemas import (
     DoctorRegisterRequest,
+    DoctorRegisterResponse,
     GoogleAuthRequest,
     LoginRequest,
     LogoutRequest,
@@ -46,6 +47,7 @@ from src.auth.schemas import (
     UserResponse,
 )
 from src.database.core import get_async_session
+from src.rate_limiting import limiter
 
 router = APIRouter()
 
@@ -65,11 +67,13 @@ router = APIRouter()
         "updated later via PATCH /users/me."
     ),
 )
+@limiter.limit("5/minute")
 async def register_patient(
-    request: PatientRegisterRequest,
+    request: Request,  # noqa: ARG001 — required by slowapi for rate limiting
+    body: PatientRegisterRequest,
     db: AsyncSession = Depends(get_async_session),
 ) -> RegisterResponse:
-    user, tokens, patient_code = await service.register_patient(db, request)
+    user, tokens, patient_code = await service.register_patient(db, body)
     return RegisterResponse(
         user=UserResponse(
             id=user.id,
@@ -88,20 +92,24 @@ async def register_patient(
 
 @router.post(
     "/register/doctor",
-    response_model=RegisterResponse,
+    response_model=DoctorRegisterResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new doctor account",
     description=(
-        "Creates a doctor account and returns auth tokens. "
-        "Specialization and license number are optional at registration."
+        "Submits a doctor registration request. "
+        "The account is created in a pending state — no tokens are issued. "
+        "An admin must approve the account via PATCH /api/v1/admin/users/{user_id} "
+        "before the doctor can log in."
     ),
 )
+@limiter.limit("5/minute")
 async def register_doctor(
-    request: DoctorRegisterRequest,
+    request: Request,  # noqa: ARG001 — required by slowapi for rate limiting
+    body: DoctorRegisterRequest,
     db: AsyncSession = Depends(get_async_session),
-) -> RegisterResponse:
-    user, tokens = await service.register_doctor(db, request)
-    return RegisterResponse(
+) -> DoctorRegisterResponse:
+    user = await service.register_doctor(db, body)
+    return DoctorRegisterResponse(
         user=UserResponse(
             id=user.id,
             email=user.email,
@@ -110,9 +118,6 @@ async def register_doctor(
             is_active=user.is_active,
             is_verified=user.is_verified,
         ),
-        access_token=tokens.access_token,
-        refresh_token=tokens.refresh_token,
-        token_type=tokens.token_type,
     )
 
 
@@ -130,11 +135,13 @@ async def register_doctor(
         "refresh token (30 days). Works for all roles (patient/doctor/admin)."
     ),
 )
+@limiter.limit("10/minute")
 async def login(
-    request: LoginRequest,
+    request: Request,  # noqa: ARG001 — required by slowapi for rate limiting  # noqa: ARG001
+    body: LoginRequest,
     db: AsyncSession = Depends(get_async_session),
 ) -> TokenResponse:
-    return await service.login(db, request)
+    return await service.login(db, body)
 
 
 # ------------------------------------------------------------------ #
