@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: dependency builder ───────────────────────────────────────────────
-FROM python:3.12-slim AS builder
+FROM python:3.11.15-slim AS builder
 
 WORKDIR /build
 
@@ -23,7 +23,7 @@ RUN pip install --upgrade pip \
 
 
 # ── Stage 2: runtime image ────────────────────────────────────────────────────
-FROM python:3.12-slim AS runtime
+FROM python:3.11.15-slim AS runtime
 
 # Non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
