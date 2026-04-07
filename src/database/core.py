@@ -75,11 +75,6 @@ def _build_engine() -> AsyncEngine:
        inside a function lets us detect the database type and pass only
        the arguments that are appropriate.
 
-    pool_pre_ping=True (PostgreSQL only):
-        Before giving a connection from the pool to a session, SQLAlchemy
-        sends a lightweight SELECT 1 to confirm the connection is alive.
-        Prevents "connection closed" errors after PostgreSQL restarts.
-
     pool_size / max_overflow (PostgreSQL only):
         Keep up to 10 persistent connections.
         Allow 20 extra overflow connections during traffic spikes.
@@ -105,7 +100,6 @@ def _build_engine() -> AsyncEngine:
 
     return create_async_engine(
         db_url,
-        pool_pre_ping=True,
         pool_size=10,
         max_overflow=20,
         echo=settings.DEBUG,
@@ -167,7 +161,7 @@ async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 # ------------------------------------------------------------------ #
-# Health Check Helper
+# Health Check Helpers
 # ------------------------------------------------------------------ #
 async def check_database_connection() -> bool:
     """
@@ -180,5 +174,29 @@ async def check_database_connection() -> bool:
         async with AsyncSessionFactory() as session:
             await session.execute(text("SELECT 1"))
         return True
+    except Exception:
+        return False
+
+
+async def check_redis_connection() -> bool:
+    """
+    Ping Redis. Used by the /health endpoint.
+    Returns True if Redis is reachable and authenticated, False otherwise.
+    """
+    import asyncio
+
+    import redis as redis_lib
+
+    from src.config import settings
+
+    def _ping() -> bool:
+        client = redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+        try:
+            return client.ping()
+        finally:
+            client.close()
+
+    try:
+        return await asyncio.to_thread(_ping)
     except Exception:
         return False

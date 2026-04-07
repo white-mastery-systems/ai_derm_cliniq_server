@@ -27,6 +27,7 @@ logout             → revoke a single RefreshToken row
 google_auth        → verify Google ID token, upsert User + profile, return tokens
 """
 
+import asyncio
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -155,11 +156,14 @@ async def register_patient(
         raise EmailAlreadyRegisteredException()
 
     # 2. Create User
+    # hash_password is synchronous bcrypt (~400ms) — run in thread pool so the
+    # event loop stays free to handle other requests while hashing completes.
+    hashed_pw = await asyncio.to_thread(hash_password, request.password)
     user = User(
         email=request.email,
         full_name=request.full_name,
         role=UserRole.PATIENT,
-        password_hash=hash_password(request.password),
+        password_hash=hashed_pw,
         is_active=True,
         is_verified=False,
     )
@@ -206,11 +210,12 @@ async def register_doctor(
         raise EmailAlreadyRegisteredException()
 
     # 2. Create User
+    hashed_pw = await asyncio.to_thread(hash_password, request.password)
     user = User(
         email=request.email,
         full_name=request.full_name,
         role=UserRole.DOCTOR,
-        password_hash=hash_password(request.password),
+        password_hash=hashed_pw,
         is_active=True,
         is_verified=False,
     )
@@ -265,7 +270,8 @@ async def login(db: AsyncSession, request: LoginRequest) -> TokenResponse:
     if not user or not user.password_hash:
         raise InvalidCredentialsException()
 
-    if not verify_password(request.password, user.password_hash):
+    is_valid = await asyncio.to_thread(verify_password, request.password, user.password_hash)
+    if not is_valid:
         raise InvalidCredentialsException()
 
     if not user.is_active:

@@ -40,6 +40,7 @@ Once running, visit:
     http://localhost:8000/redoc  ← ReDoc (read-only, clean)
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -51,7 +52,7 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from src.api import include_all_routers
 from src.config import settings
-from src.database.core import check_database_connection, engine
+from src.database.core import check_database_connection, check_redis_connection, engine
 from src.exceptions import register_exception_handlers
 from src.logger import get_logger, setup_logging
 from src.middleware import RequestIDMiddleware, TimingMiddleware
@@ -164,13 +165,18 @@ def create_app() -> FastAPI:
     # container is alive. No auth required.
     @app.get("/health", tags=["Health"], summary="Health check")
     async def health_check() -> dict:
-        db_ok = await check_database_connection()
+        db_ok, redis_ok = await asyncio.gather(
+            check_database_connection(),
+            check_redis_connection(),
+        )
+        all_ok = db_ok and redis_ok
         return {
-            "status": "healthy" if db_ok else "degraded",
+            "status": "healthy" if all_ok else "degraded",
             "app": settings.APP_NAME,
             "version": settings.APP_VERSION,
             "environment": settings.APP_ENV,
             "database": "ok" if db_ok else "unreachable",
+            "redis": "ok" if redis_ok else "unreachable",
         }
 
     return app
