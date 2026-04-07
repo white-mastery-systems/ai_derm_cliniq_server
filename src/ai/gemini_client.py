@@ -39,18 +39,21 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Model used for all dermatology analysis tasks.
-# gemini-2.0-flash: fast + vision-capable + cost-efficient for structured JSON.
-_MODEL_NAME = "gemini-2.0-flash"
-
 
 def _get_model():
     """
     Build and return a configured GenerativeModel.
 
+    Model name is resolved at call time from the registry:
+        Redis override  →  settings.GEMINI_MODEL  →  "gemini-2.0-flash"
+
+    This means the admin panel can change the model without a restart.
     Raises AIProviderException if GEMINI_API_KEY is not set.
-    Called per-request (not cached) — the SDK itself manages connection pooling.
     """
+    # Import here to avoid circular imports at module load time
+    from src.ai.model_registry import get_gemini_model
+    model_name = get_gemini_model()
+
     if not settings.GEMINI_API_KEY:
         raise AIProviderException(
             message="GEMINI_API_KEY is not configured. Set it in .env to enable AI analysis."
@@ -58,7 +61,7 @@ def _get_model():
     try:
         import google.generativeai as genai
         genai.configure(api_key=settings.GEMINI_API_KEY)
-        return genai.GenerativeModel(_MODEL_NAME)
+        return genai.GenerativeModel(model_name), model_name
     except ImportError:
         raise AIProviderException(
             message="google-generativeai package not installed. Run: pip install google-generativeai"
@@ -85,7 +88,7 @@ def call_gemini(prompt: str, images: list[bytes] | None = None) -> str:
     ------
     AIProviderException — API key missing, SDK not installed, or call failed
     """
-    model = _get_model()
+    model, model_name = _get_model()
 
     try:
         import google.generativeai as genai
@@ -110,7 +113,7 @@ def call_gemini(prompt: str, images: list[bytes] | None = None) -> str:
         text = response.text
         logger.info(
             "gemini_call_ok",
-            model=_MODEL_NAME,
+            model=model_name,
             has_images=bool(images),
             image_count=len(images) if images else 0,
             response_length=len(text),

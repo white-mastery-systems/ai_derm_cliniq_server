@@ -45,8 +45,10 @@ from src.admin.schemas import (
     AdminUserDetail,
     AdminUserItem,
     AdminStatsResponse,
+    AiSettingsResponse,
     PaginatedAdminCasesResponse,
     PaginatedAdminUsersResponse,
+    UpdateAiSettingsRequest,
 )
 from src.exceptions import BadRequestException, UserNotFoundException
 from src.logger import get_logger
@@ -304,6 +306,72 @@ async def list_cases(
         page=page,
         page_size=page_size,
     )
+
+
+# ================================================================== #
+# AI Settings
+# ================================================================== #
+
+async def get_ai_settings() -> AiSettingsResponse:
+    """
+    Return the current effective AI model configuration.
+
+    Shows both the live values (Redis override or .env default)
+    and what the .env defaults are — so the admin can see at a glance
+    whether any runtime overrides are active.
+    """
+    from src.ai import model_registry
+    from src.config import settings
+
+    live = await model_registry.async_get_all()
+
+    return AiSettingsResponse(
+        gemini_model=live["gemini_model"],
+        openai_model=live["openai_model"],
+        deepseek_model=live["deepseek_model"],
+        default_provider=live["default_provider"],
+        env_defaults={
+            "gemini_model":     settings.GEMINI_MODEL,
+            "openai_model":     settings.OPENAI_MODEL,
+            "deepseek_model":   settings.DEEPSEEK_MODEL,
+            "default_provider": settings.DEFAULT_LLM_PROVIDER,
+        },
+    )
+
+
+async def update_ai_settings(request: UpdateAiSettingsRequest) -> AiSettingsResponse:
+    """
+    Apply runtime AI model overrides. Each field is optional.
+
+    - Sending a string value sets a Redis override → takes effect immediately
+      for ALL processes (API server + Celery workers).
+    - Sending null resets that setting to the .env default (deletes Redis key).
+
+    Returns the new effective configuration after applying changes.
+    """
+    from src.ai import model_registry
+
+    mapping = {
+        "gemini_model":    request.gemini_model,
+        "openai_model":    request.openai_model,
+        "deepseek_model":  request.deepseek_model,
+        "default_provider": request.default_provider,
+    }
+
+    for key, value in mapping.items():
+        if value is not None:
+            await model_registry.async_set_ai_setting(key, value)
+            logger.info("admin_ai_setting_updated", key=key, value=value)
+        # None means "not sent" — we don't reset unless explicitly set to null.
+        # (Pydantic treats missing fields and null differently via model_fields_set)
+
+    # Reset fields explicitly set to null by the caller
+    for key in request.model_fields_set:
+        if getattr(request, key) is None:
+            await model_registry.async_reset_ai_setting(key)
+            logger.info("admin_ai_setting_reset", key=key)
+
+    return await get_ai_settings()
 
 
 # ================================================================== #

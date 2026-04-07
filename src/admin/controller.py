@@ -26,8 +26,10 @@ from src.admin.schemas import (
     AdminStatsResponse,
     AdminUpdateUserRequest,
     AdminUserDetail,
+    AiSettingsResponse,
     PaginatedAdminCasesResponse,
     PaginatedAdminUsersResponse,
+    UpdateAiSettingsRequest,
 )
 from src.auth.dependencies import require_admin
 from src.database.core import get_async_session
@@ -157,3 +159,44 @@ async def get_stats(
     - Total reports generated
     """
     return await service.get_stats(db)
+
+
+# ------------------------------------------------------------------ #
+# AI Model Settings
+# ------------------------------------------------------------------ #
+
+@router.get(
+    "/ai-settings",
+    response_model=AiSettingsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get current AI model configuration (admin only)",
+    description=(
+        "Returns the live effective model names for each AI provider. "
+        "Each value shows the active override (set via PATCH) or the .env default. "
+        "Also returns env_defaults so you can see what the .env baseline is."
+    ),
+)
+async def get_ai_settings(
+    _admin: User = Depends(require_admin),
+) -> AiSettingsResponse:
+    return await service.get_ai_settings()
+
+
+@router.patch(
+    "/ai-settings",
+    response_model=AiSettingsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update AI model configuration at runtime (admin only)",
+    description=(
+        "Override the AI model names without restarting the server. "
+        "Changes are stored in Redis and take effect immediately for all processes "
+        "(API server + Celery workers). "
+        "Send only the fields you want to change. "
+        "Set a field to null to reset it to the .env default."
+    ),
+)
+async def update_ai_settings(
+    request: UpdateAiSettingsRequest,
+    _admin: User = Depends(require_admin),
+) -> AiSettingsResponse:
+    return await service.update_ai_settings(request)

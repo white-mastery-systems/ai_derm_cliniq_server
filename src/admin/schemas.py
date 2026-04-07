@@ -125,6 +125,42 @@ class PaginatedAdminCasesResponse(BaseModel):
 
 
 # ================================================================== #
+# AI Settings
+# ================================================================== #
+
+class AiSettingsResponse(BaseModel):
+    """
+    Current effective AI model configuration.
+
+    Values shown are the LIVE values (Redis override if set, otherwise .env default).
+    The `source` field tells you whether each value came from a runtime override or .env.
+    """
+    gemini_model: str
+    openai_model: str
+    deepseek_model: str
+    default_provider: str
+    env_defaults: dict  # What .env says (for comparison)
+
+
+class UpdateAiSettingsRequest(BaseModel):
+    """
+    PATCH /admin/ai-settings
+
+    All fields are optional — send only what needs changing.
+    Set a field to null to reset it to the .env default.
+
+    Examples:
+        { "gemini_model": "gemini-1.5-pro" }          ← upgrade Gemini model
+        { "default_provider": "openai" }               ← switch primary provider
+        { "gemini_model": null }                       ← reset Gemini to .env default
+    """
+    gemini_model: str | None = None
+    openai_model: str | None = None
+    deepseek_model: str | None = None
+    default_provider: str | None = None
+
+
+# ================================================================== #
 # Stats
 # ================================================================== #
 

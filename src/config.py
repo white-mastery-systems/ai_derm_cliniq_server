@@ -100,6 +100,15 @@ class Settings(BaseSettings):
     DEFAULT_LLM_PROVIDER: str = "gemini"
 
     # ------------------------------------------------------------------ #
+    # AI Model Names (overridable from admin panel at runtime via Redis)
+    # ------------------------------------------------------------------ #
+    # These are the DEFAULT model names loaded at startup from .env.
+    # The admin panel can override them at runtime — see src/ai/model_registry.py.
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    OPENAI_MODEL: str = "gpt-4o"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    # ------------------------------------------------------------------ #
     # Email (Gmail SMTP)
     # ------------------------------------------------------------------ #
     GMAIL_USER: str = ""

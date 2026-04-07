@@ -50,8 +50,6 @@ except ImportError:
 # ------------------------------------------------------------------ #
 # OpenAI
 # ------------------------------------------------------------------ #
-_OPENAI_MODEL = "gpt-4o"
-
 
 def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
     """
@@ -70,6 +68,9 @@ def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
     ------
     AIProviderException — key missing, SDK not installed, or call failed
     """
+    from src.ai.model_registry import get_openai_model
+    model_name = get_openai_model()
+
     if not settings.OPENAI_API_KEY:
         raise AIProviderException(
             message="OPENAI_API_KEY is not configured. Set it in .env to enable OpenAI fallback."
@@ -95,14 +96,14 @@ def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
 
     try:
         response = client.chat.completions.create(
-            model=_OPENAI_MODEL,
+            model=model_name,
             messages=[{"role": "user", "content": content}],
             max_tokens=4096,
         )
         text = response.choices[0].message.content or ""
         logger.info(
             "openai_call_ok",
-            model=_OPENAI_MODEL,
+            model=model_name,
             has_images=bool(images),
             response_length=len(text),
         )
@@ -119,7 +120,6 @@ def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
 # DeepSeek
 # ------------------------------------------------------------------ #
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-_DEEPSEEK_MODEL = "deepseek-chat"
 
 
 def call_deepseek(prompt: str, images: list[bytes] | None = None) -> str:
@@ -143,6 +143,9 @@ def call_deepseek(prompt: str, images: list[bytes] | None = None) -> str:
     ------
     AIProviderException — key missing, SDK not installed, or call failed
     """
+    from src.ai.model_registry import get_deepseek_model
+    model_name = get_deepseek_model()
+
     if not settings.DEEPSEEK_API_KEY:
         raise AIProviderException(
             message="DEEPSEEK_API_KEY is not configured. Set it in .env to enable DeepSeek fallback."
@@ -170,14 +173,14 @@ def call_deepseek(prompt: str, images: list[bytes] | None = None) -> str:
 
     try:
         response = client.chat.completions.create(
-            model=_DEEPSEEK_MODEL,
+            model=model_name,
             messages=[{"role": "user", "content": full_prompt}],
             max_tokens=4096,
         )
         text = response.choices[0].message.content or ""
         logger.info(
             "deepseek_call_ok",
-            model=_DEEPSEEK_MODEL,
+            model=model_name,
             response_length=len(text),
         )
         return text
