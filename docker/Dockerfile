@@ -52,11 +52,11 @@ ENV PYTHONUNBUFFERED=1 \
 # Switch to non-root
 USER appuser
 
-EXPOSE 8000
+EXPOSE 8880
 
 # Health check — hits the /health endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8880/health || exit 1
 
 # Default: run migrations then start the API server
-CMD ["sh", "-c", "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 4"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port 8880 --workers 4"]
