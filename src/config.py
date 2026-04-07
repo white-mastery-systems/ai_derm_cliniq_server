@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     APP_NAME: str = "AiDerm Cliniq API"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = False
+    DEBUG: bool = True
 
     # ------------------------------------------------------------------ #
     # Security / JWT
