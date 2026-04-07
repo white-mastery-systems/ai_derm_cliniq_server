@@ -54,6 +54,7 @@ from src.config import settings
 from src.database.core import check_database_connection, engine
 from src.exceptions import register_exception_handlers
 from src.logger import get_logger, setup_logging
+from src.middleware import RequestIDMiddleware, TimingMiddleware
 from src.rate_limiting import limiter
 
 logger = get_logger(__name__)
@@ -87,7 +88,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.critical("database_unreachable", url=settings.DATABASE_URL)
 
-    logger.info("app_ready", docs_url="http://localhost:8000/docs")
+    logger.info("app_ready", docs_url="/docs")
 
     yield  # ← Server is running and handling requests here
 
@@ -140,6 +141,14 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_middleware(SlowAPIMiddleware)
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # Timing — measures duration of every request, logs it, sets X-Process-Time header
+    # Must be added AFTER SlowAPIMiddleware so it wraps the rate-limit check too
+    app.add_middleware(TimingMiddleware)
+
+    # Request ID — generates X-Request-ID per request, binds it to all log lines
+    # Must be added LAST so it runs FIRST (outermost wrapper)
+    app.add_middleware(RequestIDMiddleware)
 
     # ------------------------------------------------------------------ #
     # Exception Handlers
