@@ -87,8 +87,8 @@ async def _load_case_for_doctor(
     """
     Load a case and verify the doctor is assigned to it.
 
-    Returns the case or raises 404 (case enumeration prevention).
-    Raises 403 if doctor is not assigned.
+    Returns 404 for both 'not found' and 'not assigned' — prevents case
+    enumeration (a doctor cannot tell whether a case ID exists or not).
     """
     result = await db.execute(
         select(Case)
@@ -97,14 +97,9 @@ async def _load_case_for_doctor(
     )
     case = result.scalar_one_or_none()
 
-    if case is None:
+    if case is None or case.doctor_id != doctor.id:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
-    if case.doctor_id != doctor.id:
-        raise ForbiddenException(
-            message="You are not assigned to this case. "
-                    "Scan the patient's QR code to gain access."
-        )
     return case
 
 
@@ -234,14 +229,15 @@ async def get_review(
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
-    # Access control: patient who owns the case, or the assigned doctor
-    if user.role == UserRole.PATIENT and case.patient_id != user.id:
-        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    # Access control: patient who owns the case, assigned doctor, or admin
+    if user.role != UserRole.ADMIN:
+        if user.role == UserRole.PATIENT and case.patient_id != user.id:
+            raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
-    if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
-        raise ForbiddenException(
-            message="You are not assigned to this case."
-        )
+        if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
+            raise ForbiddenException(
+                message="You are not assigned to this case."
+            )
 
     if case.doctor_review is None:
         raise NotFoundException(

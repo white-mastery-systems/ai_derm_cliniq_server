@@ -67,6 +67,8 @@ async def _get_case_with_access(db: AsyncSession, case_id: str, user: User) -> C
     case = result.scalar_one_or_none()
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    if user.role == UserRole.ADMIN:
+        return case
     if user.role == UserRole.PATIENT and case.patient_id != user.id:
         raise CaseNotFoundException()
     if user.role == UserRole.DOCTOR and case.doctor_id != user.id:

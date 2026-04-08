@@ -128,7 +128,10 @@ def _assert_access(user: User, case: Case) -> None:
     """
     Raise CaseNotFoundException (not 403) to prevent case enumeration.
     An attacker probing random case IDs gets the same response as a real miss.
+    ADMIN always passes — they can read any case.
     """
+    if user.role == UserRole.ADMIN:
+        return
     if user.role == UserRole.PATIENT and case.patient_id != user.id:
         raise CaseNotFoundException()
     if user.role == UserRole.DOCTOR and case.doctor_id != user.id:

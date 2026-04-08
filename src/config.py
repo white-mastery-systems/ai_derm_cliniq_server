@@ -134,6 +134,15 @@ class Settings(BaseSettings):
     ALLOWED_IMAGE_TYPES: List[str] = ["image/jpeg", "image/png", "image/heic", "image/heif"]
 
     # ------------------------------------------------------------------ #
+    # Admin Bootstrap
+    # ------------------------------------------------------------------ #
+    # Set these in .env to auto-create the first admin account on startup.
+    # If ADMIN_EMAIL already exists in the DB, bootstrap is skipped (idempotent).
+    # Leave empty to disable bootstrap.
+    ADMIN_EMAIL: str = "dev@bdcode.in"
+    ADMIN_PASSWORD: str = "@Dev_bdcode.in"
+
+    # ------------------------------------------------------------------ #
     # QR Token
     # ------------------------------------------------------------------ #
     QR_TOKEN_EXPIRE_HOURS: int = 24

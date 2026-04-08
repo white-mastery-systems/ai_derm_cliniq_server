@@ -59,11 +59,14 @@ logger = get_logger(__name__)
 
 async def _get_case_with_access(db: AsyncSession, case_id: str, user: User) -> Case:
     """Load case and verify user has access. Returns CaseNotFoundException for both
-    'not found' and 'not accessible' to prevent case enumeration."""
+    'not found' and 'not accessible' to prevent case enumeration.
+    ADMIN always passes — they can read any case."""
     result = await db.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    if user.role == UserRole.ADMIN:
+        return case
     if user.role == UserRole.PATIENT and case.patient_id != user.id:
         raise CaseNotFoundException()
     if user.role == UserRole.DOCTOR and case.doctor_id != user.id:

@@ -144,12 +144,13 @@ async def get_report(
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
-    # Access control
-    if user.role == UserRole.PATIENT and case.patient_id != user.id:
-        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    # Access control: patient who owns the case, assigned doctor, or admin
+    if user.role != UserRole.ADMIN:
+        if user.role == UserRole.PATIENT and case.patient_id != user.id:
+            raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
-    if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
-        raise ForbiddenException(message="You are not assigned to this case.")
+        if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
+            raise ForbiddenException(message="You are not assigned to this case.")
 
     if case.report is None:
         raise ReportNotFoundException(

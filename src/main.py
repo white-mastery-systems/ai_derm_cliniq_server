@@ -45,6 +45,8 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -59,6 +61,46 @@ from src.middleware import RequestIDMiddleware, TimingMiddleware
 from src.rate_limiting import limiter
 
 logger = get_logger(__name__)
+
+
+# ------------------------------------------------------------------ #
+# Admin Bootstrap
+# ------------------------------------------------------------------ #
+
+async def _bootstrap_admin() -> None:
+    """
+    Create the first admin account on startup if ADMIN_EMAIL + ADMIN_PASSWORD
+    are set in .env and no user with that email exists yet.
+
+    Idempotent — safe to run on every restart.
+    """
+    if not settings.ADMIN_EMAIL or not settings.ADMIN_PASSWORD:
+        logger.info("admin_bootstrap_skipped", reason="ADMIN_EMAIL or ADMIN_PASSWORD not set")
+        return
+
+    from src.auth.security import hash_password
+    from src.models.user import User, UserRole
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        result = await db.execute(select(User).where(User.email == settings.ADMIN_EMAIL))
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="already exists")
+            return
+
+        hashed = await asyncio.to_thread(hash_password, settings.ADMIN_PASSWORD)
+        admin = User(
+            email=settings.ADMIN_EMAIL,
+            full_name="Admin",
+            role=UserRole.ADMIN,
+            password_hash=hashed,
+            is_active=True,
+            is_verified=True,
+        )
+        db.add(admin)
+        await db.commit()
+        logger.info("admin_account_created", email=settings.ADMIN_EMAIL)
 
 
 # ------------------------------------------------------------------ #
@@ -88,6 +130,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("database_connected")
     else:
         logger.critical("database_unreachable", url=settings.DATABASE_URL)
+
+    await _bootstrap_admin()
 
     logger.info("app_ready", docs_url="/docs")
 
