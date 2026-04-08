@@ -39,7 +39,9 @@ Affects the AI question flow (follow-up has shorter questioning).
 
 CONSENT GATE
 ------------
-consent_given MUST be True before any image can be uploaded.
+consent_ai_analysis MUST be True before any image can be uploaded.
+Both consent fields are submitted at case creation — there is no separate
+consent endpoint. consent_ai_analysis is required; consent_research is optional.
 This is enforced in the upload endpoint — not just the UI.
 """
 
@@ -55,6 +57,17 @@ from src.models.base import Base, TimestampMixin, new_uuid
 class ConsultationType(str, enum.Enum):
     NEW_COMPLAINT = "new_complaint"
     FOLLOW_UP = "follow_up"
+
+
+class RedFlagStatus(str, enum.Enum):
+    """
+    Tracks the systemic / red flag check that runs after Q&A completes.
+    The check looks for urgent symptoms in the patient's answers and complaint.
+    """
+    NOT_CHECKED = "not_checked"  # Default — check not yet triggered
+    CHECKING = "checking"        # Celery task running
+    CLEAR = "clear"              # No red flags found
+    FLAGGED = "flagged"          # Urgent symptoms detected
 
 
 class AiStatus(str, enum.Enum):
@@ -137,18 +150,24 @@ class Case(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
-    # Consent Gate — enforced in backend, not just UI
+    # Consent Gate — both fields set at case creation, not a separate call
     # ------------------------------------------------------------------ #
-    consent_given: Mapped[bool] = mapped_column(
+    consent_ai_analysis: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         nullable=False,
-        comment="Must be True before any image upload is accepted",
+        comment="Required. Must be True before any image upload is accepted.",
     )
-    consent_given_at: Mapped[datetime | None] = mapped_column(
+    consent_ai_analysis_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        comment="Timestamp when patient confirmed consent",
+        comment="Timestamp when patient confirmed AI analysis consent",
+    )
+    consent_research: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="Optional. Patient allows anonymized data for academic research.",
     )
 
     # ------------------------------------------------------------------ #
@@ -211,6 +230,26 @@ class Case(TimestampMixin, Base):
         Text,
         nullable=True,
         comment="AI-generated case summary shown to patient before QR code",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Red Flag Check — runs after Q&A, before case summary
+    # ------------------------------------------------------------------ #
+    red_flag_status: Mapped[RedFlagStatus] = mapped_column(
+        Enum(RedFlagStatus, name="red_flag_status_enum", create_type=True),
+        nullable=False,
+        default=RedFlagStatus.NOT_CHECKED,
+        comment="Status of the systemic / red flag check (Figma Basic Patient Flow step 8)",
+    )
+    red_flags: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON list of flagged conditions detected by the AI red flag check",
+    )
+    red_flag_advice: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="AI-generated advice shown to patient when red flags are detected",
     )
 
     # ------------------------------------------------------------------ #

@@ -185,6 +185,31 @@ class RegisterResponse(BaseModel):
     token_type: str = "bearer"
 
 
+class MessageResponse(BaseModel):
+    """Generic success message response used by several auth endpoints."""
+    message: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    """POST /api/v1/auth/forgot-password"""
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """POST /api/v1/auth/reset-password"""
+    token: str = Field(description="Raw token received in the password-reset email")
+    new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        has_letter = any(c.isalpha() for c in v)
+        has_digit = any(c.isdigit() for c in v)
+        if not (has_letter and has_digit):
+            raise ValueError("Password must contain at least one letter and one digit")
+        return v
+
+
 class DoctorRegisterResponse(BaseModel):
     """
     POST /api/v1/auth/register/doctor response.

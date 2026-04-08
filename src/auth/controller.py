@@ -37,16 +37,21 @@ from src.auth import service
 from src.auth.schemas import (
     DoctorRegisterRequest,
     DoctorRegisterResponse,
+    ForgotPasswordRequest,
     GoogleAuthRequest,
     LoginRequest,
     LogoutRequest,
+    MessageResponse,
     PatientRegisterRequest,
     RefreshRequest,
     RegisterResponse,
+    ResetPasswordRequest,
     TokenResponse,
     UserResponse,
 )
+from src.auth.dependencies import get_current_user
 from src.database.core import get_async_session
+from src.models.user import User
 from src.rate_limiting import limiter
 
 router = APIRouter()
@@ -189,6 +194,74 @@ async def logout(
 # ------------------------------------------------------------------ #
 # Google OAuth
 # ------------------------------------------------------------------ #
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Request a password-reset email",
+    description=(
+        "Sends a password-reset link to the given email address. "
+        "Always returns 200 regardless of whether the email exists — "
+        "this prevents user enumeration. The link expires in 15 minutes."
+    ),
+)
+@limiter.limit("5/minute")
+async def forgot_password(
+    request: Request,  # noqa: ARG001
+    body: ForgotPasswordRequest,
+    db: AsyncSession = Depends(get_async_session),
+) -> MessageResponse:
+    await service.forgot_password(db, body.email)
+    return MessageResponse(
+        message="If that email is registered, a reset link has been sent."
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Set a new password using a reset token",
+)
+@limiter.limit("10/minute")
+async def reset_password(
+    request: Request,  # noqa: ARG001
+    body: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_async_session),
+) -> MessageResponse:
+    await service.reset_password(db, body.token, body.new_password)
+    return MessageResponse(message="Password updated successfully. You can now log in.")
+
+
+@router.post(
+    "/verify-email",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resend the email verification link",
+    description="Requires a valid access token. No-op if already verified.",
+)
+async def resend_email_verification(
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+) -> MessageResponse:
+    await service.request_email_verification(db, current_user)
+    return MessageResponse(message="Verification email sent. Check your inbox.")
+
+
+@router.get(
+    "/verify/{token}",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Confirm email address from the link in the verification email",
+)
+async def verify_email(
+    token: str,
+    db: AsyncSession = Depends(get_async_session),
+) -> MessageResponse:
+    await service.verify_email(db, token)
+    return MessageResponse(message="Email verified successfully.")
+
 
 @router.post(
     "/google",

@@ -148,6 +148,72 @@ _VISIT_EMAIL_TEMPLATE = """
 """
 
 
+_PASSWORD_RESET_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .btn{display:inline-block;background:#1a6b5a;color:#fff!important;
+       text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;margin:12px 0}
+  .warning{background:#fff8e1;border-left:4px solid #f59e0b;padding:12px 16px;
+           border-radius:4px;font-size:13px;color:#78350f;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Password Reset</h1></div>
+  <div class="body">
+    <p>Hi <strong>{{ name }}</strong>,</p>
+    <p>We received a request to reset your password. Click the button below to set a new one:</p>
+    <a href="{{ reset_url }}" class="btn">Reset My Password</a>
+    <p style="font-size:12px;color:#999">Or copy this link: <a href="{{ reset_url }}">{{ reset_url }}</a></p>
+    <div class="warning">This link expires in <strong>15 minutes</strong> and can only be used once.
+    If you did not request a password reset, you can safely ignore this email.</div>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+_EMAIL_VERIFY_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .btn{display:inline-block;background:#1a6b5a;color:#fff!important;
+       text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;margin:12px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Verify Your Email</h1></div>
+  <div class="body">
+    <p>Hi <strong>{{ name }}</strong>,</p>
+    <p>Please verify your email address to activate your account:</p>
+    <a href="{{ verify_url }}" class="btn">Verify Email Address</a>
+    <p style="font-size:12px;color:#999">Or copy this link: <a href="{{ verify_url }}">{{ verify_url }}</a></p>
+    <p style="font-size:13px;color:#777">This link expires in 24 hours.</p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+
+def render_password_reset_email(name: str, reset_url: str) -> str:
+    """Render the password reset HTML email."""
+    return Template(_PASSWORD_RESET_TEMPLATE).render(name=name, reset_url=reset_url)
+
+
+def render_email_verify_email(name: str, verify_url: str) -> str:
+    """Render the email verification HTML email."""
+    return Template(_EMAIL_VERIFY_TEMPLATE).render(name=name, verify_url=verify_url)
+
+
 def render_visit_email(patient_name: str, case_id: str, patient_url: str) -> str:
     """Render the visit summary HTML email body."""
     return Template(_VISIT_EMAIL_TEMPLATE).render(

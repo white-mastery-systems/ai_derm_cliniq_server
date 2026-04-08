@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.conversations.schemas import (
     AnswersAcceptedResponse,
     ConversationHistoryResponse,
+    FinishChatResponse,
     QuestionsGeneratedResponse,
     RoundOut,
     QuestionItem,
@@ -246,7 +247,52 @@ async def submit_answers(
 
 
 # ------------------------------------------------------------------ #
-# 3. Get conversation history
+# 3. Finish conversation early ("Finish Now" button)
+# ------------------------------------------------------------------ #
+
+async def finish_conversation(
+    db: AsyncSession,
+    patient: User,
+    case_id: str,
+) -> FinishChatResponse:
+    """
+    Skip remaining Q&A rounds and mark the conversation as complete.
+
+    Sets question_round = max_question_rounds so that is_complete becomes True.
+    Idempotent — safe to call if conversation is already complete.
+
+    Only the patient who owns the case can finish early.
+    AI analysis must have completed before finish can be called.
+    """
+    if patient.role != UserRole.PATIENT:
+        raise ForbiddenException(message="Only the patient can finish the conversation")
+
+    case = await _get_case_with_access(db, case_id, patient)
+
+    if case.ai_status != AiStatus.COMPLETED:
+        raise BadRequestException(
+            message="AI analysis must complete before the conversation can be finished. "
+                    f"Current status: {case.ai_status.value}"
+        )
+
+    already_complete = case.question_round >= case.max_question_rounds
+    if not already_complete:
+        case.question_round = case.max_question_rounds
+        await db.flush()
+        logger.info("conversation_finished_early", case_id=case_id, patient_id=patient.id)
+    else:
+        logger.info("conversation_already_complete", case_id=case_id)
+
+    return FinishChatResponse(
+        case_id=case_id,
+        question_round=case.question_round,
+        max_rounds=case.max_question_rounds,
+        is_complete=True,
+    )
+
+
+# ------------------------------------------------------------------ #
+# 4. Get conversation history
 # ------------------------------------------------------------------ #
 
 async def get_history(

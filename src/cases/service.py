@@ -19,8 +19,8 @@ The image files in GCS remain (deleting them is a separate admin task).
 
 CONSENT IMMUTABILITY
 --------------------
-Once consent_given=True it cannot be set back to False.
-The consent_given_at timestamp is set once and never overwritten.
+consent_ai_analysis and consent_research are set at case creation and are immutable.
+There is no separate consent endpoint — consent is captured in POST /cases.
 
 PAGINATION
 ----------
@@ -33,12 +33,15 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.cases.schemas import (
+    AssessmentDepthRequest,
+    AssessmentDepthResponse,
     CaseCreateRequest,
     CaseResponse,
     CaseSummaryResponse,
     CaseUpdateRequest,
     DoctorStatsResponse,
     PaginatedCasesResponse,
+    RedFlagsResponse,
 )
 from src.exceptions import (
     BadRequestException,
@@ -47,7 +50,7 @@ from src.exceptions import (
 )
 from src.logger import get_logger
 from src.models.base import new_uuid
-from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType
+from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
 from src.models.case_image import CaseImage
 from src.models.user import User, UserRole
 
@@ -65,8 +68,9 @@ def _to_case_response(case: Case, image_count: int = 0) -> CaseResponse:
         doctor_id=case.doctor_id,
         consultation_type=case.consultation_type.value,
         has_visible_lesion=case.has_visible_lesion,
-        consent_given=case.consent_given,
-        consent_given_at=case.consent_given_at,
+        consent_ai_analysis=case.consent_ai_analysis,
+        consent_ai_analysis_at=case.consent_ai_analysis_at,
+        consent_research=case.consent_research,
         is_for_self=case.is_for_self,
         dependent_name=case.dependent_name,
         dependent_relationship=case.dependent_relationship,
@@ -93,7 +97,7 @@ def _to_summary_response(case: Case, image_count: int = 0) -> CaseSummaryRespons
         clinical_status=case.clinical_status.value,
         is_for_self=case.is_for_self,
         dependent_name=case.dependent_name,
-        consent_given=case.consent_given,
+        consent_ai_analysis=case.consent_ai_analysis,
         has_visible_lesion=case.has_visible_lesion,
         image_count=image_count,
         created_at=case.created_at,
@@ -146,6 +150,11 @@ async def create_case(
     Raises:
         BadRequestException — is_for_self=False without dependent info
     """
+    if not request.consent_ai_analysis:
+        raise BadRequestException(
+            message="CONSENT_REQUIRED: consent_ai_analysis must be true to create a case"
+        )
+
     if not request.is_for_self and request.dependent is None:
         raise BadRequestException(
             message="Dependent information is required when is_for_self=False"
@@ -159,6 +168,7 @@ async def create_case(
         )
 
     dep = request.dependent
+    now = datetime.now(tz=timezone.utc)
     case = Case(
         id=new_uuid(),
         patient_id=patient.id,
@@ -166,7 +176,9 @@ async def create_case(
         has_visible_lesion=request.has_visible_lesion,
         is_for_self=request.is_for_self,
         presenting_complaint=request.presenting_complaint,
-        consent_given=False,
+        consent_ai_analysis=True,
+        consent_ai_analysis_at=now,
+        consent_research=request.consent_research,
         ai_status=AiStatus.PENDING,
         clinical_status=ClinicalStatus.ACTIVE,
         question_round=0,
@@ -184,53 +196,6 @@ async def create_case(
 
 
 # ------------------------------------------------------------------ #
-# Consent
-# ------------------------------------------------------------------ #
-
-async def give_consent(
-    db: AsyncSession,
-    patient: User,
-    case_id: str,
-) -> "ConsentResponse":
-    """
-    Record that the patient has given informed consent for this case.
-
-    Idempotent: if consent was already given, returns already_given=True
-    without modifying the timestamp (preserves the original consent record).
-
-    Only the patient who owns the case can give consent.
-
-    Raises:
-        CaseNotFoundException — case not found or not owned by patient
-    """
-    from src.cases.schemas import ConsentResponse
-
-    result = await db.execute(select(Case).where(Case.id == case_id))
-    case = result.scalar_one_or_none()
-
-    if case is None or case.patient_id != patient.id:
-        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
-
-    already_given = case.consent_given
-
-    if not already_given:
-        now = datetime.now(tz=timezone.utc)
-        case.consent_given = True
-        case.consent_given_at = now
-        await db.flush()
-        logger.info("consent_recorded", case_id=case_id, patient_id=patient.id)
-    else:
-        logger.info("consent_already_given", case_id=case_id, patient_id=patient.id)
-
-    return ConsentResponse(
-        case_id=case_id,
-        consent_given=True,
-        consent_given_at=case.consent_given_at,
-        already_given=already_given,
-    )
-
-
-# ------------------------------------------------------------------ #
 # List
 # ------------------------------------------------------------------ #
 
@@ -240,6 +205,7 @@ async def list_cases(
     page: int = 1,
     page_size: int = 20,
     clinical_status: str | None = None,
+    is_for_self: bool | None = None,
 ) -> PaginatedCasesResponse:
     """
     Paginated list of cases filtered by the user's role.
@@ -266,6 +232,8 @@ async def list_cases(
             raise BadRequestException(
                 message=f"Invalid clinical_status filter: {clinical_status!r}"
             )
+    if is_for_self is not None:
+        filters.append(Case.is_for_self == is_for_self)
 
     where_clause = and_(*filters) if filters else True
 
@@ -345,15 +313,6 @@ async def update_case(
             raise ForbiddenException(message="Only the patient can update the complaint")
         case.presenting_complaint = request.presenting_complaint
 
-    if request.consent_given is not None:
-        if user.role != UserRole.PATIENT:
-            raise ForbiddenException(message="Only the patient can give consent")
-        if case.consent_given and not request.consent_given:
-            raise BadRequestException(message="Consent cannot be revoked once given")
-        if request.consent_given and not case.consent_given:
-            case.consent_given = True
-            case.consent_given_at = datetime.now(tz=timezone.utc)
-
     if request.clinical_status is not None:
         if user.role != UserRole.DOCTOR:
             raise ForbiddenException(
@@ -418,6 +377,173 @@ async def assign_doctor(
 
     image_count = await _get_image_count(db, case_id)
     return _to_case_response(case, image_count)
+
+
+# ------------------------------------------------------------------ #
+# Assessment Depth
+# ------------------------------------------------------------------ #
+
+_DEPTH_ROUNDS: dict[str, int] = {"quick": 2, "standard": 5, "full": 8}
+
+
+async def set_assessment_depth(
+    db: AsyncSession,
+    patient: User,
+    case_id: str,
+    request: AssessmentDepthRequest,
+) -> AssessmentDepthResponse:
+    """
+    Set the number of Q&A rounds before the case summary is generated.
+
+    Must be called after AI analysis completes (ai_status = completed)
+    and before the first question round starts (question_round = 0).
+
+    Raises:
+        CaseNotFoundException  — case not found or patient does not own it
+        ForbiddenException     — caller is not a patient
+        BadRequestException    — AI not yet complete, or questions already started
+    """
+    if patient.role != UserRole.PATIENT:
+        raise ForbiddenException(message="Only the patient can set assessment depth")
+
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None or case.patient_id != patient.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    if case.ai_status != AiStatus.COMPLETED:
+        raise BadRequestException(
+            message="AI analysis must complete before setting assessment depth. "
+                    f"Current status: {case.ai_status.value}"
+        )
+
+    if case.question_round > 0:
+        raise BadRequestException(
+            message="Assessment depth cannot be changed once questions have started"
+        )
+
+    rounds = _DEPTH_ROUNDS[request.depth]
+    case.max_question_rounds = rounds
+    await db.flush()
+
+    logger.info(
+        "assessment_depth_set",
+        case_id=case_id,
+        depth=request.depth,
+        max_rounds=rounds,
+    )
+    return AssessmentDepthResponse(
+        case_id=case_id,
+        depth=request.depth,
+        max_question_rounds=rounds,
+        message=f"Assessment set to {request.depth} ({rounds} question rounds).",
+    )
+
+
+# ------------------------------------------------------------------ #
+# Red Flag Check
+# ------------------------------------------------------------------ #
+
+def _build_red_flags_response(case: Case) -> RedFlagsResponse:
+    import json
+    flags: list[str] = []
+    if case.red_flags:
+        try:
+            flags = json.loads(case.red_flags)
+        except (json.JSONDecodeError, TypeError):
+            flags = []
+
+    status = case.red_flag_status.value
+    if status == RedFlagStatus.NOT_CHECKED.value:
+        message = "Red flag check has not been triggered yet."
+    elif status == RedFlagStatus.CHECKING.value:
+        message = "Red flag check is in progress. Poll this endpoint again shortly."
+    elif status == RedFlagStatus.FLAGGED.value:
+        message = "Urgent symptoms detected. Please review the advice below."
+    else:
+        message = "No red flags detected. You may proceed to the case summary."
+
+    return RedFlagsResponse(
+        case_id=case.id,
+        status=status,
+        flags=flags,
+        advice=case.red_flag_advice,
+        message=message,
+    )
+
+
+async def get_red_flags(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+) -> RedFlagsResponse:
+    """
+    Return the current red flag check status and results.
+    Available to both the patient and assigned doctor.
+    """
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(user, case)
+    return _build_red_flags_response(case)
+
+
+async def trigger_red_flag_check(
+    db: AsyncSession,
+    patient: User,
+    case_id: str,
+) -> RedFlagsResponse:
+    """
+    Trigger the systemic / red flag check for a case.
+
+    Runs synchronously using a fast AI prompt against the patient's
+    complaint and Q&A answers. Sets red_flag_status to CHECKING while
+    the check runs, then updates to CLEAR or FLAGGED.
+
+    Only valid after the conversation is complete (question_round >= max_question_rounds).
+    Idempotent — re-triggering a CLEAR or FLAGGED case returns the existing result.
+    """
+    if patient.role != UserRole.PATIENT:
+        raise ForbiddenException(message="Only the patient can trigger the red flag check")
+
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None or case.patient_id != patient.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    if case.ai_status != AiStatus.COMPLETED:
+        raise BadRequestException(
+            message="AI analysis must complete before the red flag check can run"
+        )
+
+    if case.question_round < case.max_question_rounds:
+        raise BadRequestException(
+            message="Complete all question rounds before running the red flag check"
+        )
+
+    # Idempotent: already checked
+    if case.red_flag_status in (RedFlagStatus.CLEAR, RedFlagStatus.FLAGGED):
+        logger.info("red_flag_check_already_done", case_id=case_id, status=case.red_flag_status)
+        return _build_red_flags_response(case)
+
+    # Mark as checking and enqueue Celery task
+    case.red_flag_status = RedFlagStatus.CHECKING
+    await db.flush()
+
+    try:
+        from src.workers.tasks.analysis import red_flag_check_task
+        red_flag_check_task.delay(case_id)
+        logger.info("red_flag_check_triggered", case_id=case_id)
+    except Exception as exc:
+        logger.error("red_flag_check_enqueue_failed", case_id=case_id, error=str(exc))
+        case.red_flag_status = RedFlagStatus.NOT_CHECKED
+        await db.flush()
+        raise BadRequestException(
+            message="Could not enqueue red flag check. Is Redis running?"
+        ) from exc
+
+    return _build_red_flags_response(case)
 
 
 # ------------------------------------------------------------------ #

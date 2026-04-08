@@ -499,3 +499,40 @@ Damaged JSON:
 Correct format:
 {correct_format}
 """
+
+    # ------------------------------------------------------------------
+    # 14. Systemic / red flag check
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def red_flag_check(complaint: str, answers: str) -> str:
+        """
+        Check patient complaint and Q&A answers for urgent / red-flag symptoms.
+
+        Returns JSON: {{"flags": [...], "advice": "<string or null>"}}
+        flags is an empty list when no red flags are found.
+        advice is a patient-readable warning present only when flags is non-empty.
+        """
+        return f"""You are a dermatology triage assistant.
+Review the patient's presenting complaint and their answers to follow-up questions.
+Identify any systemic or urgent 'red flag' symptoms that require immediate medical attention.
+
+Red flag examples (not exhaustive):
+- Rapidly changing or bleeding mole (possible melanoma)
+- Systemic symptoms: fever, weight loss, night sweats alongside skin changes
+- Signs of cellulitis with spreading redness, warmth, systemic fever
+- Stevens-Johnson syndrome indicators: blistering mucous membranes
+- Anaphylaxis indicators: hives + throat tightness + difficulty breathing
+- Rapidly spreading purpuric rash (possible meningococcal)
+
+Presenting complaint:
+{complaint}
+
+Patient answers:
+{answers}
+
+Respond ONLY with valid JSON in this exact format:
+{{"flags": ["<flag1>", "<flag2>"], "advice": "<patient-friendly urgent advice, or null if no flags>"}}
+
+If no red flags are found: {{"flags": [], "advice": null}}
+"""

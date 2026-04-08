@@ -61,7 +61,7 @@ from src.config import settings
 from src.exceptions import AIProviderException, StorageException
 from src.logger import get_logger
 from src.models.base import new_uuid
-from src.models.case import AiStatus, Case
+from src.models.case import AiStatus, Case, RedFlagStatus
 from src.models.case_image import CaseImage
 from src.models.differential_diagnosis import DifferentialDiagnosis
 from src.models.patient_profile import PatientProfile
@@ -454,6 +454,101 @@ def save_results_task(self, analysis_result: dict) -> None:
         raise Ignore()
     except Exception as exc:
         logger.error("save_results_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+
+
+# ------------------------------------------------------------------ #
+# Red Flag Check Task
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="workers.tasks.analysis.red_flag_check_task",
+    time_limit=60,
+    soft_time_limit=50,
+    max_retries=1,
+    default_retry_delay=10,
+)
+def red_flag_check_task(self, case_id: str) -> None:
+    """
+    Systemic / red flag check — runs after all Q&A rounds complete.
+
+    Checks the patient's complaint and Q&A answers for urgent symptoms
+    (rapidly-changing mole, systemic fever, chest pain, etc.).
+
+    Updates case:
+      red_flag_status = CLEAR   — no urgent symptoms detected
+      red_flag_status = FLAGGED — urgent symptoms found; saves flags + advice
+    """
+    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+    from src.models.message import Message, MessageRole
+
+    logger.info("red_flag_check_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None or case.red_flag_status != RedFlagStatus.CHECKING:
+                raise Ignore()
+
+            # Gather complaint and all patient answers
+            msgs_result = await session.execute(
+                select(Message)
+                .where(Message.case_id == case_id, Message.role == MessageRole.PATIENT)
+                .order_by(Message.round_number, Message.question_index)
+            )
+            patient_answers = [m.content for m in msgs_result.scalars().all()]
+
+            complaint = case.presenting_complaint or ""
+            answers_text = "\n".join(f"- {a}" for a in patient_answers)
+
+        try:
+            prompt = PatientConsultationPrompts.red_flag_check(
+                complaint=complaint,
+                answers=answers_text,
+            )
+            raw = call_llm(prompt)
+            result = extract_json(raw)
+        except Exception as exc:
+            logger.error("red_flag_check_llm_failed", case_id=case_id, error=str(exc))
+            async with factory() as session:
+                case = await _get_case(session, case_id)
+                if case:
+                    case.red_flag_status = RedFlagStatus.NOT_CHECKED
+                    await session.commit()
+            raise Ignore() from exc
+
+        flags: list[str] = result.get("flags", [])
+        advice: str | None = result.get("advice")
+        has_flags = bool(flags)
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None:
+                return
+            case.red_flag_status = RedFlagStatus.FLAGGED if has_flags else RedFlagStatus.CLEAR
+            case.red_flags = json.dumps(flags)
+            case.red_flag_advice = advice
+            await session.commit()
+
+        logger.info(
+            "red_flag_check_complete",
+            case_id=case_id,
+            flagged=has_flags,
+            flags=flags,
+        )
+        await engine.dispose()
+
+    try:
+        _run_async(_run())
+    except SoftTimeLimitExceeded:
+        logger.error("red_flag_check_timeout", case_id=case_id)
+        raise Ignore()
+    except Exception as exc:
+        logger.error("red_flag_check_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
 
 

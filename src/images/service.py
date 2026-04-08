@@ -134,7 +134,7 @@ async def upload_image(
     case = await _get_case_or_404(db, case_id, patient)
 
     # 2. Consent gate
-    if not case.consent_given:
+    if not case.consent_ai_analysis:
         raise ForbiddenException(
             message="Patient must give consent before uploading images"
         )

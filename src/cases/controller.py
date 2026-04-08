@@ -6,7 +6,7 @@ All routes prefixed /api/v1/cases (set in src/api.py).
 
 ROUTES
 ------
-POST   /                    → Patient: create a new case
+POST   /                    → Patient: create a new case (consent fields included)
 GET    /                    → Patient/Doctor/Admin: paginated case list
 GET    /{case_id}           → Any auth'd user: full case detail
 PATCH  /{case_id}           → Patient/Doctor: update fields
@@ -23,12 +23,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.auth.dependencies import get_current_user, require_doctor, require_patient
 from src.cases import service
 from src.cases.schemas import (
+    AssessmentDepthRequest,
+    AssessmentDepthResponse,
     CaseCreateRequest,
     CaseResponse,
     CaseUpdateRequest,
-    ConsentResponse,
     DoctorStatsResponse,
     PaginatedCasesResponse,
+    RedFlagsResponse,
 )
 from src.database.core import get_async_session
 from src.models.user import User
@@ -60,10 +62,14 @@ async def list_cases(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     clinical_status: str | None = Query(default=None),
+    is_for_self: bool | None = Query(
+        default=None,
+        description="true = My History tab, false = Someone Else tab",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
 ) -> PaginatedCasesResponse:
-    return await service.list_cases(db, user, page, page_size, clinical_status)
+    return await service.list_cases(db, user, page, page_size, clinical_status, is_for_self)
 
 
 @router.get(
@@ -122,24 +128,46 @@ async def delete_case(
 
 
 @router.post(
-    "/{case_id}/consent",
-    response_model=ConsentResponse,
+    "/{case_id}/assessment-depth",
+    response_model=AssessmentDepthResponse,
     status_code=status.HTTP_200_OK,
-    summary="Patient records informed consent for a case",
+    summary="Set Q&A depth: quick (2), standard (5), full (8) rounds",
 )
-async def give_consent(
+async def set_assessment_depth(
+    case_id: str,
+    request: AssessmentDepthRequest,
+    patient: User = Depends(require_patient),
+    db: AsyncSession = Depends(get_async_session),
+) -> AssessmentDepthResponse:
+    return await service.set_assessment_depth(db, patient, case_id, request)
+
+
+@router.get(
+    "/{case_id}/red-flags",
+    response_model=RedFlagsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get red flag check status and results",
+)
+async def get_red_flags(
+    case_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> RedFlagsResponse:
+    return await service.get_red_flags(db, user, case_id)
+
+
+@router.post(
+    "/{case_id}/red-flags/check",
+    response_model=RedFlagsResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger systemic / red flag check after Q&A completes",
+)
+async def trigger_red_flag_check(
     case_id: str,
     patient: User = Depends(require_patient),
     db: AsyncSession = Depends(get_async_session),
-) -> ConsentResponse:
-    """
-    Record that the patient has read and accepted the consent terms.
-
-    Must be called before images can be uploaded to this case.
-    Idempotent — safe to call multiple times; returns already_given=True
-    if consent was already recorded.
-    """
-    return await service.give_consent(db, patient, case_id)
+) -> RedFlagsResponse:
+    return await service.trigger_red_flag_check(db, patient, case_id)
 
 
 @router.patch(

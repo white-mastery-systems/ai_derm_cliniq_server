@@ -110,7 +110,7 @@ async def trigger_analysis(
     case = await _get_case_with_access(db, case_id, patient)
 
     # Consent gate
-    if not case.consent_given:
+    if not case.consent_ai_analysis:
         raise ForbiddenException(
             message="Patient must give consent before triggering AI analysis"
         )

@@ -29,6 +29,7 @@ from src.conversations import service
 from src.conversations.schemas import (
     AnswersAcceptedResponse,
     ConversationHistoryResponse,
+    FinishChatResponse,
     QuestionsGeneratedResponse,
     SubmitAnswersRequest,
 )
@@ -66,6 +67,24 @@ async def submit_answers(
     db: AsyncSession = Depends(get_async_session),
 ) -> AnswersAcceptedResponse:
     return await service.submit_answers(db, patient, case_id, body)
+
+
+@router.post(
+    "/finish",
+    response_model=FinishChatResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Finish conversation early — skip remaining Q&A rounds",
+)
+async def finish_conversation(
+    case_id: str,
+    patient: User = Depends(require_patient),
+    db: AsyncSession = Depends(get_async_session),
+) -> FinishChatResponse:
+    """
+    Skip remaining question rounds and proceed to case summary.
+    Idempotent — safe to call if already complete.
+    """
+    return await service.finish_conversation(db, patient, case_id)
 
 
 @router.get(

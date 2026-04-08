@@ -24,7 +24,7 @@ Importing all models here serves two purposes:
 """
 
 from src.models.base import Base, TimestampMixin, new_uuid
-from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType
+from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
 from src.models.case_image import CaseImage, ImageType
 from src.models.case_report import CaseReport, ReportType
 from src.models.differential_diagnosis import DifferentialDiagnosis
@@ -34,6 +34,7 @@ from src.models.message import Message, MessageRole
 from src.models.patient_profile import PatientProfile
 from src.models.qr_token import QRToken
 from src.models.refresh_token import RefreshToken
+from src.models.verification_token import TokenPurpose, VerificationToken
 from src.models.snomed_mapping import SnomedMapping
 from src.models.todo import Todo
 from src.models.user import User, UserRole
@@ -54,6 +55,7 @@ __all__ = [
     "AiStatus",
     "ClinicalStatus",
     "ConsultationType",
+    "RedFlagStatus",
     # Case sub-entities
     "CaseImage",
     "ImageType",
@@ -70,6 +72,8 @@ __all__ = [
     "SnomedMapping",
     "QRToken",
     "RefreshToken",
+    "VerificationToken",
+    "TokenPurpose",
     # Todos
     "Todo",
 ]

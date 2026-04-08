@@ -5,9 +5,9 @@ cases/schemas.py — Case Request & Response Models
 CASE LIFECYCLE SUMMARY
 -----------------------
 1. Patient creates case (POST /cases) → sets consultation_type, is_for_self,
-   presenting_complaint. Case starts with ai_status=pending, clinical_status=active.
-2. Patient gives consent (PATCH /cases/{id}) → consent_given=True
-3. Patient uploads images (POST /cases/{id}/images/upload)
+   presenting_complaint, consent_ai_analysis, consent_research.
+   Case starts with ai_status=pending, clinical_status=active.
+2. Patient uploads images (POST /cases/{id}/images/upload)
 4. Patient triggers AI analysis (POST /cases/{id}/ai/analyze) [Layer 5]
 5. Doctor scans QR → claims case (PATCH /cases/{id}/assign)
 6. Doctor reviews → sets clinical_status badge
@@ -45,8 +45,9 @@ class CaseCreateRequest(BaseModel):
     """
     POST /api/v1/cases
 
-    Opens a new consultation. Images are uploaded separately after creation.
-    Consent is given separately via PATCH — never assumed at creation.
+    Opens a new consultation. Consent is captured here at creation —
+    there is no separate consent endpoint.
+    consent_ai_analysis must be True or the request is rejected (400 CONSENT_REQUIRED).
     """
     consultation_type: str = Field(
         default="new_complaint",
@@ -66,6 +67,13 @@ class CaseCreateRequest(BaseModel):
         max_length=2000,
         description="Patient's initial description in their own words",
     )
+    consent_ai_analysis: bool = Field(
+        description="Required. Patient consents to AI analysis. Must be True.",
+    )
+    consent_research: bool = Field(
+        default=False,
+        description="Optional. Patient allows anonymized data for academic research.",
+    )
     dependent: DependentInfo | None = Field(
         default=None,
         description="Required when is_for_self=False",
@@ -82,11 +90,10 @@ class CaseUpdateRequest(BaseModel):
 
     All fields optional — send only what changes.
 
-    consent_given: once set True, cannot be un-set (immutable consent record).
     clinical_status: doctor-only field — service enforces role check.
+    Consent fields are immutable after case creation and cannot be updated here.
     """
     presenting_complaint: str | None = Field(default=None, max_length=2000)
-    consent_given: bool | None = None
     clinical_status: str | None = Field(
         default=None,
         pattern="^(active|follow_up_available|monitoring|resolved)$",
@@ -108,7 +115,7 @@ class CaseSummaryResponse(BaseModel):
     clinical_status: str
     is_for_self: bool
     dependent_name: str | None = None
-    consent_given: bool
+    consent_ai_analysis: bool
     has_visible_lesion: bool
     image_count: int = 0
     created_at: datetime
@@ -126,8 +133,9 @@ class CaseResponse(BaseModel):
     doctor_id: str | None = None
     consultation_type: str
     has_visible_lesion: bool
-    consent_given: bool
-    consent_given_at: datetime | None = None
+    consent_ai_analysis: bool
+    consent_ai_analysis_at: datetime | None = None
+    consent_research: bool
     is_for_self: bool
     dependent_name: str | None = None
     dependent_relationship: str | None = None
@@ -156,6 +164,41 @@ class PaginatedCasesResponse(BaseModel):
     has_next: bool
 
 
+class RedFlagsResponse(BaseModel):
+    """
+    GET /api/v1/cases/{case_id}/red-flags
+    POST /api/v1/cases/{case_id}/red-flags/check
+
+    Returned after triggering or reading the systemic / red flag check.
+    The Figma Basic Patient Flow shows this as a named step between Q&A and Case Summary.
+    """
+    case_id: str
+    status: str  # not_checked | checking | clear | flagged
+    flags: list[str]  # e.g. ["Rapidly changing mole", "Systemic fever"]
+    advice: str | None = None  # Shown to patient only when status == flagged
+    message: str
+
+
+class AssessmentDepthRequest(BaseModel):
+    """
+    POST /api/v1/cases/{case_id}/assessment-depth
+
+    Sets how many Q&A rounds the AI will run.
+    Must be called after AI analysis completes and before questions start.
+    """
+    depth: str = Field(
+        pattern="^(quick|standard|full)$",
+        description="quick = 2 rounds, standard = 5 rounds, full = 8 rounds",
+    )
+
+
+class AssessmentDepthResponse(BaseModel):
+    case_id: str
+    depth: str
+    max_question_rounds: int
+    message: str
+
+
 class DoctorStatsResponse(BaseModel):
     """
     GET /api/v1/doctors/me/stats
@@ -169,16 +212,3 @@ class DoctorStatsResponse(BaseModel):
     total_assigned: int
 
 
-class ConsentResponse(BaseModel):
-    """
-    POST /api/v1/cases/{case_id}/consent
-
-    Returned after the patient records consent.
-    already_given=True means the call was a no-op (idempotent).
-    """
-    case_id: str
-    consent_given: bool
-    consent_given_at: datetime
-    already_given: bool = Field(
-        description="True if consent was already recorded before this call"
-    )

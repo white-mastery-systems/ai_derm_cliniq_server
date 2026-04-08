@@ -97,6 +97,15 @@ class RoundOut(BaseModel):
     answers: list[str]              # Patient's selected answer texts (ordered by question_index)
 
 
+class FinishChatResponse(BaseModel):
+    """Returned by POST /finish (200)."""
+    case_id: str
+    question_round: int
+    max_rounds: int
+    is_complete: bool
+    message: str = "Conversation finished early. Case summary is ready."
+
+
 class ConversationHistoryResponse(BaseModel):
     """
     Returned by GET /chat.
