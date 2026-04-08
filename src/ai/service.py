@@ -118,12 +118,13 @@ async def trigger_analysis(
             message="Patient must give consent before triggering AI analysis"
         )
 
-    # Image gate — at least one image required
-    image_count = await _count_images(db, case_id)
-    if image_count == 0:
-        raise BadRequestException(
-            message="At least one image must be uploaded before triggering analysis"
-        )
+    # Image gate — only enforced when patient said they have a visible lesion
+    if case.has_visible_lesion:
+        image_count = await _count_images(db, case_id)
+        if image_count == 0:
+            raise BadRequestException(
+                message="At least one image must be uploaded before triggering analysis"
+            )
 
     # Idempotency gate (ISS-009)
     if case.ai_status == AiStatus.PROCESSING:
@@ -139,9 +140,9 @@ async def trigger_analysis(
     case.ai_status = AiStatus.PROCESSING
     await db.flush()  # Write to DB before enqueuing
 
-    # Enqueue Celery chain
+    # Enqueue the correct chain based on whether the patient has a visible lesion
     try:
-        result = build_analysis_chain(case_id).apply_async()
+        result = build_analysis_chain(case_id, case.has_visible_lesion).apply_async()
         task_id = result.id
     except Exception as exc:
         # If Redis is down, roll back the status change and fail gracefully

@@ -17,7 +17,7 @@ Doctor home screen stats:
 GET    /doctors/me/stats    → Doctor: dashboard numbers
 """
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Body, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.dependencies import get_current_user, require_doctor, require_patient
@@ -28,8 +28,11 @@ from src.cases.schemas import (
     CaseCreateRequest,
     CaseResponse,
     CaseUpdateRequest,
+    DoctorCaseCreateRequest,
     DoctorStatsResponse,
     PaginatedCasesResponse,
+    PaginatedSearchResponse,
+    RedFlagsCheckRequest,
     RedFlagsResponse,
 )
 from src.database.core import get_async_session
@@ -70,6 +73,45 @@ async def list_cases(
     db: AsyncSession = Depends(get_async_session),
 ) -> PaginatedCasesResponse:
     return await service.list_cases(db, user, page, page_size, clinical_status, is_for_self)
+
+
+@router.post(
+    "/doctor",
+    response_model=CaseResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Doctor creates a case on behalf of a patient",
+    description=(
+        "Used after the doctor looks up a patient by code (GET /users/by-code/{code}). "
+        "Doctor is immediately assigned. Consent is implied by the clinical encounter."
+    ),
+)
+async def create_case_by_doctor(
+    request: DoctorCaseCreateRequest,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> CaseResponse:
+    return await service.create_case_by_doctor(db, doctor, request)
+
+
+@router.get(
+    "/search",
+    response_model=PaginatedSearchResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Search cases by patient name or case ID",
+    description=(
+        "Doctor: searches only their assigned cases. "
+        "Admin: searches all cases. "
+        "Partial, case-insensitive match on patient full name or case ID."
+    ),
+)
+async def search_cases(
+    q: str = Query(min_length=1, description="Search term — patient name or case ID"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> PaginatedSearchResponse:
+    return await service.search_cases(db, user, q, page, page_size)
 
 
 @router.get(
@@ -164,10 +206,12 @@ async def get_red_flags(
 )
 async def trigger_red_flag_check(
     case_id: str,
+    body: RedFlagsCheckRequest | None = Body(default=None),
     patient: User = Depends(require_patient),
     db: AsyncSession = Depends(get_async_session),
 ) -> RedFlagsResponse:
-    return await service.trigger_red_flag_check(db, patient, case_id)
+    selected = body.selected_symptoms if body else []
+    return await service.trigger_red_flag_check(db, patient, case_id, selected)
 
 
 @router.patch(

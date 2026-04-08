@@ -505,17 +505,31 @@ Correct format:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def red_flag_check(complaint: str, answers: str) -> str:
+    def red_flag_check(
+        complaint: str,
+        answers: str,
+        patient_reported_symptoms: str = "",
+    ) -> str:
         """
-        Check patient complaint and Q&A answers for urgent / red-flag symptoms.
+        Check patient complaint, Q&A answers, and self-reported systemic symptoms
+        for urgent / red-flag conditions.
+
+        patient_reported_symptoms: pre-formatted bullet list of symptoms the patient
+        selected on the Systemic Check screen. Empty string if none reported.
 
         Returns JSON: {{"flags": [...], "advice": "<string or null>"}}
         flags is an empty list when no red flags are found.
         advice is a patient-readable warning present only when flags is non-empty.
         """
+        symptoms_section = (
+            f"Patient self-reported systemic symptoms:\n{patient_reported_symptoms}"
+            if patient_reported_symptoms
+            else "Patient self-reported systemic symptoms:\nNone reported"
+        )
         return f"""You are a dermatology triage assistant.
-Review the patient's presenting complaint and their answers to follow-up questions.
-Identify any systemic or urgent 'red flag' symptoms that require immediate medical attention.
+Review the patient's presenting complaint, their answers to follow-up questions, and
+any systemic symptoms they self-reported on the Systemic Check screen.
+Identify any urgent 'red flag' symptoms that require immediate medical attention.
 
 Red flag examples (not exhaustive):
 - Rapidly changing or bleeding mole (possible melanoma)
@@ -530,6 +544,8 @@ Presenting complaint:
 
 Patient answers:
 {answers}
+
+{symptoms_section}
 
 Respond ONLY with valid JSON in this exact format:
 {{"flags": ["<flag1>", "<flag2>"], "advice": "<patient-friendly urgent advice, or null if no flags>"}}

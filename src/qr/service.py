@@ -114,6 +114,7 @@ async def generate_qr(
     return QRTokenResponse(
         token=token_value,
         case_id=request.case_id,
+        display_id=f"AI-{case.case_number}" if case.case_number else None,
         expires_at=expires_at,
         qr_url=f"{_QR_BASE_URL}/{token_value}",
     )

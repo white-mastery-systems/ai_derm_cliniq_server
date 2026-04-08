@@ -62,6 +62,11 @@ class CaseCreateRequest(BaseModel):
         default=True,
         description="False triggers the 'Someone Else' dependent flow",
     )
+    body_location: str | None = Field(
+        default=None,
+        max_length=100,
+        description="Body area of the lesion: face | hand | back | arm | leg | neck | chest | other",
+    )
     presenting_complaint: str | None = Field(
         default=None,
         max_length=2000,
@@ -77,6 +82,15 @@ class CaseCreateRequest(BaseModel):
     dependent: DependentInfo | None = Field(
         default=None,
         description="Required when is_for_self=False",
+    )
+    original_case_id: str | None = Field(
+        default=None,
+        description="For follow-up consultations — ID of the original case being followed up",
+    )
+    symptom_progression: str | None = Field(
+        default=None,
+        pattern="^(better|same|worse)$",
+        description="For follow-up consultations — how symptoms changed: better | same | worse",
     )
 
 
@@ -94,6 +108,7 @@ class CaseUpdateRequest(BaseModel):
     Consent fields are immutable after case creation and cannot be updated here.
     """
     presenting_complaint: str | None = Field(default=None, max_length=2000)
+    body_location: str | None = Field(default=None, max_length=100)
     clinical_status: str | None = Field(
         default=None,
         pattern="^(active|follow_up_available|monitoring|resolved)$",
@@ -110,6 +125,9 @@ class CaseSummaryResponse(BaseModel):
     Omits large text fields (presenting_complaint, case_summary).
     """
     id: str
+    case_number: int | None = None
+    display_id: str | None = None          # "AI-9021" — formatted from case_number
+    case_title: str | None = None          # Most probable diagnosis — shown as card title
     consultation_type: str
     ai_status: str
     clinical_status: str
@@ -117,7 +135,12 @@ class CaseSummaryResponse(BaseModel):
     dependent_name: str | None = None
     consent_ai_analysis: bool
     has_visible_lesion: bool
+    body_location: str | None = None
+    symptom_progression: str | None = None # For follow-up cases: better | same | worse
+    symptom_tags: list[str] = []           # Short symptom keywords for case card chips
     image_count: int = 0
+    patient_name: str | None = None        # Populated for doctor/admin list views
+    patient_avatar_url: str | None = None  # Populated for doctor/admin list views
     created_at: datetime
     updated_at: datetime
 
@@ -129,6 +152,10 @@ class CaseResponse(BaseModel):
     Full case detail returned by GET /cases/{id} and POST /cases.
     """
     id: str
+    case_number: int | None = None
+    display_id: str | None = None  # "AI-9021"
+    case_title: str | None = None  # Most probable diagnosis set after AI completes
+    original_case_id: str | None = None
     patient_id: str
     doctor_id: str | None = None
     consultation_type: str
@@ -143,6 +170,9 @@ class CaseResponse(BaseModel):
     dependent_gender: str | None = None
     ai_status: str
     clinical_status: str
+    body_location: str | None = None
+    symptom_progression: str | None = None  # For follow-up cases: better | same | worse
+    symptom_tags: list[str] = []
     presenting_complaint: str | None = None
     case_summary: str | None = None
     celery_task_id: str | None = None
@@ -162,6 +192,25 @@ class PaginatedCasesResponse(BaseModel):
     page: int
     page_size: int
     has_next: bool
+
+
+class RedFlagsCheckRequest(BaseModel):
+    """
+    POST /api/v1/cases/{case_id}/red-flags/check
+
+    Optional patient-reported systemic symptoms collected on the Systemic Check
+    screen (shown after all Q&A rounds complete).
+
+    The frontend sends the labels the patient selected, e.g.:
+      ["Fever or chills", "Night sweats"]
+
+    "None of the above" is filtered out server-side before being passed to the AI.
+    An empty list (or omitting the body entirely) means the patient reported nothing.
+    """
+    selected_symptoms: list[str] = Field(
+        default=[],
+        description="Symptom labels the patient checked on the Systemic Check screen.",
+    )
 
 
 class RedFlagsResponse(BaseModel):
@@ -188,7 +237,7 @@ class AssessmentDepthRequest(BaseModel):
     """
     depth: str = Field(
         pattern="^(quick|standard|full)$",
-        description="quick = 2 rounds, standard = 5 rounds, full = 8 rounds",
+        description="quick = 2–5 rounds, standard = 5–10 rounds, full = 10–15 rounds",
     )
 
 
@@ -197,6 +246,51 @@ class AssessmentDepthResponse(BaseModel):
     depth: str
     max_question_rounds: int
     message: str
+
+
+class DoctorCaseCreateRequest(BaseModel):
+    """
+    POST /api/v1/cases/doctor
+
+    Doctor creates a case on behalf of a patient.
+    patient_id comes from GET /users/by-code/{patient_code} lookup.
+    Consent is implied — the doctor is initiating the clinical workflow.
+    """
+    patient_id: str = Field(description="UUID of the patient (from patient code lookup)")
+    consultation_type: str = Field(
+        default="new_complaint",
+        pattern="^(new_complaint|follow_up)$",
+    )
+    has_visible_lesion: bool = Field(default=True)
+    body_location: str | None = Field(default=None, max_length=100)
+    presenting_complaint: str | None = Field(default=None, max_length=2000)
+    consent_research: bool = Field(default=False)
+
+
+class CaseSearchItem(BaseModel):
+    """One case row returned in search results — includes patient name for display."""
+    id: str
+    case_number: int | None = None
+    display_id: str | None = None
+    patient_id: str
+    patient_name: str
+    consultation_type: str
+    ai_status: str
+    clinical_status: str
+    body_location: str | None = None
+    presenting_complaint: str | None = None
+    image_count: int = 0
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedSearchResponse(BaseModel):
+    items: list[CaseSearchItem]
+    total: int
+    page: int
+    page_size: int
+    has_next: bool
 
 
 class DoctorStatsResponse(BaseModel):

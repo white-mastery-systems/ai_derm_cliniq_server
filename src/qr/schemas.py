@@ -40,6 +40,7 @@ class QRTokenResponse(BaseModel):
     """Returned after successful QR generation."""
     token: str
     case_id: str
+    display_id: str | None = None   # "AI-9021" — human-readable reference shown on Assessment Complete screen
     expires_at: datetime
     qr_url: str     # Full URL encoded in the QR: /api/v1/qr/scan/{token}
 

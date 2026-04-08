@@ -29,7 +29,7 @@ Uses simple offset pagination: page=1 returns rows 0..page_size-1.
 
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.cases.schemas import (
@@ -37,21 +37,26 @@ from src.cases.schemas import (
     AssessmentDepthResponse,
     CaseCreateRequest,
     CaseResponse,
+    CaseSearchItem,
     CaseSummaryResponse,
     CaseUpdateRequest,
+    DoctorCaseCreateRequest,
     DoctorStatsResponse,
     PaginatedCasesResponse,
+    PaginatedSearchResponse,
     RedFlagsResponse,
 )
 from src.exceptions import (
     BadRequestException,
     CaseNotFoundException,
     ForbiddenException,
+    UserNotFoundException,
 )
 from src.logger import get_logger
 from src.models.base import new_uuid
 from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
 from src.models.case_image import CaseImage
+from src.models.patient_profile import PatientProfile
 from src.models.user import User, UserRole
 
 logger = get_logger(__name__)
@@ -61,9 +66,25 @@ logger = get_logger(__name__)
 # Internal helpers
 # ------------------------------------------------------------------ #
 
+def _parse_symptom_tags(raw: str | None) -> list[str]:
+    """Deserialise the JSON symptom_tags stored on Case into a list."""
+    if not raw:
+        return []
+    import json as _json
+    try:
+        parsed = _json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
 def _to_case_response(case: Case, image_count: int = 0) -> CaseResponse:
     return CaseResponse(
         id=case.id,
+        case_number=case.case_number,
+        display_id=f"AI-{case.case_number}" if case.case_number else None,
+        case_title=case.case_title,
+        original_case_id=case.original_case_id,
         patient_id=case.patient_id,
         doctor_id=case.doctor_id,
         consultation_type=case.consultation_type.value,
@@ -78,6 +99,9 @@ def _to_case_response(case: Case, image_count: int = 0) -> CaseResponse:
         dependent_gender=case.dependent_gender,
         ai_status=case.ai_status.value,
         clinical_status=case.clinical_status.value,
+        body_location=case.body_location,
+        symptom_progression=case.symptom_progression,
+        symptom_tags=_parse_symptom_tags(case.symptom_tags),
         presenting_complaint=case.presenting_complaint,
         case_summary=case.case_summary,
         celery_task_id=case.celery_task_id,
@@ -89,9 +113,17 @@ def _to_case_response(case: Case, image_count: int = 0) -> CaseResponse:
     )
 
 
-def _to_summary_response(case: Case, image_count: int = 0) -> CaseSummaryResponse:
+def _to_summary_response(
+    case: Case,
+    image_count: int = 0,
+    patient_name: str | None = None,
+    patient_avatar_url: str | None = None,
+) -> CaseSummaryResponse:
     return CaseSummaryResponse(
         id=case.id,
+        case_number=case.case_number,
+        display_id=f"AI-{case.case_number}" if case.case_number else None,
+        case_title=case.case_title,
         consultation_type=case.consultation_type.value,
         ai_status=case.ai_status.value,
         clinical_status=case.clinical_status.value,
@@ -99,7 +131,12 @@ def _to_summary_response(case: Case, image_count: int = 0) -> CaseSummaryRespons
         dependent_name=case.dependent_name,
         consent_ai_analysis=case.consent_ai_analysis,
         has_visible_lesion=case.has_visible_lesion,
+        body_location=case.body_location,
+        symptom_progression=case.symptom_progression,
+        symptom_tags=_parse_symptom_tags(case.symptom_tags),
         image_count=image_count,
+        patient_name=patient_name,
+        patient_avatar_url=patient_avatar_url,
         created_at=case.created_at,
         updated_at=case.updated_at,
     )
@@ -175,10 +212,13 @@ async def create_case(
     case = Case(
         id=new_uuid(),
         patient_id=patient.id,
+        original_case_id=request.original_case_id,
         consultation_type=c_type,
         has_visible_lesion=request.has_visible_lesion,
         is_for_self=request.is_for_self,
+        body_location=request.body_location,
         presenting_complaint=request.presenting_complaint,
+        symptom_progression=request.symptom_progression,
         consent_ai_analysis=True,
         consent_ai_analysis_at=now,
         consent_research=request.consent_research,
@@ -246,17 +286,27 @@ async def list_cases(
     total = count_result.scalar_one()
 
     rows_result = await db.execute(
-        select(Case)
+        select(Case, User.full_name.label("patient_name"), PatientProfile.avatar_url.label("patient_avatar_url"))
+        .join(User, User.id == Case.patient_id)
+        .outerjoin(PatientProfile, PatientProfile.user_id == Case.patient_id)
         .where(where_clause)
         .order_by(Case.created_at.desc())
         .offset(offset)
         .limit(page_size)
     )
-    cases = list(rows_result.scalars().all())
+    rows = rows_result.all()
 
-    case_ids = [c.id for c in cases]
+    case_ids = [row.Case.id for row in rows]
     counts = await _get_image_counts(db, case_ids)
-    items = [_to_summary_response(c, counts.get(c.id, 0)) for c in cases]
+    items = [
+        _to_summary_response(
+            row.Case,
+            counts.get(row.Case.id, 0),
+            patient_name=row.patient_name,
+            patient_avatar_url=row.patient_avatar_url,
+        )
+        for row in rows
+    ]
 
     return PaginatedCasesResponse(
         items=items,
@@ -315,6 +365,9 @@ async def update_case(
         if user.role != UserRole.PATIENT:
             raise ForbiddenException(message="Only the patient can update the complaint")
         case.presenting_complaint = request.presenting_complaint
+
+    if request.body_location is not None:
+        case.body_location = request.body_location
 
     if request.clinical_status is not None:
         if user.role != UserRole.DOCTOR:
@@ -386,7 +439,7 @@ async def assign_doctor(
 # Assessment Depth
 # ------------------------------------------------------------------ #
 
-_DEPTH_ROUNDS: dict[str, int] = {"quick": 2, "standard": 5, "full": 8}
+_DEPTH_ROUNDS: dict[str, int] = {"quick": 5, "standard": 10, "full": 15}
 
 
 async def set_assessment_depth(
@@ -496,6 +549,7 @@ async def trigger_red_flag_check(
     db: AsyncSession,
     patient: User,
     case_id: str,
+    selected_symptoms: list[str] | None = None,
 ) -> RedFlagsResponse:
     """
     Trigger the systemic / red flag check for a case.
@@ -536,7 +590,7 @@ async def trigger_red_flag_check(
 
     try:
         from src.workers.tasks.analysis import red_flag_check_task
-        red_flag_check_task.delay(case_id)
+        red_flag_check_task.delay(case_id, selected_symptoms or [])
         logger.info("red_flag_check_triggered", case_id=case_id)
     except Exception as exc:
         logger.error("red_flag_check_enqueue_failed", case_id=case_id, error=str(exc))
@@ -582,4 +636,156 @@ async def get_doctor_stats(db: AsyncSession, doctor: User) -> DoctorStatsRespons
         in_progress=in_progress,
         completed_today=completed_today,
         total_assigned=total_assigned,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Doctor-side Case Creation
+# ------------------------------------------------------------------ #
+
+async def create_case_by_doctor(
+    db: AsyncSession,
+    doctor: User,
+    request: DoctorCaseCreateRequest,
+) -> CaseResponse:
+    """
+    Doctor creates a case on behalf of a patient.
+
+    The patient must exist and be active — looked up by patient_id from
+    the patient code lookup (GET /users/by-code/{code}).
+
+    Doctor is immediately assigned (doctor_id = doctor.id).
+    Consent is implied by the clinical encounter — consent_ai_analysis = True.
+
+    Raises:
+        UserNotFoundException — patient_id does not match an active patient
+    """
+    from sqlalchemy.orm import selectinload as _sil
+
+    # Verify the patient exists and is active
+    result = await db.execute(
+        select(User)
+        .where(User.id == request.patient_id)
+    )
+    patient = result.scalar_one_or_none()
+    if patient is None or not patient.is_active or patient.role != UserRole.PATIENT:
+        raise UserNotFoundException(message=f"No active patient found with id: {request.patient_id}")
+
+    try:
+        c_type = ConsultationType(request.consultation_type)
+    except ValueError:
+        raise BadRequestException(
+            message=f"Invalid consultation_type: {request.consultation_type!r}"
+        )
+
+    now = datetime.now(tz=timezone.utc)
+    case = Case(
+        id=new_uuid(),
+        patient_id=request.patient_id,
+        doctor_id=doctor.id,
+        consultation_type=c_type,
+        has_visible_lesion=request.has_visible_lesion,
+        is_for_self=True,
+        body_location=request.body_location,
+        presenting_complaint=request.presenting_complaint,
+        consent_ai_analysis=True,
+        consent_ai_analysis_at=now,
+        consent_research=request.consent_research,
+        ai_status=AiStatus.PENDING,
+        clinical_status=ClinicalStatus.ACTIVE,
+        question_round=0,
+        max_question_rounds=5,
+    )
+    db.add(case)
+    await db.flush()
+
+    logger.info(
+        "case_created_by_doctor",
+        case_id=case.id,
+        patient_id=request.patient_id,
+        doctor_id=doctor.id,
+    )
+    return _to_case_response(case, image_count=0)
+
+
+# ------------------------------------------------------------------ #
+# Search
+# ------------------------------------------------------------------ #
+
+async def search_cases(
+    db: AsyncSession,
+    user: User,
+    q: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> PaginatedSearchResponse:
+    """
+    Search cases by patient full name or case ID (partial, case-insensitive).
+
+    Doctor → searches only their assigned cases.
+    Admin  → searches all cases.
+
+    Returns CaseSearchItem rows that include patient_name for display.
+    """
+    offset = (page - 1) * page_size
+    pattern = f"%{q}%"
+
+    # Join Case → User (patient) + PatientProfile for name and avatar
+    base_query = (
+        select(
+            Case,
+            User.full_name.label("patient_name"),
+            PatientProfile.avatar_url.label("patient_avatar_url"),
+        )
+        .join(User, User.id == Case.patient_id)
+        .outerjoin(PatientProfile, PatientProfile.user_id == Case.patient_id)
+        .where(
+            or_(
+                Case.id.ilike(pattern),
+                User.full_name.ilike(pattern),
+            )
+        )
+    )
+
+    if user.role == UserRole.DOCTOR:
+        base_query = base_query.where(Case.doctor_id == user.id)
+
+    count_query = select(func.count()).select_from(base_query.subquery())
+    total = (await db.execute(count_query)).scalar_one()
+
+    rows_result = await db.execute(
+        base_query
+        .order_by(Case.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    rows = rows_result.all()
+
+    case_ids = [row.Case.id for row in rows]
+    counts = await _get_image_counts(db, case_ids)
+
+    items = [
+        CaseSearchItem(
+            id=row.Case.id,
+            case_number=row.Case.case_number,
+            display_id=f"AI-{row.Case.case_number}" if row.Case.case_number else None,
+            patient_id=row.Case.patient_id,
+            patient_name=row.patient_name,
+            consultation_type=row.Case.consultation_type.value,
+            ai_status=row.Case.ai_status.value,
+            clinical_status=row.Case.clinical_status.value,
+            body_location=row.Case.body_location,
+            presenting_complaint=row.Case.presenting_complaint,
+            image_count=counts.get(row.Case.id, 0),
+            created_at=row.Case.created_at,
+        )
+        for row in rows
+    ]
+
+    return PaginatedSearchResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+        has_next=(offset + page_size) < total,
     )

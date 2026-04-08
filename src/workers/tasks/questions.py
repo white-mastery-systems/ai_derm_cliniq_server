@@ -237,10 +237,7 @@ def generate_questions_task(self, case_id: str) -> None:
             patient_particulars = await _get_patient_particulars(session, case.patient_id)
 
             if round_number == 0:
-                # Round 0: image-based first questions
-                image_bytes = await _download_case_images(session, case_id)
-
-                # Set max_question_rounds via question_numbers()
+                # Set max_question_rounds via question_numbers() — works for both paths
                 try:
                     qn_prompt = PatientConsultationPrompts.question_numbers().format(
                         diagnoses=differential
@@ -252,17 +249,39 @@ def generate_questions_task(self, case_id: str) -> None:
                     case.max_question_rounds = max_rounds
                     logger.info("question_numbers_set", case_id=case_id, max_rounds=max_rounds)
                 except (AIProviderException, ValueError, KeyError):
-                    # Default to 5 if this call fails — non-critical
-                    pass
+                    pass  # Default to 5 — non-critical
 
-                # Generate first questions
-                try:
-                    prompt = ImageAnalysisPrompts.first_question()
-                    response_text = gemini_client.call_gemini(prompt, images=image_bytes)
-                    questions_data = gemini_client.extract_json(response_text)
-                except AIProviderException as exc:
-                    await _fail_case(session, case_id, f"Question generation failed: {exc}")
-                    raise Ignore() from exc
+                if case.has_visible_lesion:
+                    # Image-based first questions
+                    image_bytes = await _download_case_images(session, case_id)
+                    try:
+                        prompt = ImageAnalysisPrompts.first_question()
+                        response_text = gemini_client.call_gemini(prompt, images=image_bytes)
+                        questions_data = gemini_client.extract_json(response_text)
+                    except AIProviderException as exc:
+                        await _fail_case(session, case_id, f"Question generation failed: {exc}")
+                        raise Ignore() from exc
+                else:
+                    # Complaint-only first questions (no visible lesion path)
+                    age, sex = "unknown", "unknown"
+                    for part in patient_particulars.split(","):
+                        part = part.strip()
+                        if part.startswith("Age:"):
+                            age = part.split(":", 1)[1].strip()
+                        elif part.startswith("Sex:"):
+                            sex = part.split(":", 1)[1].strip()
+                    complaint = case.presenting_complaint or ""
+                    try:
+                        prompt = PatientConsultationPrompts.generate_questions_from_complaints().format(
+                            age=age,
+                            sex=sex,
+                            complaints=complaint,
+                        )
+                        response_text = gemini_client.call_gemini(prompt)
+                        questions_data = gemini_client.extract_json(response_text)
+                    except AIProviderException as exc:
+                        await _fail_case(session, case_id, f"Question generation failed: {exc}")
+                        raise Ignore() from exc
 
             else:
                 # Round 1+: text-only doubts → questions pipeline
@@ -389,9 +408,8 @@ def refine_analysis_task(self, case_id: str) -> None:
             visual_desc = await _get_latest_visual_desc(session, case_id)
             differential = await _get_latest_differential(session, case_id)
             patient_particulars = await _get_patient_particulars(session, case.patient_id)
-            image_bytes = await _download_case_images(session, case_id)
 
-            # Step 1: Revised differential from conversation
+            # Step 1: Revised differential from conversation (works for both paths)
             try:
                 diff_prompt = PatientConsultationPrompts.diagnosis_analysis_from_conversation().format(
                     conversation_history=conv_history,
@@ -406,18 +424,24 @@ def refine_analysis_task(self, case_id: str) -> None:
                 await _fail_case(session, case_id, f"Analysis refinement failed: {exc}")
                 raise Ignore() from exc
 
-            # Step 2: Updated visual description with conversation context
-            try:
-                desc_prompt = ImageAnalysisPrompts.get_description_with_context().format(
-                    personal_particulars=patient_particulars,
-                    previous_conversation=conv_history,
-                )
-                desc_text = gemini_client.call_gemini(desc_prompt, images=image_bytes)
-                new_desc = gemini_client.extract_json(desc_text)
-                new_desc_json = json.dumps(new_desc)
-            except AIProviderException as exc:
-                await _fail_case(session, case_id, f"Visual description update failed: {exc}")
-                raise Ignore() from exc
+            # Step 2: Updated visual description — image path only
+            if case.has_visible_lesion:
+                image_bytes = await _download_case_images(session, case_id)
+                try:
+                    desc_prompt = ImageAnalysisPrompts.get_description_with_context().format(
+                        personal_particulars=patient_particulars,
+                        previous_conversation=conv_history,
+                    )
+                    desc_text = gemini_client.call_gemini(desc_prompt, images=image_bytes)
+                    new_desc = gemini_client.extract_json(desc_text)
+                    new_desc_json = json.dumps(new_desc)
+                except AIProviderException as exc:
+                    await _fail_case(session, case_id, f"Visual description update failed: {exc}")
+                    raise Ignore() from exc
+            else:
+                # No visible lesion — no image to describe; carry forward empty description
+                new_desc = {}
+                new_desc_json = "{}"
 
             # Mark old final differential as non-final
             old_dd_result = await session.execute(

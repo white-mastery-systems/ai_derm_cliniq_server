@@ -48,10 +48,13 @@ This is enforced in the upload endpoint — not just the UI.
 import enum
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Sequence, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, new_uuid
+
+# PostgreSQL sequence for human-readable case numbers shown as "AI-{n}" in the UI
+_case_number_seq = Sequence("case_number_seq", start=9001)
 
 
 class ConsultationType(str, enum.Enum):
@@ -116,8 +119,28 @@ class Case(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
 
     # ------------------------------------------------------------------ #
+    # Display Number — "AI-9021" shown on case cards
+    # ------------------------------------------------------------------ #
+    case_number: Mapped[int | None] = mapped_column(
+        Integer,
+        _case_number_seq,
+        server_default=_case_number_seq.next_value(),
+        nullable=True,
+        unique=True,
+        index=True,
+        comment="Sequential display number, shown as AI-{n} in the UI",
+    )
+
+    # ------------------------------------------------------------------ #
     # Ownership
     # ------------------------------------------------------------------ #
+    original_case_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("cases.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="For follow-up cases — references the original case being followed up",
+    )
     patient_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -201,6 +224,23 @@ class Case(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Body Location — shown as FACE / HAND / BACK etc. tag in case list
+    # ------------------------------------------------------------------ #
+    body_location: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Body area of the lesion e.g. face, hand, back, arm, leg, neck, chest, other",
+    )
+
+    # Follow-up symptom progression — shown as "Follow-up status: Better/Same/Worse"
+    # on the Case Summary screen. Only meaningful when consultation_type = follow_up.
+    symptom_progression: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Patient-reported symptom change for follow-up cases: better | same | worse",
+    )
+
+    # ------------------------------------------------------------------ #
     # Dual Status System — NEVER merge these two fields
     # ------------------------------------------------------------------ #
     ai_status: Mapped[AiStatus] = mapped_column(
@@ -216,6 +256,20 @@ class Case(TimestampMixin, Base):
         default=ClinicalStatus.ACTIVE,
         index=True,
         comment="Doctor-set status. Shown as badge in patient History screen.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # AI-populated display fields — set by save_results_task when AI completes
+    # ------------------------------------------------------------------ #
+    case_title: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Most probable diagnosis name — shown as card title in case list (e.g. 'Eczema on hands')",
+    )
+    symptom_tags: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON array of short symptom keywords parsed from key_supporting_features (e.g. ['Redness','Itching','Dry skin'])",
     )
 
     # ------------------------------------------------------------------ #

@@ -23,8 +23,6 @@ We use None as the "not provided" sentinel with model_config exclude_unset.
 """
 
 from datetime import date
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 
@@ -119,5 +117,24 @@ class ProfileUpdateRequest(BaseModel):
     def has_updates(self) -> bool:
         """Return True if at least one field was provided."""
         return any(v is not None for v in self.model_dump().values())
+
+    model_config = {"from_attributes": True}
+
+
+# ================================================================== #
+# Patient Code Lookup — GET /users/by-code/{patient_code}
+# ================================================================== #
+
+class PatientByCodeResponse(BaseModel):
+    """
+    Returned when a doctor looks up a patient by their patient code.
+    Only exposes fields safe for a doctor to see before being assigned to a case.
+    """
+    user_id: str
+    full_name: str
+    patient_code: str
+    date_of_birth: date | None = None
+    gender: str | None = None
+    avatar_url: str | None = None
 
     model_config = {"from_attributes": True}

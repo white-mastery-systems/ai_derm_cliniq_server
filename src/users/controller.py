@@ -20,11 +20,11 @@ The user is always operating on their OWN account — no user_id path param need
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.auth.dependencies import get_current_user
+from src.auth.dependencies import get_current_user, require_doctor
 from src.database.core import get_async_session
 from src.models.user import User
 from src.users import service
-from src.users.schemas import ProfileUpdateRequest, UserProfileResponse
+from src.users.schemas import PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
 
 router = APIRouter()
 
@@ -64,6 +64,25 @@ async def update_my_profile(
     db: AsyncSession = Depends(get_async_session),
 ) -> UserProfileResponse:
     return await service.update_profile(db, current_user.id, request)
+
+
+@router.get(
+    "/by-code/{patient_code}",
+    response_model=PatientByCodeResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Look up a patient by their patient code (doctor only)",
+    description=(
+        "Used by the doctor's 'Enter Patient Code' screen. "
+        "Returns basic patient info. "
+        "Raises 404 if no active patient has that code."
+    ),
+)
+async def get_patient_by_code(
+    patient_code: str,
+    _doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> PatientByCodeResponse:
+    return await service.get_patient_by_code(db, patient_code)
 
 
 @router.delete(

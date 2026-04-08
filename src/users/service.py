@@ -33,7 +33,7 @@ from src.logger import get_logger
 from src.models.doctor_profile import DoctorProfile
 from src.models.patient_profile import PatientProfile
 from src.models.user import User, UserRole
-from src.users.schemas import ProfileUpdateRequest, UserProfileResponse
+from src.users.schemas import PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
 
 logger = get_logger(__name__)
 
@@ -156,6 +156,43 @@ def _apply_doctor_fields(profile: DoctorProfile | None, req: ProfileUpdateReques
         profile.clinic_name = req.clinic_name
     if req.notifications_enabled is not None:
         profile.notifications_enabled = req.notifications_enabled
+
+
+# ------------------------------------------------------------------ #
+# get_patient_by_code
+# ------------------------------------------------------------------ #
+
+async def get_patient_by_code(
+    db: AsyncSession,
+    patient_code: str,
+) -> PatientByCodeResponse:
+    """
+    Look up a patient by their patient code (e.g. PAT-ABCD1234).
+    Used by the doctor's "Enter Patient Code" screen.
+
+    Returns basic patient info safe for a doctor to view before
+    being assigned to a case.
+
+    Raises UserNotFoundException if code not found.
+    """
+    result = await db.execute(
+        select(PatientProfile)
+        .where(PatientProfile.patient_code == patient_code.upper())
+        .options(selectinload(PatientProfile.user))
+    )
+    profile = result.scalar_one_or_none()
+
+    if profile is None or not profile.user.is_active:
+        raise UserNotFoundException(message=f"No patient found with code: {patient_code}")
+
+    return PatientByCodeResponse(
+        user_id=profile.user_id,
+        full_name=profile.user.full_name,
+        patient_code=profile.patient_code,
+        date_of_birth=profile.date_of_birth,
+        gender=profile.gender,
+        avatar_url=profile.avatar_url,
+    )
 
 
 # ------------------------------------------------------------------ #

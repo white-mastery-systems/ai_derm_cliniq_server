@@ -57,6 +57,7 @@ from sqlalchemy.pool import NullPool
 
 from src.ai.llm_router import call_llm, extract_json
 from src.ai.prompts.image_analysis_prompts import ImageAnalysisPrompts
+from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
 from src.config import settings
 from src.exceptions import AIProviderException, StorageException
 from src.logger import get_logger
@@ -389,6 +390,21 @@ def save_results_task(self, analysis_result: dict) -> None:
         )
         confidence = diag.get("confidence in answer") or diag.get("confidence")
 
+        # Parse key_supporting_features into short symptom tag chips
+        # e.g. "Dry, itchy patches; Redness; Chronic course" → ["Dry, itchy patches", "Redness", "Chronic course"]
+        raw_features: str = (
+            most_probable.get("key_supporting_features", "") if isinstance(most_probable, dict) else ""
+        ) or ""
+        symptom_tags: list[str] = []
+        if raw_features:
+            # Split on semicolon first, then comma if no semicolons found
+            if ";" in raw_features:
+                parts = [p.strip() for p in raw_features.split(";")]
+            else:
+                parts = [p.strip() for p in raw_features.split(",")]
+            # Keep only non-empty tags under 60 chars
+            symptom_tags = [p for p in parts if p and len(p) <= 60][:8]
+
         overall_description = desc.get("overall_description")
         type_of_lesion = desc.get("type_of_lesion")
 
@@ -436,6 +452,8 @@ def save_results_task(self, analysis_result: dict) -> None:
             case.ai_status = AiStatus.COMPLETED
             case.celery_task_id = None
             case.case_summary = case_summary
+            case.case_title = most_probable_name
+            case.symptom_tags = json.dumps(symptom_tags) if symptom_tags else None
 
             await session.commit()
 
@@ -469,7 +487,7 @@ def save_results_task(self, analysis_result: dict) -> None:
     max_retries=1,
     default_retry_delay=10,
 )
-def red_flag_check_task(self, case_id: str) -> None:
+def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None = None) -> None:
     """
     Systemic / red flag check — runs after all Q&A rounds complete.
 
@@ -480,7 +498,6 @@ def red_flag_check_task(self, case_id: str) -> None:
       red_flag_status = CLEAR   — no urgent symptoms detected
       red_flag_status = FLAGGED — urgent symptoms found; saves flags + advice
     """
-    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
     from src.models.message import Message, MessageRole
 
     logger.info("red_flag_check_task_start", case_id=case_id)
@@ -505,10 +522,18 @@ def red_flag_check_task(self, case_id: str) -> None:
             complaint = case.presenting_complaint or ""
             answers_text = "\n".join(f"- {a}" for a in patient_answers)
 
+        # Build patient-reported symptoms string, stripping "None of the above"
+        clean_symptoms = [
+            s for s in (selected_symptoms or [])
+            if s.strip().lower() != "none of the above"
+        ]
+        symptoms_text = "\n".join(f"- {s}" for s in clean_symptoms)
+
         try:
             prompt = PatientConsultationPrompts.red_flag_check(
                 complaint=complaint,
                 answers=answers_text,
+                patient_reported_symptoms=symptoms_text,
             )
             raw = call_llm(prompt)
             result = extract_json(raw)
@@ -566,23 +591,112 @@ async def _fail_task_on_timeout(case_id: str, task_name: str) -> None:
 
 
 # ------------------------------------------------------------------ #
+# Task — Analyse Complaint (no visible lesion path)
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="workers.tasks.analysis.analyse_complaint_task",
+    time_limit=180,
+    soft_time_limit=160,
+    max_retries=1,
+    default_retry_delay=15,
+)
+def analyse_complaint_task(self, case_id: str) -> dict:
+    """
+    Complaint-only analysis for cases where has_visible_lesion=False.
+
+    No images are downloaded. The differential is generated purely from
+    the patient's presenting_complaint text using generate_differential_from_complaints().
+
+    Returns the same dict shape as analyse_images_task so that save_results_task
+    can handle both paths identically:
+      {"case_id": ..., "description_json": "{}", "diagnosis_json": ...}
+    """
+    logger.info("analyse_complaint_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None or case.ai_status != AiStatus.PROCESSING:
+                raise Ignore()
+
+            personal_particulars = await _get_patient_particulars(session, case.patient_id)
+            complaint = case.presenting_complaint or "No specific complaint provided."
+
+        # Parse age / sex out of personal_particulars for prompt template vars
+        age, sex = "unknown", "unknown"
+        for part in personal_particulars.split(","):
+            part = part.strip()
+            if part.startswith("Age:"):
+                age = part.split(":", 1)[1].strip()
+            elif part.startswith("Sex:"):
+                sex = part.split(":", 1)[1].strip()
+
+        try:
+            diag_prompt = PatientConsultationPrompts.generate_differential_from_complaints().format(
+                age=age,
+                sex=sex,
+                complaints=complaint,
+                prescription="None",
+            )
+            diag_text = call_llm(diag_prompt)
+            diagnosis_json = extract_json(diag_text)
+        except AIProviderException as exc:
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Complaint differential AI call failed: {exc}")
+            raise Ignore() from exc
+
+        logger.info("analyse_complaint_task_ok", case_id=case_id)
+        await engine.dispose()
+        return {
+            "case_id": case_id,
+            "description_json": "{}",   # No visual description for no-lesion cases
+            "diagnosis_json": json.dumps(diagnosis_json),
+        }
+
+    try:
+        return _run_async(_run())
+    except Ignore:
+        raise
+    except SoftTimeLimitExceeded:
+        _run_async(_fail_task_on_timeout(case_id, "analyse_complaint"))
+        raise Ignore()
+    except Exception as exc:
+        logger.error("analyse_complaint_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+
+
+# ------------------------------------------------------------------ #
 # Chain factory — called from service layer
 # ------------------------------------------------------------------ #
 
-def build_analysis_chain(case_id: str):
+def build_analysis_chain(case_id: str, has_visible_lesion: bool = True):
     """
     Build the Celery task chain for one case.
 
     Returns a Celery Signature (not yet applied).
     The caller does .apply_async() to actually enqueue.
 
-    Chain:
+    Visible lesion chain (has_visible_lesion=True):
         inspect_images_task(case_id)
-        → analyse_images_task(case_id)  [receives case_id from prev task]
-        → save_results_task(result_dict) [receives dict from prev task]
+        → analyse_images_task(case_id)
+        → save_results_task(result_dict)
+
+    No visible lesion chain (has_visible_lesion=False):
+        analyse_complaint_task(case_id)
+        → save_results_task(result_dict)
     """
+    if has_visible_lesion:
+        return chain(
+            inspect_images_task.s(case_id),
+            analyse_images_task.s(),
+            save_results_task.s(),
+        )
     return chain(
-        inspect_images_task.s(case_id),
-        analyse_images_task.s(),
+        analyse_complaint_task.s(case_id),
         save_results_task.s(),
     )
