@@ -67,7 +67,7 @@ class CaseReport(Base):
         comment="GCS path: cases/{case_id}/reports/report_{type}.pdf",
     )
     report_type: Mapped[ReportType] = mapped_column(
-        Enum(ReportType, name="report_type_enum", create_type=True),
+        Enum(ReportType, name="report_type_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ReportType.DOCTOR,
         comment="doctor | patient",

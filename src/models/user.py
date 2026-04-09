@@ -91,7 +91,7 @@ class User(TimestampMixin, Base):
         comment="Display name shown in the app",
     )
     role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="user_role_enum", create_type=True),
+        Enum(UserRole, name="user_role_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         index=True,
         comment="patient | doctor | admin",

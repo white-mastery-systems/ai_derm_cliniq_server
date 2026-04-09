@@ -93,7 +93,7 @@ class DoctorReview(TimestampMixin, Base):
     # Status & Timing
     # ------------------------------------------------------------------ #
     review_status: Mapped[ReviewStatus] = mapped_column(
-        Enum(ReviewStatus, name="review_status_enum", create_type=True),
+        Enum(ReviewStatus, name="review_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ReviewStatus.PENDING,
         index=True,

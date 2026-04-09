@@ -68,7 +68,7 @@ class Message(TimestampMixin, Base):
     # Message Content
     # ------------------------------------------------------------------ #
     role: Mapped[MessageRole] = mapped_column(
-        Enum(MessageRole, name="message_role_enum", create_type=True),
+        Enum(MessageRole, name="message_role_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         comment="ai | patient | doctor",
     )

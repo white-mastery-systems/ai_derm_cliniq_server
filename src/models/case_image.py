@@ -75,7 +75,7 @@ class CaseImage(TimestampMixin, Base):
         comment="Full GCS object path: cases/{case_id}/images/{image_id}.jpg",
     )
     image_type: Mapped[ImageType] = mapped_column(
-        Enum(ImageType, name="image_type_enum", create_type=True),
+        Enum(ImageType, name="image_type_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ImageType.SKIN,
         comment="skin | prescription | dermoscopy",

@@ -160,7 +160,7 @@ class Case(TimestampMixin, Base):
     # Consultation Metadata — set at case creation
     # ------------------------------------------------------------------ #
     consultation_type: Mapped[ConsultationType] = mapped_column(
-        Enum(ConsultationType, name="consultation_type_enum", create_type=True),
+        Enum(ConsultationType, name="consultation_type_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ConsultationType.NEW_COMPLAINT,
         comment="new_complaint | follow_up — patient selects at start",
@@ -252,14 +252,14 @@ class Case(TimestampMixin, Base):
     # Dual Status System — NEVER merge these two fields
     # ------------------------------------------------------------------ #
     ai_status: Mapped[AiStatus] = mapped_column(
-        Enum(AiStatus, name="ai_status_enum", create_type=True),
+        Enum(AiStatus, name="ai_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=AiStatus.PENDING,
         index=True,
         comment="Celery pipeline state. Set by workers only.",
     )
     clinical_status: Mapped[ClinicalStatus] = mapped_column(
-        Enum(ClinicalStatus, name="clinical_status_enum", create_type=True),
+        Enum(ClinicalStatus, name="clinical_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ClinicalStatus.ACTIVE,
         index=True,

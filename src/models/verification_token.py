@@ -77,7 +77,7 @@ class VerificationToken(TimestampMixin, Base):
     # Purpose & Lifecycle
     # ------------------------------------------------------------------ #
     purpose: Mapped[TokenPurpose] = mapped_column(
-        Enum(TokenPurpose, name="token_purpose_enum", create_type=True),
+        Enum(TokenPurpose, name="token_purpose_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         comment="password_reset | email_verify",
     )
