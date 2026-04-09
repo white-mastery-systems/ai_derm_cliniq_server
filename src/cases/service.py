@@ -195,9 +195,10 @@ async def create_case(
             message="CONSENT_REQUIRED: consent_ai_analysis must be true to create a case"
         )
 
-    if not request.is_for_self and request.dependent is None:
+    if not request.is_for_self and request.dependent is None and request.dependent_id is None:
         raise BadRequestException(
-            message="Dependent information is required when is_for_self=False"
+            message="Dependent information is required when is_for_self=False. "
+                    "Provide either dependent_id (saved) or dependent (inline)."
         )
 
     try:
@@ -207,7 +208,33 @@ async def create_case(
             message=f"Invalid consultation_type: {request.consultation_type!r}"
         )
 
+    # Resolve dependent data — saved profile (dependent_id) takes priority over inline
     dep = request.dependent
+    resolved_dependent_id: str | None = None
+
+    if request.dependent_id:
+        from src.models.dependent import Dependent as _Dependent
+        dep_result = await db.execute(
+            select(_Dependent).where(_Dependent.id == request.dependent_id)
+        )
+        saved_dep = dep_result.scalar_one_or_none()
+        if saved_dep is None or saved_dep.patient_id != patient.id:
+            raise BadRequestException(
+                message=f"No saved dependent found with id: {request.dependent_id}"
+            )
+        resolved_dependent_id = saved_dep.id
+        dep_name = saved_dep.name
+        dep_relationship = saved_dep.relationship
+        dep_dob = saved_dep.date_of_birth
+        dep_gender = saved_dep.gender
+    elif dep:
+        dep_name = dep.name
+        dep_relationship = dep.relationship
+        dep_dob = dep.date_of_birth
+        dep_gender = dep.gender
+    else:
+        dep_name = dep_relationship = dep_dob = dep_gender = None
+
     now = datetime.now(tz=timezone.utc)
     case = Case(
         id=new_uuid(),
@@ -226,10 +253,11 @@ async def create_case(
         clinical_status=ClinicalStatus.ACTIVE,
         question_round=0,
         max_question_rounds=5,
-        dependent_name=dep.name if dep else None,
-        dependent_relationship=dep.relationship if dep else None,
-        dependent_dob=dep.date_of_birth if dep else None,
-        dependent_gender=dep.gender if dep else None,
+        dependent_id=resolved_dependent_id,
+        dependent_name=dep_name,
+        dependent_relationship=dep_relationship,
+        dependent_dob=dep_dob,
+        dependent_gender=dep_gender,
     )
     db.add(case)
     await db.flush()

@@ -25,6 +25,7 @@ Importing all models here serves two purposes:
 
 from src.models.base import Base, TimestampMixin, new_uuid
 from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
+from src.models.dependent import Dependent
 from src.models.case_image import CaseImage, ImageType
 from src.models.case_report import CaseReport, ReportType
 from src.models.differential_diagnosis import DifferentialDiagnosis
@@ -50,6 +51,7 @@ __all__ = [
     "UserRole",
     "PatientProfile",
     "DoctorProfile",
+    "Dependent",
     # Cases
     "Case",
     "AiStatus",

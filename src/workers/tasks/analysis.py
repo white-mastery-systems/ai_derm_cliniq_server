@@ -426,15 +426,19 @@ def save_results_task(self, analysis_result: dict) -> None:
                 logger.error("save_results_task_case_not_found", case_id=case_id)
                 return
 
-            # VisualDescription row
-            visual = VisualDescription(
-                id=new_uuid(),
-                case_id=case_id,
-                round_number=0,
-                description_json=description_json_str,
-                overall_description=overall_description,
-            )
-            session.add(visual)
+            # VisualDescription row — only for image-based cases.
+            # No-lesion path passes description_json="{}" (no image → no description).
+            # Skipping the row means _get_latest_visual_desc returns the readable
+            # "No visual description available." fallback instead of the raw "{}".
+            if desc:  # desc is {} for no-lesion; non-empty dict for image path
+                visual = VisualDescription(
+                    id=new_uuid(),
+                    case_id=case_id,
+                    round_number=0,
+                    description_json=description_json_str,
+                    overall_description=overall_description,
+                )
+                session.add(visual)
 
             # DifferentialDiagnosis row
             differential = DifferentialDiagnosis(

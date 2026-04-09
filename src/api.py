@@ -44,6 +44,10 @@ def include_all_routers(app: FastAPI) -> None:
     from src.users.controller import router as users_router
     app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
 
+    # Dependents — /api/v1/users/me/dependents
+    from src.dependents.controller import router as dependents_router
+    app.include_router(dependents_router, prefix="/api/v1/users/me/dependents", tags=["Dependents"])
+
     # ------------------------------------------------------------------ #
     # The routers below will be uncommented as each layer is built.
     # ------------------------------------------------------------------ #

@@ -237,20 +237,10 @@ def generate_questions_task(self, case_id: str) -> None:
             patient_particulars = await _get_patient_particulars(session, case.patient_id)
 
             if round_number == 0:
-                # Set max_question_rounds via question_numbers() — works for both paths
-                try:
-                    qn_prompt = PatientConsultationPrompts.question_numbers().format(
-                        diagnoses=differential
-                    )
-                    qn_text = gemini_client.call_gemini(qn_prompt)
-                    qn_data = gemini_client.extract_json(qn_text)
-                    max_rounds = int(qn_data.get("no_of_questions", 5))
-                    max_rounds = max(1, min(max_rounds, 15))  # clamp 1–15
-                    case.max_question_rounds = max_rounds
-                    logger.info("question_numbers_set", case_id=case_id, max_rounds=max_rounds)
-                except (AIProviderException, ValueError, KeyError):
-                    pass  # Default to 5 — non-critical
-
+                # max_question_rounds is already set by the patient's explicit depth
+                # selection (POST /cases/{id}/assessment-depth) before questions start.
+                # Do NOT call question_numbers() here — it would silently override
+                # the patient's chosen Quick / Standard / Full depth.
                 if case.has_visible_lesion:
                     # Image-based first questions
                     image_bytes = await _download_case_images(session, case_id)

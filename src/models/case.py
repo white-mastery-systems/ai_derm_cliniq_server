@@ -202,6 +202,14 @@ class Case(TimestampMixin, Base):
         nullable=False,
         comment="False when patient consults on behalf of a family member",
     )
+    # FK to saved Dependent profile (set when patient picks an existing dependent)
+    # Inline columns below are always populated regardless, so queries never need to join.
+    dependent_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dependents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     dependent_name: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
@@ -290,7 +298,7 @@ class Case(TimestampMixin, Base):
     # Red Flag Check — runs after Q&A, before case summary
     # ------------------------------------------------------------------ #
     red_flag_status: Mapped[RedFlagStatus] = mapped_column(
-        Enum(RedFlagStatus, name="red_flag_status_enum", create_type=True),
+        Enum(RedFlagStatus, name="red_flag_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=RedFlagStatus.NOT_CHECKED,
         comment="Status of the systemic / red flag check (Figma Basic Patient Flow step 8)",
@@ -334,6 +342,11 @@ class Case(TimestampMixin, Base):
         "User",
         foreign_keys=[patient_id],
         back_populates="patient_cases",
+    )
+    dependent: Mapped["Dependent | None"] = relationship(  # noqa: F821  # type: ignore[name-defined]
+        "Dependent",
+        foreign_keys=[dependent_id],
+        back_populates="cases",
     )
     doctor: Mapped["User | None"] = relationship(  # noqa: F821
         "User",

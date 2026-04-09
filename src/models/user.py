@@ -159,6 +159,11 @@ class User(TimestampMixin, Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    dependents: Mapped[list["Dependent"]] = relationship(  # noqa: F821  # type: ignore[name-defined]
+        "Dependent",
+        back_populates="patient",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id!r} email={self.email!r} role={self.role}>"

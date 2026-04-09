@@ -79,9 +79,16 @@ class CaseCreateRequest(BaseModel):
         default=False,
         description="Optional. Patient allows anonymized data for academic research.",
     )
+    dependent_id: str | None = Field(
+        default=None,
+        description="ID of a saved Dependent (from GET /users/me/dependents). "
+                    "Use this when patient picks an existing dependent from the list. "
+                    "Mutually exclusive with inline `dependent` field.",
+    )
     dependent: DependentInfo | None = Field(
         default=None,
-        description="Required when is_for_self=False",
+        description="Inline dependent details — use when creating a new dependent "
+                    "without saving first. Mutually exclusive with `dependent_id`.",
     )
     original_case_id: str | None = Field(
         default=None,
