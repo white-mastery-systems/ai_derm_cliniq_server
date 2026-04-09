@@ -43,11 +43,6 @@ class Dependent(Base, TimestampMixin):
         index=True,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    relationship: Mapped[str] = mapped_column(
-        String(50),
-        nullable=False,
-        comment="Child | Spouse | Parent | Sibling | Other",
-    )
     date_of_birth: Mapped[date | None] = mapped_column(Date, nullable=True)
     gender: Mapped[str | None] = mapped_column(
         String(50),

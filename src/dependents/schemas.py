@@ -47,10 +47,6 @@ class DependentCreateRequest(BaseModel):
         max_length=50,
         description="Male | Female | Other | Prefer not to say",
     )
-    relationship: str = Field(
-        max_length=50,
-        description="Child | Spouse | Parent | Sibling | Other",
-    )
 
 
 class DependentUpdateRequest(BaseModel):
@@ -58,14 +54,12 @@ class DependentUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=255)
     age: int | None = Field(default=None, ge=0, le=120)
     gender: str | None = Field(default=None, max_length=50)
-    relationship: str | None = Field(default=None, max_length=50)
 
 
 class DependentResponse(BaseModel):
     """Single dependent returned in list and after create/update."""
     id: str
     name: str
-    relationship: str
     age: int | None = None                       # Calculated from date_of_birth
     gender: str | None = None
     date_of_birth: date | None = None

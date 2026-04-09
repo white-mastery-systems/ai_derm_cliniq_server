@@ -25,7 +25,6 @@ def upgrade() -> None:
         sa.Column("id", sa.String(36), primary_key=True),
         sa.Column("patient_id", sa.String(36), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("relationship", sa.String(50), nullable=False),
         sa.Column("date_of_birth", sa.Date, nullable=True),
         sa.Column("gender", sa.String(50), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),

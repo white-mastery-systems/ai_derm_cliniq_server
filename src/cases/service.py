@@ -224,16 +224,14 @@ async def create_case(
             )
         resolved_dependent_id = saved_dep.id
         dep_name = saved_dep.name
-        dep_relationship = saved_dep.relationship
         dep_dob = saved_dep.date_of_birth
         dep_gender = saved_dep.gender
     elif dep:
         dep_name = dep.name
-        dep_relationship = dep.relationship
         dep_dob = dep.date_of_birth
         dep_gender = dep.gender
     else:
-        dep_name = dep_relationship = dep_dob = dep_gender = None
+        dep_name = dep_dob = dep_gender = None
 
     now = datetime.now(tz=timezone.utc)
     case = Case(
@@ -255,7 +253,6 @@ async def create_case(
         max_question_rounds=5,
         dependent_id=resolved_dependent_id,
         dependent_name=dep_name,
-        dependent_relationship=dep_relationship,
         dependent_dob=dep_dob,
         dependent_gender=dep_gender,
     )

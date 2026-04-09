@@ -36,7 +36,6 @@ class DependentInfo(BaseModel):
     Required when is_for_self=False.
     """
     name: str = Field(min_length=2, max_length=255)
-    relationship: str = Field(max_length=100, description="Son | Mother | Spouse etc.")
     date_of_birth: date | None = None
     gender: str | None = Field(default=None, max_length=50)
 

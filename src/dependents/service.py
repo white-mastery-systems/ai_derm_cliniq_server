@@ -22,7 +22,7 @@ When returning a dependent, we calculate current age from DOB:
   age = (today - dob).days // 365
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -68,7 +68,6 @@ def _to_response(
     return DependentResponse(
         id=dep.id,
         name=dep.name,
-        relationship=dep.relationship,
         age=_age_from_dob(dep.date_of_birth),
         gender=dep.gender,
         date_of_birth=dep.date_of_birth,
@@ -142,7 +141,6 @@ async def create_dependent(
         id=new_uuid(),
         patient_id=patient.id,
         name=request.name,
-        relationship=request.relationship,
         date_of_birth=_dob_from_age(request.age),
         gender=request.gender,
     )
@@ -181,8 +179,6 @@ async def update_dependent(
         dep.date_of_birth = _dob_from_age(request.age)
     if request.gender is not None:
         dep.gender = request.gender
-    if request.relationship is not None:
-        dep.relationship = request.relationship
 
     await db.flush()
     logger.info("dependent_updated", dependent_id=dep.id, patient_id=patient.id)
