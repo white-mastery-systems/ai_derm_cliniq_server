@@ -37,6 +37,11 @@ down_revision: Union[str, Sequence[str], None] = "d4e5f6a7b8c9"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+_token_purpose_enum = sa.Enum(
+    "password_reset", "email_verify",
+    name="token_purpose_enum",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helper: recreate a PostgreSQL enum type with new values
@@ -141,9 +146,7 @@ def upgrade() -> None:
     # ------------------------------------------------------------------ #
     # 2. Create verification_tokens table
     # ------------------------------------------------------------------ #
-    op.execute(
-        "CREATE TYPE token_purpose_enum AS ENUM ('password_reset', 'email_verify')"
-    )
+    _token_purpose_enum.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "verification_tokens",
@@ -180,7 +183,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Drop verification_tokens
     op.drop_table("verification_tokens")
-    op.execute("DROP TYPE IF EXISTS token_purpose_enum")
+    _token_purpose_enum.drop(op.get_bind(), checkfirst=True)
 
     # Restore enums to uppercase
     # (reverse order, same helper — uppercase values)
