@@ -146,7 +146,15 @@ def upgrade() -> None:
     # ------------------------------------------------------------------ #
     # 2. Create verification_tokens table
     # ------------------------------------------------------------------ #
-    _token_purpose_enum.create(op.get_bind(), checkfirst=True)
+    # Use DO block so this is idempotent — won't fail if type already exists
+    # (can happen when a previous migration run created the type but crashed
+    # before creating the table).
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE token_purpose_enum AS ENUM ('password_reset', 'email_verify');
+        EXCEPTION WHEN duplicate_object THEN null;
+        END $$;
+    """)
 
     op.create_table(
         "verification_tokens",
