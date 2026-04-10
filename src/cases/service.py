@@ -599,7 +599,8 @@ async def trigger_red_flag_check(
             message="AI analysis must complete before the red flag check can run"
         )
 
-    if case.question_round < case.max_question_rounds:
+    # Allow if rounds exhausted OR if conversation was finished early (case_summary is set)
+    if case.question_round < case.max_question_rounds and not case.case_summary:
         raise BadRequestException(
             message="Complete all question rounds before running the red flag check"
         )

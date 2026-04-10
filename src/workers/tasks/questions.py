@@ -393,6 +393,20 @@ def refine_analysis_task(self, case_id: str) -> None:
             current_round = case.question_round
             new_round = current_round + 1
 
+            # Guard: if chat/finish was called while this task was in the queue,
+            # question_round was already set to max_question_rounds. Don't overwrite it —
+            # just run finalization if case_summary is missing, then exit.
+            if current_round >= case.max_question_rounds:
+                if not case.case_summary:
+                    messages = await _get_all_messages(session, case_id)
+                    conv_history = _build_conversation_history(messages)
+                    visual_desc = await _get_latest_visual_desc(session, case_id)
+                    differential = await _get_latest_differential(session, case_id)
+                    diff_json = differential.diagnosis_json if differential else "{}"
+                    await _finalize_case(session, case_id, conv_history, visual_desc, diff_json)
+                    await session.commit()
+                raise Ignore()
+
             messages = await _get_all_messages(session, case_id)
             conv_history = _build_conversation_history(messages)
             visual_desc = await _get_latest_visual_desc(session, case_id)

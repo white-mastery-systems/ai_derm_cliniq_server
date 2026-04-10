@@ -31,6 +31,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
 revision: str = "e5f6a7b8c9d0"
 down_revision: Union[str, Sequence[str], None] = "d4e5f6a7b8c9"
@@ -176,7 +177,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "purpose",
-            sa.Enum("password_reset", "email_verify", name="token_purpose_enum", create_type=False),
+            PgEnum("password_reset", "email_verify", name="token_purpose_enum", create_type=False),
             nullable=False,
             comment="password_reset | email_verify",
         ),
