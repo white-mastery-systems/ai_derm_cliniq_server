@@ -46,6 +46,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -99,8 +100,12 @@ async def _bootstrap_admin() -> None:
             is_verified=True,
         )
         db.add(admin)
-        await db.commit()
-        logger.info("admin_account_created", email=settings.ADMIN_EMAIL)
+        try:
+            await db.commit()
+            logger.info("admin_account_created", email=settings.ADMIN_EMAIL)
+        except IntegrityError:
+            await db.rollback()
+            logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="created by another worker")
 
 
 # ------------------------------------------------------------------ #
