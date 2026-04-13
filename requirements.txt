@@ -51,4 +51,4 @@ structlog==24.4.0                # Structured JSON logging
 
 # --- Utilities ---
 python-multipart==0.0.20         # Multipart form data (file uploads)
-pillow==11.0.0                   # Image processing (HEIC conversion, thumbnails)
+pillow==12.2.0                   # Image processing (HEIC conversion, thumbnails)
