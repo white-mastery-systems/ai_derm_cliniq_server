@@ -195,6 +195,19 @@ async def create_case(
             message="CONSENT_REQUIRED: consent_ai_analysis must be true to create a case"
         )
 
+    # Require complete profile before starting a checkup (is_for_self only)
+    # Dependent cases carry their own DOB/gender in the request
+    if request.is_for_self:
+        profile_result = await db.execute(
+            select(PatientProfile).where(PatientProfile.user_id == patient.id)
+        )
+        profile = profile_result.scalar_one_or_none()
+        if not profile or not profile.date_of_birth or not profile.gender:
+            raise BadRequestException(
+                message="Please complete your profile (date of birth and gender) "
+                        "before starting a checkup. Update via PATCH /api/v1/users/me"
+            )
+
     if not request.is_for_self and request.dependent is None and request.dependent_id is None:
         raise BadRequestException(
             message="Dependent information is required when is_for_self=False. "
