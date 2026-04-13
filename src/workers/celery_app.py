@@ -37,8 +37,28 @@ catches and converts to a clear error response.
 """
 
 from celery import Celery
+from celery.signals import worker_process_init
 
 from src.config import settings
+
+
+@worker_process_init.connect
+def _init_worker_logging(**kwargs):
+    """
+    Called once per worker process when it starts.
+    Wires up structlog + file handler so Celery task logs
+    go to logs/app.log alongside the API server logs.
+    """
+    import logging
+    from src.logger import setup_logging
+    setup_logging()
+
+    # Silence noisy Celery internals from polluting the log file
+    logging.getLogger("celery").setLevel(logging.WARNING)
+    logging.getLogger("celery.worker.strategy").setLevel(logging.WARNING)
+    logging.getLogger("celery.app.trace").setLevel(logging.WARNING)
+    logging.getLogger("amqp").setLevel(logging.WARNING)
+
 
 celery_app = Celery(
     "aiderm_cliniq",

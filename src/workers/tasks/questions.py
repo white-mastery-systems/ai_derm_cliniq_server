@@ -274,52 +274,40 @@ def generate_questions_task(self, case_id: str) -> None:
                         raise Ignore() from exc
 
             else:
-                # Round 1+: text-only doubts → questions pipeline
+                # Round 1+: single combined call — think medically + generate patient question
                 conv_history = _build_conversation_history(messages)
                 prev_questions = _build_previous_questions_text(messages)
 
-                # Step 1: doctor doubts
                 try:
-                    doubts_prompt = PatientConsultationPrompts.generate_doctor_doubts_patient().format(
+                    combined_prompt = PatientConsultationPrompts.generate_question_from_context().format(
                         conversation=conv_history,
                         visual_description=visual_desc,
                         diagnoses=differential,
+                        previous_questions=prev_questions,
                         prescription="None",
                         datetime=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                     )
-                    doubts_text = gemini_client.call_gemini(doubts_prompt)
-                    doubts_data = gemini_client.extract_json(doubts_text)
+                    response_text = gemini_client.call_gemini(combined_prompt)
+                    questions_data = gemini_client.extract_json(response_text)
                 except AIProviderException as exc:
-                    await _fail_case(session, case_id, f"Doctor doubts generation failed: {exc}")
+                    await _fail_case(session, case_id, f"Question generation failed: {exc}")
                     raise Ignore() from exc
 
-                # If no doubts — finalize (no more questions needed)
-                if doubts_data.get("doubt_present") != "yes":
+                # If no more doubts — finalize early (no more questions needed)
+                if questions_data.get("doubt_present") == "no":
                     logger.info("no_more_doubts_finalizing", case_id=case_id)
                     await _finalize_case(session, case_id, conv_history, visual_desc, differential)
                     await session.commit()
                     await engine.dispose()
                     return
 
-                # Step 2: convert doubts to patient questions
-                doubts_list = doubts_data.get("doubt", [])
-                try:
-                    questions_prompt = PatientConsultationPrompts.generate_follow_up_questions().format(
-                        doubts=json.dumps(doubts_list),
-                        conversation_history=conv_history,
-                        diagnoses=differential,
-                        visual_description=visual_desc,
-                        previous_questions=prev_questions,
-                        prescription="None",
-                    )
-                    response_text = gemini_client.call_gemini(questions_prompt)
-                    questions_data = gemini_client.extract_json(response_text)
-                except AIProviderException as exc:
-                    await _fail_case(session, case_id, f"Follow-up question generation failed: {exc}")
-                    raise Ignore() from exc
-
             # Save questions as Message rows
-            questions_list = questions_data.get("Questions", [])
+            # Gemini sometimes returns "questions" (lower) instead of "Questions" (upper)
+            questions_list = (
+                questions_data.get("Questions")
+                or questions_data.get("questions")
+                or []
+            )
             for i, q in enumerate(questions_list):
                 msg = Message(
                     id=new_uuid(),
@@ -332,12 +320,21 @@ def generate_questions_task(self, case_id: str) -> None:
                 session.add(msg)
 
             await session.commit()
-            logger.info(
-                "questions_generated",
-                case_id=case_id,
-                round=round_number,
-                count=len(questions_list),
-            )
+            if not questions_list:
+                logger.warning(
+                    "questions_generated_empty",
+                    case_id=case_id,
+                    round=round_number,
+                    raw_keys=list(questions_data.keys()),
+                    hint="Gemini returned no Questions list — check prompt output format",
+                )
+            else:
+                logger.info(
+                    "questions_generated",
+                    case_id=case_id,
+                    round=round_number,
+                    count=len(questions_list),
+                )
         await engine.dispose()
 
     try:

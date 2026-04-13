@@ -296,14 +296,14 @@ The JSON format should be strictly as follows:
     @staticmethod
     def first_question() -> str:
         """
-        Generate 3 initial questions + answer options from the uploaded image.
+        Generate 1 initial question + answer options from the uploaded image.
         These are the FIRST questions shown to a patient after image upload.
 
         Returns: Questions JSON schema.
         Used in: Celery `generate_questions_task` (first pass).
         """
-        return """You are an intelligent dermatological assistant who is generating questions to ask to a patient based on the photograph they have uploaded.
-Generate 3 distinct questions to ask to the patient. Also provide as many descriptive answer choices for each question as possible that encompasses all likely patient responses.
+        return """You are an intelligent dermatological assistant who is generating a question to ask to a patient based on the photograph they have uploaded.
+Generate 1 distinct question to ask to the patient. Choose the single most important question that will best help narrow down the diagnosis. Also provide as many descriptive answer choices for the question as possible that encompasses all likely patient responses.
 Ask any other question other than "What brings you here" because that has already been asked before.
 
 Give your response in json format as:
@@ -311,15 +311,7 @@ Give your response in json format as:
 {{
   "Questions": [
     {{
-      "question": "<question1>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question2>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question3>",
+      "question": "<question>",
       "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
     }}
   ]

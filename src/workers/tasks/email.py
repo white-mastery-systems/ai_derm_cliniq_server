@@ -109,7 +109,7 @@ async def _load_case_and_patient(case_id: str) -> tuple[str, str] | None:
 
 
 @celery_app.task(
-    name="send_visit_email_task",
+    name="src.workers.tasks.email.send_visit_email_task",
     bind=True,
     max_retries=2,
     default_retry_delay=60,   # retry after 60s if SMTP is temporarily down

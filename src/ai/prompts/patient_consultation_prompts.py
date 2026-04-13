@@ -50,15 +50,15 @@ Return the output in the following JSON format:
     @staticmethod
     def generate_questions_from_complaints() -> str:
         """
-        Generate 3 follow-up questions from patient complaints when no image exists.
+        Generate 1 follow-up question from patient complaints when no image exists.
 
         Template vars: {age}, {sex}, {complaints}
         Returns: Questions JSON schema.
         Used in: no-image consultation Q&A rounds.
         """
         return """You are a dermatology AI assistant. The patient has reported specific complaints but no visible lesions (or no image provided).
-Based on the complaints, age, and sex, generate 3 relevant questions to ask the patient to narrow down the diagnosis.
-Provide answer options for each question.
+Based on the complaints, age, and sex, generate 1 relevant question to ask the patient to narrow down the diagnosis. Choose the single most important question that will provide the most diagnostic value.
+Provide answer options for the question.
 
 Age: {age}
 Sex: {sex}
@@ -68,15 +68,7 @@ Return the output in the following JSON format:
 {{
   "Questions": [
     {{
-      "question": "<question1>",
-      "answer_options": ["<answer1>", "<answer2>", ...]
-    }},
-    {{
-      "question": "<question2>",
-      "answer_options": ["<answer1>", "<answer2>", ...]
-    }},
-    {{
-      "question": "<question3>",
+      "question": "<question>",
       "answer_options": ["<answer1>", "<answer2>", ...]
     }}
   ]
@@ -187,18 +179,74 @@ The JSON format should be strictly as follows:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def generate_question_from_context() -> str:
+        """
+        Single-call replacement for the old two-step
+        generate_doctor_doubts_patient() → generate_follow_up_questions() chain.
+
+        Thinks medically first (dermatologist reasoning), then immediately
+        frames the single most important doubt as a patient-friendly question.
+        Cuts round latency from ~29s (2 Gemini calls) to ~15s (1 Gemini call).
+
+        Template vars: {conversation}, {visual_description}, {diagnoses},
+                       {previous_questions}, {prescription}, {datetime}
+        Returns:
+          If more to ask: {{"doubt_present":"yes","Questions":[{{"question":"...","answer_options":[...]}}]}}
+          If nothing more: {{"doubt_present":"no"}}
+        Used in: Celery `generate_questions_task` round 1+.
+        """
+        return """You are an intelligent dermatologist AI assistant conducting a patient consultation.
+
+You have access to the conversation history, visual description, differential diagnosis, and previous prescription.
+
+Step 1 — Think medically:
+Review everything available. Identify the single most important clinical doubt that, if clarified, would most help you differentiate between diagnoses or better understand the patient's condition.
+Consider: symptom patterns, triggers, duration, severity, associated conditions, response to treatments, or anything inconsistent in the current data.
+If you have no remaining doubts that would meaningfully change the diagnosis or management — return doubt_present: no.
+
+Step 2 — Frame for the patient:
+Convert that one medical doubt into a single clear, simple question a non-medical patient can understand and answer.
+Provide as many descriptive answer options as needed to cover all likely responses.
+Do NOT repeat any question already asked in the conversation.
+Do NOT ask anything irrelevant to this specific case.
+
+Conversation:
+{conversation}
+
+Visual description:
+{visual_description}
+
+Diagnoses:
+{diagnoses}
+
+Previous questions asked:
+{previous_questions}
+
+Previous prescription:
+{prescription}
+
+Current date and time:
+{datetime}
+
+Respond in JSON only. No other text.
+
+If you have a question to ask:
+{{"doubt_present": "yes", "Questions": [{{"question": "<patient-friendly question>", "answer_options": ["<option1>", "<option2>", ...]}}]}}
+
+If nothing more to ask:
+{{"doubt_present": "no"}}
+"""
+
+    @staticmethod
     def generate_doctor_doubts_patient() -> str:
         """
-        Dermatologist agent raises doubts/queries based on full consultation context.
-        Doubts are then converted to patient questions by generate_follow_up_questions().
+        DEPRECATED — replaced by generate_question_from_context() which does
+        both doubt-raising and question generation in a single Gemini call.
+        Kept for reference only.
 
         Template vars: {conversation}, {visual_description}, {diagnoses},
                        {prescription}, {datetime}
         Returns: {{"doubt_present":"yes","doubt":[...]}} or {{"doubt_present":"no"}}
-        Used in: Celery `generate_questions_task` after each Q&A round.
-
-        IMPORTANT: Sequential chain — call this ONCE per round, then pass doubts
-        to generate_follow_up_questions(). Do NOT run 3 parallel doubt chains.
         """
         return """You are a part of a dermatological diagnostic application where you are playing the role of an intelligent dermatologist agent.
 The application takes in photographs of the patient, generates visual description and differential diagnosis from the photograph. It also takes in text extracted from OCR of previous prescription. Remember the prescription might be for the same or any other disease. Based on this it generates questions which are answered by the patient.
@@ -248,7 +296,7 @@ If doubt absent:
     @staticmethod
     def generate_follow_up_questions() -> str:
         """
-        Convert doctor-agent doubts into 3 patient-friendly questions with answer options.
+        Convert doctor-agent doubts into 1 patient-friendly question with answer options.
         Prevents repeating questions from previous rounds.
 
         Template vars: {doubts}, {conversation_history}, {diagnoses},
@@ -256,11 +304,11 @@ If doubt absent:
         Returns: Questions JSON schema.
         Used in: Celery `generate_questions_task` — called AFTER generate_doctor_doubts_patient().
         """
-        return """You are a question generating agent whose job is to generate questions based on the doubts raised by the doctor agent.
-Based on the doubt raised by the dermatologist agent frame three questions which clears one or more of the doubt.
-Also provide as many descriptive answer choices for each question as possible that encompasses all likely patient responses.
+        return """You are a question generating agent whose job is to generate a question based on the doubts raised by the doctor agent.
+Based on the doubts raised by the dermatologist agent, choose the single most important doubt and frame one question that best clears it.
+Also provide as many descriptive answer choices for the question as possible that encompasses all likely patient responses.
 Remember not to repeat any question from the set of previous questions.
-You are also being provided with conversation history, differential diagnosis list, previous prescription and visual description just to add context to your questions and answer choices.
+You are also being provided with conversation history, differential diagnosis list, previous prescription and visual description just to add context to your question and answer choices.
 While choosing the question to ask, remember to not repeat any question which has already been asked in the conversation earlier unless the doubts mentioned by the doctor clearly states that it wants some clarification. In that case also don't repeat a similar question more than twice under any circumstance. If questions for all doubts have been asked in the previous conversation, you can generate any other question relevant to this case.
 In case you are repeating the question clearly mention why you are asking the question again while asking the question.
 Also under no circumstances ask same/similar question thrice even if the same doubt has been raised by the doctor agent. Don't ask any question which is not relevant to the current case.
@@ -288,15 +336,7 @@ Remember to give your response in json format as below:
 {{
   "Questions": [
     {{
-      "question": "<question1>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question2>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question3>",
+      "question": "<question>",
       "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
     }}
   ]

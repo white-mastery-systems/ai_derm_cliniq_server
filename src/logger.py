@@ -46,62 +46,91 @@ Each log record passes through a chain of processors before rendering:
 """
 
 import logging
+import logging.handlers
 import sys
+from pathlib import Path
 
 import structlog
 
 from src.config import settings
+
+# Logs folder sits next to src/ in the project root
+LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
+
+
+def _build_file_handler() -> logging.handlers.RotatingFileHandler:
+    """
+    Rotating file handler — writes JSON lines to logs/app.log.
+
+    Rotation:   10 MB per file, keeps last 5 files.
+    Files:      logs/app.log  (active)
+                logs/app.log.1  …  logs/app.log.5  (rotated)
+    """
+    LOGS_DIR.mkdir(exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        filename=LOGS_DIR / "app.log",
+        maxBytes=10 * 1024 * 1024,   # 10 MB
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    return handler
 
 
 def setup_logging() -> None:
     """
     Configure structlog and Python's standard logging.
     Call this ONCE at application startup (in main.py lifespan).
+
+    Output:
+      - Terminal  → colourful console (dev) or JSON (prod)
+      - logs/app.log → always JSON, rotating, 10 MB × 5 files
     """
 
-    # Choose renderer based on environment:
-    # - Development: ConsoleRenderer gives colourful, human-readable output.
-    # - Production: JSONRenderer outputs one JSON object per line.
+    # ── Structlog processors shared by both outputs ──────────────────
+    shared_processors = [
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.add_logger_name,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.StackInfoRenderer(),
+        structlog.processors.format_exc_info,
+        structlog.processors.UnicodeDecoder(),
+    ]
+
+    # ── Terminal renderer ─────────────────────────────────────────────
     if settings.is_development:
-        renderer = structlog.dev.ConsoleRenderer(colors=True)
+        console_renderer = structlog.dev.ConsoleRenderer(colors=True)
     else:
-        renderer = structlog.processors.JSONRenderer()
+        console_renderer = structlog.processors.JSONRenderer()
 
     structlog.configure(
-        processors=[
-            # Merge context from structlog.contextvars (request-scoped context)
-            structlog.contextvars.merge_contextvars,
-            # Add log level name ("info", "warning", etc.)
-            structlog.stdlib.add_log_level,
-            # Add logger name (module path)
-            structlog.stdlib.add_logger_name,
-            # Add ISO 8601 timestamp
-            structlog.processors.TimeStamper(fmt="iso"),
-            # Render Python exception tracebacks
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            # Ensure all byte strings are decoded
-            structlog.processors.UnicodeDecoder(),
-            # Final renderer (JSON or pretty console)
-            renderer,
-        ],
+        processors=shared_processors + [console_renderer],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
         wrapper_class=structlog.stdlib.BoundLogger,
         cache_logger_on_first_use=True,
     )
 
-    # Configure Python's built-in logging module to also use structlog
-    # This ensures third-party libraries (uvicorn, SQLAlchemy, etc.) also
-    # have their logs processed through our structured pipeline.
+    # ── Python stdlib logging (uvicorn, SQLAlchemy, Celery, etc.) ────
     log_level = logging.DEBUG if settings.DEBUG else logging.INFO
-    logging.basicConfig(
-        format="%(message)s",
-        stream=sys.stdout,
-        level=log_level,
-    )
 
-    # Silence noisy loggers in development
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+
+    # Remove any handlers set by basicConfig / previous calls
+    root_logger.handlers.clear()
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(console_handler)
+
+    # File handler — always JSON so it's machine-readable
+    file_handler = _build_file_handler()
+    root_logger.addHandler(file_handler)
+
+    # Silence noisy loggers
     logging.getLogger("sqlalchemy.engine").setLevel(
         logging.DEBUG if settings.DEBUG else logging.WARNING
     )

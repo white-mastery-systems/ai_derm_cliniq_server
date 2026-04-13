@@ -485,7 +485,7 @@ def save_results_task(self, analysis_result: dict) -> None:
 
 @celery_app.task(
     bind=True,
-    name="workers.tasks.analysis.red_flag_check_task",
+    name="src.workers.tasks.analysis.red_flag_check_task",
     time_limit=60,
     soft_time_limit=50,
     max_retries=1,
@@ -600,7 +600,7 @@ async def _fail_task_on_timeout(case_id: str, task_name: str) -> None:
 
 @celery_app.task(
     bind=True,
-    name="workers.tasks.analysis.analyse_complaint_task",
+    name="src.workers.tasks.analysis.analyse_complaint_task",
     time_limit=180,
     soft_time_limit=160,
     max_retries=1,
