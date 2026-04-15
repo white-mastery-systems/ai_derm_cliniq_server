@@ -50,5 +50,5 @@ jinja2==3.1.4                    # HTML email templates
 structlog==24.4.0                # Structured JSON logging
 
 # --- Utilities ---
-python-multipart==0.0.20         # Multipart form data (file uploads)
+python-multipart==0.0.26         # Multipart form data (file uploads)
 pillow==11.0.0                   # Image processing (HEIC conversion, thumbnails)
