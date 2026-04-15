@@ -22,9 +22,10 @@ from src.auth.dependencies import get_current_user, require_doctor
 from src.database.core import get_async_session
 from src.models.user import User
 from src.reports import service
-from src.reports.schemas import ReportResponse, ReportTriggerResponse
+from src.reports.schemas import ReportListResponse, ReportResponse, ReportTriggerResponse
 
 router = APIRouter()
+list_router = APIRouter()
 
 
 @router.post(
@@ -68,3 +69,21 @@ async def get_report(
     Returns 404 if the report has not been generated yet.
     """
     return await service.get_report(db, user, case_id)
+
+
+@list_router.get(
+    "/",
+    response_model=ReportListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List all reports for the current user",
+    description=(
+        "Doctors see reports for all their assigned cases. "
+        "Patients see reports for all their own cases. "
+        "Each item includes a fresh signed download URL (valid 30 minutes)."
+    ),
+)
+async def list_reports(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> ReportListResponse:
+    return await service.list_reports(db, current_user)

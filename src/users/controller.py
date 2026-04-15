@@ -17,14 +17,14 @@ get_current_user dependency validates the token and returns the User ORM object.
 The user is always operating on their OWN account — no user_id path param needed.
 """
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, File, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth.dependencies import get_current_user, require_doctor
 from src.database.core import get_async_session
 from src.models.user import User
 from src.users import service
-from src.users.schemas import PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
+from src.users.schemas import AvatarUploadResponse, PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
 
 router = APIRouter()
 
@@ -83,6 +83,26 @@ async def get_patient_by_code(
     db: AsyncSession = Depends(get_async_session),
 ) -> PatientByCodeResponse:
     return await service.get_patient_by_code(db, patient_code)
+
+
+@router.post(
+    "/me/avatar",
+    response_model=AvatarUploadResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload profile avatar",
+    description=(
+        "Upload a profile photo (jpg, jpeg, png — max 5 MB). "
+        "The file is stored in GCS and the signed URL is saved to the user's profile. "
+        "Works for both patients and doctors."
+    ),
+)
+async def upload_avatar(
+    file: UploadFile = File(..., description="Profile photo — jpg or png, max 5 MB"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> AvatarUploadResponse:
+    raw_bytes = await file.read()
+    return await service.upload_avatar(db, current_user, raw_bytes, file.filename or "avatar.jpg", file.content_type or "image/jpeg")
 
 
 @router.delete(

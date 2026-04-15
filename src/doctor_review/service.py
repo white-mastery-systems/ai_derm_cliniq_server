@@ -80,6 +80,13 @@ def _to_response(review: DoctorReview) -> DoctorReviewResponse:
         except (ValueError, TypeError):
             qa = []
 
+    indicators: list[str] = []
+    if review.clinical_indicators:
+        try:
+            indicators = json.loads(review.clinical_indicators)
+        except (ValueError, TypeError):
+            indicators = []
+
     return DoctorReviewResponse(
         id=review.id,
         case_id=review.case_id,
@@ -91,6 +98,7 @@ def _to_response(review: DoctorReview) -> DoctorReviewResponse:
         review_notes=review.review_notes,
         treatment_plan_json=review.treatment_plan_json,
         qa_history=qa,
+        clinical_indicators=indicators,
         review_status=review.review_status,
         reviewed_at=review.reviewed_at,
         created_at=review.created_at,
@@ -165,6 +173,10 @@ async def create_review(
             json.dumps(request.qa_history)
             if request.qa_history is not None else None
         ),
+        clinical_indicators=(
+            json.dumps(request.clinical_indicators)
+            if request.clinical_indicators is not None else None
+        ),
         review_status=request.review_status,
     )
 
@@ -225,6 +237,8 @@ async def update_review(
         review.treatment_plan_json = request.treatment_plan_json
     if request.qa_history is not None:
         review.qa_history = json.dumps(request.qa_history)
+    if request.clinical_indicators is not None:
+        review.clinical_indicators = json.dumps(request.clinical_indicators)
 
     if request.review_status is not None:
         review.review_status = request.review_status

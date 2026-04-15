@@ -33,6 +33,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.cases.schemas import (
+    AdjacentVisitsResponse,
     AssessmentDepthRequest,
     AssessmentDepthResponse,
     CaseCreateRequest,
@@ -58,6 +59,7 @@ from src.logger import get_logger
 from src.models.base import new_uuid
 from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
 from src.models.case_image import CaseImage
+from src.models.doctor_profile import DoctorProfile
 from src.models.patient_profile import PatientProfile
 from src.models.user import User, UserRole
 
@@ -86,6 +88,13 @@ def _to_case_response(
     patient_name: str | None = None,
     patient_age: int | None = None,
     patient_gender: str | None = None,
+    patient_avatar_url: str | None = None,
+    doctor_name: str | None = None,
+    doctor_specialization: str | None = None,
+    doctor_clinic_name: str | None = None,
+    doctor_avatar_url: str | None = None,
+    visit_index: int | None = None,
+    total_visits: int | None = None,
 ) -> CaseResponse:
     return CaseResponse(
         id=case.id,
@@ -119,6 +128,13 @@ def _to_case_response(
         patient_name=patient_name,
         patient_age=patient_age,
         patient_gender=patient_gender,
+        patient_avatar_url=patient_avatar_url,
+        doctor_name=doctor_name,
+        doctor_specialization=doctor_specialization,
+        doctor_clinic_name=doctor_clinic_name,
+        doctor_avatar_url=doctor_avatar_url,
+        visit_index=visit_index,
+        total_visits=total_visits,
         created_at=case.created_at,
         updated_at=case.updated_at,
     )
@@ -386,10 +402,11 @@ async def get_case(
     _assert_access(user, case)
     image_count = await _get_image_count(db, case_id)
 
-    # Fetch patient name, age, gender from User + PatientProfile
+    # ---- Patient demographics ----
     patient_name: str | None = None
     patient_age: int | None = None
     patient_gender: str | None = None
+    patient_avatar_url: str | None = None
 
     patient_result = await db.execute(select(User).where(User.id == case.patient_id))
     patient_user = patient_result.scalar_one_or_none()
@@ -401,6 +418,7 @@ async def get_case(
         profile = profile_result.scalar_one_or_none()
         if profile:
             patient_gender = profile.gender
+            patient_avatar_url = profile.avatar_url
             if profile.date_of_birth:
                 today = date.today()
                 dob = profile.date_of_birth
@@ -408,7 +426,99 @@ async def get_case(
                     (today.month, today.day) < (dob.month, dob.day)
                 )
 
-    return _to_case_response(case, image_count, patient_name, patient_age, patient_gender)
+    # ---- Doctor details ----
+    doctor_name: str | None = None
+    doctor_specialization: str | None = None
+    doctor_clinic_name: str | None = None
+    doctor_avatar_url: str | None = None
+
+    if case.doctor_id:
+        doctor_result = await db.execute(select(User).where(User.id == case.doctor_id))
+        doctor_user = doctor_result.scalar_one_or_none()
+        if doctor_user:
+            doctor_name = doctor_user.full_name
+            dr_profile_result = await db.execute(
+                select(DoctorProfile).where(DoctorProfile.user_id == case.doctor_id)
+            )
+            dr_profile = dr_profile_result.scalar_one_or_none()
+            if dr_profile:
+                doctor_specialization = dr_profile.specialization
+                doctor_clinic_name = dr_profile.clinic_name
+                doctor_avatar_url = dr_profile.avatar_url
+
+    # ---- Visit X of Y ----
+    # Total cases for this patient
+    total_visits_result = await db.execute(
+        select(func.count()).select_from(Case).where(Case.patient_id == case.patient_id)
+    )
+    total_visits = total_visits_result.scalar_one()
+
+    # This case's chronological position (1-based)
+    visit_index_result = await db.execute(
+        select(func.count()).select_from(Case).where(
+            and_(
+                Case.patient_id == case.patient_id,
+                Case.created_at <= case.created_at,
+            )
+        )
+    )
+    visit_index = visit_index_result.scalar_one()
+
+    return _to_case_response(
+        case, image_count,
+        patient_name, patient_age, patient_gender, patient_avatar_url,
+        doctor_name, doctor_specialization, doctor_clinic_name, doctor_avatar_url,
+        visit_index, total_visits,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Adjacent Visits
+# ------------------------------------------------------------------ #
+
+async def get_adjacent_visits(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+) -> AdjacentVisitsResponse:
+    """
+    Return the prev/next case_id for the ← → navigation arrows on the
+    Case Report screen.
+
+    Visits are ordered chronologically (created_at ASC).
+    - prev_case_id: the visit immediately before this one (None if first)
+    - next_case_id: the visit immediately after this one (None if latest)
+
+    Access rules mirror get_case() — patient sees own cases, doctor sees
+    assigned cases, admin sees all.
+    """
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    _assert_access(user, case)
+
+    # All cases for this patient ordered chronologically
+    all_result = await db.execute(
+        select(Case.id, Case.created_at)
+        .where(Case.patient_id == case.patient_id)
+        .order_by(Case.created_at.asc())
+    )
+    ordered = all_result.all()  # list of (id, created_at)
+    ids = [row.id for row in ordered]
+
+    try:
+        idx = ids.index(case_id)
+    except ValueError:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    return AdjacentVisitsResponse(
+        prev_case_id=ids[idx - 1] if idx > 0 else None,
+        next_case_id=ids[idx + 1] if idx < len(ids) - 1 else None,
+        visit_index=idx + 1,
+        total_visits=len(ids),
+    )
 
 
 # ------------------------------------------------------------------ #

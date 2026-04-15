@@ -88,9 +88,9 @@ class PatientProfile(TimestampMixin, Base):
         comment="Contact phone number shown on profile",
     )
     avatar_url: Mapped[str | None] = mapped_column(
-        String(500),
+        String(2000),
         nullable=True,
-        comment="GCS path to profile photo",
+        comment="GCS signed URL for profile photo",
     )
 
     # ------------------------------------------------------------------ #

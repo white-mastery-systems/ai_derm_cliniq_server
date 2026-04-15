@@ -80,6 +80,10 @@ def include_all_routers(app: FastAPI) -> None:
     from src.reports.controller import router as reports_router
     app.include_router(reports_router, prefix="/api/v1/cases/{case_id}", tags=["Reports"])
 
+    # Reports list — /api/v1/reports
+    from src.reports.controller import list_router as reports_list_router
+    app.include_router(reports_list_router, prefix="/api/v1/reports", tags=["Reports"])
+
     # Todos — /api/v1/cases/{case_id}/todos
     from src.todos.controller import router as todos_router
     app.include_router(todos_router, prefix="/api/v1/cases/{case_id}/todos", tags=["Todos"])

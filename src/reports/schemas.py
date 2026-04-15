@@ -43,3 +43,26 @@ class ReportResponse(BaseModel):
     generated_at: datetime
     download_url: str    # GCS signed URL, valid for 30 minutes
     download_count: int
+
+
+class ReportListItem(BaseModel):
+    """
+    One entry in the doctor's Reports tab list.
+
+    Includes enough case context (patient name, case number, date) for the
+    Flutter list tile — no extra request needed per item.
+    """
+    id: str
+    case_id: str
+    case_number: int        # e.g. 9001  (shown as "AI-9001" in the UI)
+    patient_name: str
+    report_type: ReportType
+    generated_at: datetime
+    download_url: str       # GCS signed URL, valid for 30 minutes
+    download_count: int
+
+
+class ReportListResponse(BaseModel):
+    """Returned by GET /api/v1/reports."""
+    reports: list[ReportListItem]
+    total: int

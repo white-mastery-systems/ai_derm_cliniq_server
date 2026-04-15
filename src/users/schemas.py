@@ -138,3 +138,13 @@ class PatientByCodeResponse(BaseModel):
     avatar_url: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+# ================================================================== #
+# Avatar Upload — POST /users/me/avatar
+# ================================================================== #
+
+class AvatarUploadResponse(BaseModel):
+    """Returned after a successful avatar upload."""
+    avatar_url: str
+    message: str = "Avatar uploaded successfully"

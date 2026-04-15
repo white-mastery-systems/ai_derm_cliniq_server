@@ -46,9 +46,10 @@ from src.exceptions import (
 )
 from src.logger import get_logger
 from src.models.case import Case
+from src.models.case_report import CaseReport
 from src.models.doctor_review import ReviewStatus
 from src.models.user import User, UserRole
-from src.reports.schemas import ReportResponse, ReportTriggerResponse
+from src.reports.schemas import ReportListItem, ReportListResponse, ReportResponse, ReportTriggerResponse
 from src.storage import gcs
 
 # Module-level import — required for unittest.mock.patch in tests
@@ -181,3 +182,53 @@ async def get_report(
         download_url=download_url,
         download_count=report.download_count,
     )
+
+
+async def list_reports(
+    db: AsyncSession,
+    user: User,
+) -> ReportListResponse:
+    """
+    Return all reports visible to the requesting user.
+
+    - Doctor: reports for all cases assigned to them
+    - Patient: reports for all their own cases
+    - Admin: all reports
+
+    Each item includes patient name and case_number for list display.
+    Signed download URLs are generated fresh (30-minute expiry).
+    Results are ordered newest-first.
+    """
+    query = (
+        select(CaseReport, Case, User)
+        .join(Case, CaseReport.case_id == Case.id)
+        .join(User, Case.patient_id == User.id)
+        .order_by(CaseReport.generated_at.desc())
+    )
+
+    if user.role == UserRole.DOCTOR:
+        query = query.where(Case.doctor_id == user.id)
+    elif user.role == UserRole.PATIENT:
+        query = query.where(Case.patient_id == user.id)
+    # ADMIN: no filter — sees all reports
+
+    rows = (await db.execute(query)).all()
+
+    items: list[ReportListItem] = []
+    for report, case, patient in rows:
+        download_url = gcs.get_signed_url(report.gcs_path, expiry_minutes=30)
+        items.append(
+            ReportListItem(
+                id=report.id,
+                case_id=report.case_id,
+                case_number=case.case_number,
+                patient_name=patient.full_name,
+                report_type=report.report_type,
+                generated_at=report.generated_at,
+                download_url=download_url,
+                download_count=report.download_count,
+            )
+        )
+
+    logger.info("reports_listed", user_id=user.id, count=len(items))
+    return ReportListResponse(reports=items, total=len(items))

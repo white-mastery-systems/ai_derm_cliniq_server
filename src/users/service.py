@@ -24,16 +24,19 @@ We apply shared fields (full_name, phone) to User.
 Role-specific fields go to the appropriate profile row.
 """
 
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from src.exceptions import UserNotFoundException
+from src.exceptions import FileTooLargeException, InvalidFileTypeException, UserNotFoundException
 from src.logger import get_logger
 from src.models.doctor_profile import DoctorProfile
 from src.models.patient_profile import PatientProfile
 from src.models.user import User, UserRole
-from src.users.schemas import PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
+from src.storage import gcs
+from src.users.schemas import AvatarUploadResponse, PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
 
 logger = get_logger(__name__)
 
@@ -220,3 +223,60 @@ async def soft_delete(db: AsyncSession, user_id: str) -> None:
 
     user.is_active = False
     logger.info("user_soft_deleted", user_id=user_id)
+
+
+# ------------------------------------------------------------------ #
+# upload_avatar
+# ------------------------------------------------------------------ #
+
+_ALLOWED_AVATAR_TYPES = {"image/jpeg", "image/jpg", "image/png"}
+_MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+async def upload_avatar(
+    db: AsyncSession,
+    user: User,
+    file_bytes: bytes,
+    _filename: str,
+    content_type: str,
+) -> AvatarUploadResponse:
+    """
+    Upload a profile avatar to GCS and save the signed URL to the user's profile.
+
+    Validates:
+    - Content type must be jpg/jpeg/png
+    - File size must not exceed 5 MB
+
+    GCS path: avatars/{user_id}.{ext}
+    Existing avatar is silently overwritten (same path).
+
+    Used by: POST /api/v1/users/me/avatar
+    """
+    if content_type not in _ALLOWED_AVATAR_TYPES:
+        raise InvalidFileTypeException(
+            message=f"Invalid file type '{content_type}'. Allowed: jpg, jpeg, png"
+        )
+
+    if len(file_bytes) > _MAX_AVATAR_BYTES:
+        raise FileTooLargeException(
+            message=f"File too large ({len(file_bytes) // 1024} KB). Max allowed: 5 MB"
+        )
+
+    # Derive extension from content_type (always reliable vs filename)
+    ext = "jpg" if content_type in {"image/jpeg", "image/jpg"} else "png"
+    gcs_path = f"avatars/{user.id}.{ext}"
+
+    # GCS calls are synchronous — run in thread pool to avoid blocking the event loop
+    await asyncio.to_thread(gcs.upload_file, gcs_path, file_bytes, content_type)
+    signed_url = await asyncio.to_thread(gcs.get_signed_url, gcs_path, 60 * 24 * 7)  # 7-day URL
+
+    # Persist the URL on the correct profile row
+    user_with_profile = await _load_user_with_profile(db, user.id)
+
+    if user_with_profile.role == UserRole.PATIENT and user_with_profile.patient_profile:
+        user_with_profile.patient_profile.avatar_url = signed_url
+    elif user_with_profile.role == UserRole.DOCTOR and user_with_profile.doctor_profile:
+        user_with_profile.doctor_profile.avatar_url = signed_url
+
+    logger.info("avatar_uploaded", user_id=user.id, gcs_path=gcs_path)
+    return AvatarUploadResponse(avatar_url=signed_url)

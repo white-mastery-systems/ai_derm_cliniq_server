@@ -189,9 +189,16 @@ class CaseResponse(BaseModel):
     question_round: int
     max_question_rounds: int
     image_count: int = 0
-    patient_name: str | None = None    # Full name of the patient
-    patient_age: int | None = None     # Computed from PatientProfile.date_of_birth
-    patient_gender: str | None = None  # From PatientProfile.gender
+    patient_name: str | None = None         # Full name of the patient
+    patient_age: int | None = None          # Computed from PatientProfile.date_of_birth
+    patient_gender: str | None = None       # From PatientProfile.gender
+    patient_avatar_url: str | None = None   # From PatientProfile.avatar_url
+    doctor_name: str | None = None          # Full name of the assigned doctor
+    doctor_specialization: str | None = None  # From DoctorProfile.specialization
+    doctor_clinic_name: str | None = None   # From DoctorProfile.clinic_name
+    doctor_avatar_url: str | None = None    # From DoctorProfile.avatar_url
+    visit_index: int | None = None          # This case's position in patient's visit history (1-based)
+    total_visits: int | None = None         # Total number of cases for this patient
     created_at: datetime
     updated_at: datetime
 
@@ -325,6 +332,22 @@ class ComplaintsResponse(BaseModel):
     case_id: str
     complaints: list[str]
     source: str  # "image" | "general"
+
+
+class AdjacentVisitsResponse(BaseModel):
+    """
+    GET /api/v1/cases/{case_id}/adjacent-visits
+
+    Returns the case_id immediately before and after this one in the patient's
+    chronological visit history. Used by the ← → navigation arrows on the
+    Case Report screen.
+
+    None means there is no visit in that direction (first or last visit).
+    """
+    prev_case_id: str | None = None   # None if this is the first visit
+    next_case_id: str | None = None   # None if this is the latest visit
+    visit_index: int                   # Current visit's 1-based position
+    total_visits: int                  # Total visits for this patient
 
 
 class DoctorStatsResponse(BaseModel):

@@ -118,6 +118,17 @@ class DoctorReview(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Clinical Indicators — doctor-confirmed clinical signs from examination
+    # Shown as the 'Clinical Indicators' section on the Case Report screen
+    # e.g. ["History of topical steroid use", "Positive Nikolsky sign"]
+    # ------------------------------------------------------------------ #
+    clinical_indicators: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON array of clinical indicator strings confirmed by the doctor",
+    )
+
+    # ------------------------------------------------------------------ #
     # Status & Timing
     # ------------------------------------------------------------------ #
     review_status: Mapped[ReviewStatus] = mapped_column(

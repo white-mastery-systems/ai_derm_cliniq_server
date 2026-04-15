@@ -66,6 +66,10 @@ class CreateReviewRequest(BaseModel):
         default=None,
         description="Q&A rounds: [{question: str, answer: str}, ...]",
     )
+    clinical_indicators: list[str] | None = Field(
+        default=None,
+        description="Clinical signs confirmed by doctor: ['History of steroid use', 'Positive Nikolsky sign']",
+    )
     review_status: ReviewStatus = ReviewStatus.IN_PROGRESS
 
 
@@ -87,6 +91,7 @@ class UpdateReviewRequest(BaseModel):
     review_notes: str | None = None
     treatment_plan_json: str | None = None
     qa_history: list[dict] | None = None
+    clinical_indicators: list[str] | None = None
     review_status: ReviewStatus | None = None
     clinical_status: ClinicalStatus | None = None  # Updates the Case row, not the review
 
@@ -103,6 +108,7 @@ class DoctorReviewResponse(BaseModel):
     review_notes: str | None
     treatment_plan_json: str | None
     qa_history: list[dict] = []
+    clinical_indicators: list[str] = []
     review_status: ReviewStatus
     reviewed_at: datetime | None
     created_at: datetime

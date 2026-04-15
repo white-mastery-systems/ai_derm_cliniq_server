@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.auth.dependencies import get_current_user, require_doctor, require_patient
 from src.cases import service
 from src.cases.schemas import (
+    AdjacentVisitsResponse,
     AssessmentDepthRequest,
     AssessmentDepthResponse,
     CaseCreateRequest,
@@ -164,6 +165,26 @@ async def get_case(
     db: AsyncSession = Depends(get_async_session),
 ) -> CaseResponse:
     return await service.get_case(db, user, case_id)
+
+
+@router.get(
+    "/{case_id}/adjacent-visits",
+    response_model=AdjacentVisitsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get prev/next case IDs for visit navigation",
+    description=(
+        "Returns the case_id immediately before and after this visit in the "
+        "patient's chronological history. Used by the ← → arrows on the "
+        "Case Report screen. prev_case_id or next_case_id is null when there "
+        "is no visit in that direction."
+    ),
+)
+async def get_adjacent_visits(
+    case_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> AdjacentVisitsResponse:
+    return await service.get_adjacent_visits(db, user, case_id)
 
 
 @router.patch(
