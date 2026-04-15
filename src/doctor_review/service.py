@@ -26,17 +26,14 @@ When PATCH sets review_status=COMPLETED:
 - If clinical_status is provided → case.clinical_status is updated
   (this is what drives the coloured badge in the patient History screen)
 
-WHY NOT MERGE CREATE + UPDATE INTO ONE ENDPOINT?
--------------------------------------------------
-Separating POST (create) from PATCH (update) gives the Flutter app
-clear semantics:
-- POST → "I'm starting this review" (creates the row, returns 201)
-- PATCH → "I'm updating my review" (updates fields, returns 200)
-
-Flutter can check for 409 on POST to detect "already created" and
-fall back to PATCH.
+SELECTED DIFFERENTIALS & QA HISTORY
+-------------------------------------
+Both are stored as JSON strings in the DB (Text column).
+The service serialises list→JSON on write and deserialises JSON→list on read.
+Flutter always sends/receives them as plain lists/dicts.
 """
 
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -63,15 +60,37 @@ from src.doctor_review.schemas import (
 logger = get_logger(__name__)
 
 
+# ------------------------------------------------------------------ #
+# Helpers
+# ------------------------------------------------------------------ #
+
 def _to_response(review: DoctorReview) -> DoctorReviewResponse:
-    """Convert ORM row to response schema."""
+    """Convert ORM row → response schema, deserialising JSON text fields."""
+    selected: list[str] = []
+    if review.selected_differentials:
+        try:
+            selected = json.loads(review.selected_differentials)
+        except (ValueError, TypeError):
+            selected = []
+
+    qa: list[dict] = []
+    if review.qa_history:
+        try:
+            qa = json.loads(review.qa_history)
+        except (ValueError, TypeError):
+            qa = []
+
     return DoctorReviewResponse(
         id=review.id,
         case_id=review.case_id,
         doctor_id=review.doctor_id,
+        is_ai_correct=review.is_ai_correct,
+        selected_differentials=selected,
+        confidence_level=review.confidence_level,
         confirmed_diagnosis=review.confirmed_diagnosis,
         review_notes=review.review_notes,
         treatment_plan_json=review.treatment_plan_json,
+        qa_history=qa,
         review_status=review.review_status,
         reviewed_at=review.reviewed_at,
         created_at=review.created_at,
@@ -103,6 +122,10 @@ async def _load_case_for_doctor(
     return case
 
 
+# ------------------------------------------------------------------ #
+# Create
+# ------------------------------------------------------------------ #
+
 async def create_review(
     db: AsyncSession,
     doctor: User,
@@ -129,9 +152,19 @@ async def create_review(
         id=new_uuid(),
         case_id=case_id,
         doctor_id=doctor.id,
+        is_ai_correct=request.is_ai_correct,
+        selected_differentials=(
+            json.dumps(request.selected_differentials)
+            if request.selected_differentials is not None else None
+        ),
+        confidence_level=request.confidence_level,
         confirmed_diagnosis=request.confirmed_diagnosis,
         review_notes=request.review_notes,
         treatment_plan_json=request.treatment_plan_json,
+        qa_history=(
+            json.dumps(request.qa_history)
+            if request.qa_history is not None else None
+        ),
         review_status=request.review_status,
     )
 
@@ -144,6 +177,10 @@ async def create_review(
     logger.info("doctor_review_created", case_id=case_id, doctor_id=doctor.id)
     return _to_response(review)
 
+
+# ------------------------------------------------------------------ #
+# Update
+# ------------------------------------------------------------------ #
 
 async def update_review(
     db: AsyncSession,
@@ -173,13 +210,21 @@ async def update_review(
 
     review = case.doctor_review
 
-    # Apply partial updates — only override fields that were explicitly provided
+    # Apply partial updates
+    if request.is_ai_correct is not None:
+        review.is_ai_correct = request.is_ai_correct
+    if request.selected_differentials is not None:
+        review.selected_differentials = json.dumps(request.selected_differentials)
+    if request.confidence_level is not None:
+        review.confidence_level = request.confidence_level
     if request.confirmed_diagnosis is not None:
         review.confirmed_diagnosis = request.confirmed_diagnosis
     if request.review_notes is not None:
         review.review_notes = request.review_notes
     if request.treatment_plan_json is not None:
         review.treatment_plan_json = request.treatment_plan_json
+    if request.qa_history is not None:
+        review.qa_history = json.dumps(request.qa_history)
 
     if request.review_status is not None:
         review.review_status = request.review_status
@@ -204,6 +249,10 @@ async def update_review(
     return _to_response(review)
 
 
+# ------------------------------------------------------------------ #
+# Read
+# ------------------------------------------------------------------ #
+
 async def get_review(
     db: AsyncSession,
     user: User,
@@ -215,6 +264,7 @@ async def get_review(
     Access:
     - The patient who owns the case
     - The doctor assigned to the case
+    - Admin
 
     Returns 404 if the case doesn't exist, the user doesn't have access,
     or no review has been created yet.
@@ -229,15 +279,12 @@ async def get_review(
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
-    # Access control: patient who owns the case, assigned doctor, or admin
+    # Access control
     if user.role != UserRole.ADMIN:
         if user.role == UserRole.PATIENT and case.patient_id != user.id:
             raise CaseNotFoundException(message=f"No case found with id: {case_id}")
-
         if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
-            raise ForbiddenException(
-                message="You are not assigned to this case."
-            )
+            raise ForbiddenException(message="You are not assigned to this case.")
 
     if case.doctor_review is None:
         raise NotFoundException(
