@@ -29,9 +29,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.ai.schemas import (
+    AiChatHistoryResponse,
+    AiChatResponse,
     AnalysisAcceptedResponse,
     AnalysisResultsResponse,
     AnalysisStatusResponse,
+    ChatMessageOut,
     DifferentialDiagnosisOut,
     VisualDescriptionOut,
 )
@@ -44,6 +47,7 @@ from src.exceptions import (
 )
 from src.workers.tasks.analysis import build_analysis_chain
 from src.logger import get_logger
+from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
 from src.models.case_image import CaseImage
 from src.models.differential_diagnosis import DifferentialDiagnosis
@@ -118,6 +122,13 @@ async def trigger_analysis(
             message="Patient must give consent before triggering AI analysis"
         )
 
+    # No-lesion flow: presenting_complaint is the only clinical input — require it before analysis
+    if not case.has_visible_lesion and not case.presenting_complaint:
+        raise BadRequestException(
+            message="Please describe your sensations or symptoms "
+                    "(presenting_complaint is required before triggering analysis)"
+        )
+
     # Image gate — only enforced when patient said they have a visible lesion
     if case.has_visible_lesion:
         image_count = await _count_images(db, case_id)
@@ -188,12 +199,17 @@ async def get_status(
         # case_summary holds the failure reason when ai_status=FAILED
         error_message = case.case_summary
 
+    recommended_rounds = None
+    if case.ai_status == AiStatus.COMPLETED:
+        recommended_rounds = case.max_question_rounds
+
     return AnalysisStatusResponse(
         case_id=case_id,
         ai_status=case.ai_status.value,
         task_id=case.celery_task_id,
         error_message=error_message,
         completed_at=completed_at,
+        recommended_rounds=recommended_rounds,
     )
 
 
@@ -268,4 +284,269 @@ async def get_results(
         visual_description=visual_out,
         differential=differential_out,
         case_summary=case.case_summary,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Case AI Query  ("Ask AI" feature on Case Summary screen)
+# ------------------------------------------------------------------ #
+
+async def query_case(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+    question: str,
+) -> str:
+    """
+    Answer a free-text patient question using the case's diagnosis,
+    differential, and Q&A history as context.
+
+    Available to the patient who owns the case and the assigned doctor.
+    Requires AI analysis to be completed.
+    """
+    import asyncio
+    import json as _json
+
+    from src.ai.gemini_client import call_gemini
+    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+    from src.models.message import Message, MessageRole
+
+    case = await _get_case_with_access(db, case_id, user)
+
+    if case.ai_status != AiStatus.COMPLETED:
+        raise BadRequestException(
+            message="AI analysis must complete before you can ask questions about this case."
+        )
+
+    # Fetch final differential
+    dd_result = await db.execute(
+        select(DifferentialDiagnosis)
+        .where(
+            DifferentialDiagnosis.case_id == case_id,
+            DifferentialDiagnosis.is_final.is_(True),
+        )
+        .order_by(DifferentialDiagnosis.round_number.desc())
+        .limit(1)
+    )
+    dd = dd_result.scalar_one_or_none()
+
+    diagnosis = case.case_title or "Not determined"
+    differential_json = dd.diagnosis_json if dd else "{}"
+    case_summary = case.case_summary or "Not available"
+
+    # Build Q&A history string from messages
+    msgs_result = await db.execute(
+        select(Message)
+        .where(Message.case_id == case_id)
+        .order_by(Message.round_number, Message.question_index)
+    )
+    messages = list(msgs_result.scalars().all())
+
+    conv_lines: list[str] = []
+    for m in messages:
+        if m.role == MessageRole.AI:
+            try:
+                data = _json.loads(m.content)
+                if data.get("sentinel"):
+                    continue
+                q_text = data.get("question", "")
+                if q_text:
+                    conv_lines.append(f"Q (Round {m.round_number}): {q_text}")
+            except (ValueError, TypeError):
+                pass
+        elif m.role == MessageRole.PATIENT:
+            conv_lines.append(f"A: {m.content}")
+
+    conversation_history = "\n".join(conv_lines) if conv_lines else "No Q&A on record."
+
+    prompt = PatientConsultationPrompts.case_query().format(
+        diagnosis=diagnosis,
+        differential_json=differential_json,
+        case_summary=case_summary,
+        conversation_history=conversation_history,
+        question=question,
+    )
+
+    answer = await asyncio.to_thread(call_gemini, prompt)
+    return answer.strip()
+
+
+# ------------------------------------------------------------------ #
+# AI Chat Session  ("Ask AI" with session memory)
+# ------------------------------------------------------------------ #
+
+async def chat_with_case(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+    message: str,
+    session_id: str | None,
+) -> AiChatResponse:
+    """
+    Send a message in a session-managed chat grounded in the case context.
+
+    - If session_id is None → creates a new session.
+    - If session_id is provided → loads existing session and continues it.
+    - Saves the user message and AI reply to DB so history persists.
+    - Gemini receives the full prior conversation so follow-up questions
+      are answered in context.
+    """
+    import asyncio
+    import json as _json
+
+    from sqlalchemy.orm import selectinload
+
+    from src.ai.gemini_client import call_gemini
+    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+    from src.models.ai_chat import AiChatMessage, AiChatRole, AiChatSession
+    from src.models.message import Message, MessageRole
+
+    # Access check
+    case = await _get_case_with_access(db, case_id, user)
+
+    if case.ai_status != AiStatus.COMPLETED:
+        raise BadRequestException(
+            message="AI analysis must complete before you can chat about this case."
+        )
+
+    # Load or create session
+    prior_messages: list = []
+    if session_id:
+        sess_result = await db.execute(
+            select(AiChatSession)
+            .where(AiChatSession.id == session_id, AiChatSession.case_id == case_id)
+            .options(selectinload(AiChatSession.messages))
+        )
+        session = sess_result.scalar_one_or_none()
+        if session is None:
+            raise BadRequestException(message="Session not found. Omit session_id to start a new one.")
+        prior_messages = list(session.messages)
+    else:
+        session = AiChatSession(
+            id=new_uuid(),
+            case_id=case_id,
+            user_id=user.id,
+        )
+        db.add(session)
+        await db.flush()
+
+    # Build case context (once per request — same for all turns)
+    dd_result = await db.execute(
+        select(DifferentialDiagnosis)
+        .where(DifferentialDiagnosis.case_id == case_id, DifferentialDiagnosis.is_final.is_(True))
+        .order_by(DifferentialDiagnosis.round_number.desc())
+        .limit(1)
+    )
+    dd = dd_result.scalar_one_or_none()
+
+    diagnosis = case.case_title or "Not determined"
+    differential_json = dd.diagnosis_json if dd else "{}"
+    case_summary = case.case_summary or "Not available"
+
+    # Build Q&A history from consultation rounds
+    msgs_result = await db.execute(
+        select(Message)
+        .where(Message.case_id == case_id)
+        .order_by(Message.round_number, Message.question_index)
+    )
+    qa_messages = list(msgs_result.scalars().all())
+    qa_lines: list[str] = []
+    for m in qa_messages:
+        if m.role == MessageRole.AI:
+            try:
+                data = _json.loads(m.content)
+                if data.get("sentinel"):
+                    continue
+                q_text = data.get("question", "")
+                if q_text:
+                    qa_lines.append(f"Q (Round {m.round_number}): {q_text}")
+            except (ValueError, TypeError):
+                pass
+        elif m.role == MessageRole.PATIENT:
+            qa_lines.append(f"A: {m.content}")
+
+    consultation_history = "\n".join(qa_lines) if qa_lines else "No Q&A on record."
+
+    # Build Gemini conversation: system context + prior chat turns + new message
+    system_context = PatientConsultationPrompts.case_query().format(
+        diagnosis=diagnosis,
+        differential_json=differential_json,
+        case_summary=case_summary,
+        conversation_history=consultation_history,
+        question="{question}",   # placeholder — replaced per turn below
+    ).split('The patient has asked:')[0].strip()
+
+    # Construct full prompt with prior chat history + new message
+    history_text = ""
+    for prior in prior_messages:
+        role_label = "Patient" if prior.role == AiChatRole.USER else "AI"
+        history_text += f"\n{role_label}: {prior.content}"
+
+    full_prompt = (
+        f"{system_context}\n\n"
+        f"{'Prior conversation:' + history_text if history_text else ''}\n\n"
+        f"Patient: {message}\n\n"
+        "Answer the patient's latest question in the context of the full conversation above."
+    )
+
+    # Call Gemini
+    answer = await asyncio.to_thread(call_gemini, full_prompt)
+    answer = answer.strip()
+
+    # Persist both turns
+    user_msg = AiChatMessage(
+        id=new_uuid(),
+        session_id=session.id,
+        role=AiChatRole.USER,
+        content=message,
+    )
+    ai_msg = AiChatMessage(
+        id=new_uuid(),
+        session_id=session.id,
+        role=AiChatRole.ASSISTANT,
+        content=answer,
+    )
+    db.add(user_msg)
+    db.add(ai_msg)
+    await db.flush()
+
+    return AiChatResponse(session_id=session.id, answer=answer)
+
+
+async def get_chat_history(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+    session_id: str,
+) -> AiChatHistoryResponse:
+    """
+    Return the full message history for a chat session.
+    """
+    from sqlalchemy.orm import selectinload
+    from src.models.ai_chat import AiChatSession
+
+    # Access check on the case
+    await _get_case_with_access(db, case_id, user)
+
+    sess_result = await db.execute(
+        select(AiChatSession)
+        .where(AiChatSession.id == session_id, AiChatSession.case_id == case_id)
+        .options(selectinload(AiChatSession.messages))
+    )
+    session = sess_result.scalar_one_or_none()
+    if session is None:
+        raise BadRequestException(message="Chat session not found.")
+
+    return AiChatHistoryResponse(
+        session_id=session.id,
+        case_id=case_id,
+        messages=[
+            ChatMessageOut(
+                id=m.id,
+                role=m.role.value,
+                content=m.content,
+                created_at=m.created_at,
+            )
+            for m in session.messages
+        ],
     )

@@ -34,7 +34,7 @@ These mirror the JSON schema from ImageAnalysisPrompts.generate_first_differenti
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ================================================================== #
@@ -59,12 +59,15 @@ class AnalysisStatusResponse(BaseModel):
     """
     Returned by GET /status.
     The Flutter app polls this until ai_status is 'completed' or 'failed'.
+    On completion, recommended_rounds tells Flutter how many Q&A rounds
+    the AI suggests — show this to the patient before they confirm depth.
     """
     case_id: str
     ai_status: str          # pending | processing | completed | failed
     task_id: str | None = None
     error_message: str | None = None   # set on failure
     completed_at: datetime | None = None
+    recommended_rounds: int | None = None  # AI-suggested Q&A round count (1–15)
 
 
 # ================================================================== #
@@ -116,3 +119,60 @@ class AnalysisResultsResponse(BaseModel):
     visual_description: VisualDescriptionOut | None = None
     differential: DifferentialDiagnosisOut | None = None
     case_summary: str | None = None
+
+
+# ================================================================== #
+# Case AI Query  (Ask AI feature on Case Summary screen)
+# ================================================================== #
+
+class CaseQueryRequest(BaseModel):
+    """POST /cases/{case_id}/ai/query"""
+    question: str = Field(min_length=1, max_length=500)
+
+
+class CaseQueryResponse(BaseModel):
+    """Response from the Ask AI endpoint."""
+    case_id: str
+    question: str
+    answer: str
+
+
+# ================================================================== #
+# AI Chat Session  (session-managed Ask AI)
+# ================================================================== #
+
+class ChatMessageOut(BaseModel):
+    """One message turn in the chat history."""
+    id: str
+    role: str          # "user" | "assistant"
+    content: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AiChatRequest(BaseModel):
+    """
+    POST /cases/{case_id}/ai/chat
+
+    Send a message. Omit session_id to start a new session.
+    Include session_id to continue an existing one.
+    """
+    message: str = Field(min_length=1, max_length=1000)
+    session_id: str | None = None
+
+
+class AiChatResponse(BaseModel):
+    """
+    Returned after each message.
+    Flutter stores session_id and sends it with every follow-up.
+    """
+    session_id: str
+    answer: str
+
+
+class AiChatHistoryResponse(BaseModel):
+    """GET /cases/{case_id}/ai/chat/{session_id}"""
+    session_id: str
+    case_id: str
+    messages: list[ChatMessageOut]

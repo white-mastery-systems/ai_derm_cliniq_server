@@ -452,12 +452,27 @@ def save_results_task(self, analysis_result: dict) -> None:
             )
             session.add(differential)
 
+            # Ask AI how many questions this case needs (recommendation for patient)
+            recommended_rounds = 5  # safe default if call fails
+            try:
+                rounds_prompt = PatientConsultationPrompts.question_numbers().format(
+                    diagnoses=diagnosis_json_str
+                )
+                rounds_text = call_llm(rounds_prompt)
+                rounds_data = extract_json(rounds_text)
+                raw = rounds_data.get("no_of_questions")
+                if isinstance(raw, int) and 1 <= raw <= 15:
+                    recommended_rounds = raw
+            except Exception:
+                pass  # non-critical — default is fine
+
             # Update case
             case.ai_status = AiStatus.COMPLETED
             case.celery_task_id = None
             case.case_summary = case_summary
             case.case_title = most_probable_name
             case.symptom_tags = json.dumps(symptom_tags) if symptom_tags else None
+            case.max_question_rounds = recommended_rounds  # AI recommendation
 
             await session.commit()
 

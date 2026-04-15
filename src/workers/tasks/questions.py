@@ -88,7 +88,7 @@ def _build_conversation_history(messages: list[Message]) -> str:
         ...
     """
     ai_messages = sorted(
-        [m for m in messages if m.role == MessageRole.AI],
+        [m for m in messages if m.role == MessageRole.AI and m.content != '{"sentinel": true}'],
         key=lambda m: (m.round_number, m.question_index or 0),
     )
     patient_messages = {
@@ -293,13 +293,28 @@ def generate_questions_task(self, case_id: str) -> None:
                     await _fail_case(session, case_id, f"Question generation failed: {exc}")
                     raise Ignore() from exc
 
-                # If no more doubts — finalize early (no more questions needed)
+                # If no more doubts — finalize early (no more questions needed).
+                # Also set question_round = max_question_rounds so GET /chat
+                # returns is_complete=True and Flutter exits the polling loop.
                 if questions_data.get("doubt_present") == "no":
                     logger.info("no_more_doubts_finalizing", case_id=case_id)
+                    case.question_round = case.max_question_rounds
                     await _finalize_case(session, case_id, conv_history, visual_desc, differential)
                     await session.commit()
                     await engine.dispose()
                     return
+
+            # Delete any sentinel message written by trigger_questions to claim
+            # the slot before this task ran. Real messages replace it below.
+            sentinel_result = await session.execute(
+                select(Message).where(
+                    Message.case_id == case_id,
+                    Message.round_number == round_number,
+                    Message.content == '{"sentinel": true}',
+                )
+            )
+            for sentinel_msg in sentinel_result.scalars().all():
+                await session.delete(sentinel_msg)
 
             # Save questions as Message rows
             # Gemini sometimes returns "questions" (lower) instead of "Questions" (upper)
@@ -547,11 +562,27 @@ async def _finalize_case(
         logger.warning("make_case_summary_failed", case_id=case_id, error=str(exc))
         case_summary = "AI consultation rounds complete. Please review with your doctor."
 
+    # Extract final most-probable diagnosis to update the case title.
+    # This overwrites the initial title set by save_results_task so the
+    # History tab reflects the Q&A-refined diagnosis, not the first-pass one.
+    final_title: str | None = None
+    try:
+        diff = json.loads(differential_json)
+        mpd = diff.get("most_probable_diagnosis", {})
+        if isinstance(mpd, dict):
+            final_title = mpd.get("diagnosis")
+        elif isinstance(mpd, str):
+            final_title = mpd
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
     result = await session.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
     if case:
         case.case_summary = case_summary
-    logger.info("case_finalized", case_id=case_id)
+        if final_title:
+            case.case_title = final_title
+    logger.info("case_finalized", case_id=case_id, final_title=final_title)
 
 
 # ------------------------------------------------------------------ #

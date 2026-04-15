@@ -24,6 +24,7 @@ Importing all models here serves two purposes:
 """
 
 from src.models.base import Base, TimestampMixin, new_uuid
+from src.models.ai_chat import AiChatSession, AiChatMessage, AiChatRole
 from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
 from src.models.dependent import Dependent
 from src.models.case_image import CaseImage, ImageType
@@ -78,4 +79,8 @@ __all__ = [
     "TokenPurpose",
     # Todos
     "Todo",
+    # AI Chat
+    "AiChatSession",
+    "AiChatMessage",
+    "AiChatRole",
 ]

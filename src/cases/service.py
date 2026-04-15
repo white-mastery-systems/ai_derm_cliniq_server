@@ -27,7 +27,7 @@ PAGINATION
 Uses simple offset pagination: page=1 returns rows 0..page_size-1.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -40,6 +40,7 @@ from src.cases.schemas import (
     CaseSearchItem,
     CaseSummaryResponse,
     CaseUpdateRequest,
+    ComplaintsResponse,
     DoctorCaseCreateRequest,
     DoctorStatsResponse,
     PaginatedCasesResponse,
@@ -47,6 +48,7 @@ from src.cases.schemas import (
     RedFlagsResponse,
 )
 from src.exceptions import (
+    AIServiceException,
     BadRequestException,
     CaseNotFoundException,
     ForbiddenException,
@@ -78,7 +80,13 @@ def _parse_symptom_tags(raw: str | None) -> list[str]:
         return []
 
 
-def _to_case_response(case: Case, image_count: int = 0) -> CaseResponse:
+def _to_case_response(
+    case: Case,
+    image_count: int = 0,
+    patient_name: str | None = None,
+    patient_age: int | None = None,
+    patient_gender: str | None = None,
+) -> CaseResponse:
     return CaseResponse(
         id=case.id,
         case_number=case.case_number,
@@ -108,6 +116,9 @@ def _to_case_response(case: Case, image_count: int = 0) -> CaseResponse:
         question_round=case.question_round,
         max_question_rounds=case.max_question_rounds,
         image_count=image_count,
+        patient_name=patient_name,
+        patient_age=patient_age,
+        patient_gender=patient_gender,
         created_at=case.created_at,
         updated_at=case.updated_at,
     )
@@ -129,11 +140,13 @@ def _to_summary_response(
         clinical_status=case.clinical_status.value,
         is_for_self=case.is_for_self,
         dependent_name=case.dependent_name,
+        dependent_relationship=case.dependent_relationship,
         consent_ai_analysis=case.consent_ai_analysis,
         has_visible_lesion=case.has_visible_lesion,
         body_location=case.body_location,
         symptom_progression=case.symptom_progression,
         symptom_tags=_parse_symptom_tags(case.symptom_tags),
+        case_summary=case.case_summary,
         image_count=image_count,
         patient_name=patient_name,
         patient_avatar_url=patient_avatar_url,
@@ -372,7 +385,30 @@ async def get_case(
 
     _assert_access(user, case)
     image_count = await _get_image_count(db, case_id)
-    return _to_case_response(case, image_count)
+
+    # Fetch patient name, age, gender from User + PatientProfile
+    patient_name: str | None = None
+    patient_age: int | None = None
+    patient_gender: str | None = None
+
+    patient_result = await db.execute(select(User).where(User.id == case.patient_id))
+    patient_user = patient_result.scalar_one_or_none()
+    if patient_user:
+        patient_name = patient_user.full_name
+        profile_result = await db.execute(
+            select(PatientProfile).where(PatientProfile.user_id == case.patient_id)
+        )
+        profile = profile_result.scalar_one_or_none()
+        if profile:
+            patient_gender = profile.gender
+            if profile.date_of_birth:
+                today = date.today()
+                dob = profile.date_of_birth
+                patient_age = today.year - dob.year - (
+                    (today.month, today.day) < (dob.month, dob.day)
+                )
+
+    return _to_case_response(case, image_count, patient_name, patient_age, patient_gender)
 
 
 # ------------------------------------------------------------------ #
@@ -402,7 +438,12 @@ async def update_case(
     if request.presenting_complaint is not None:
         if user.role != UserRole.PATIENT:
             raise ForbiddenException(message="Only the patient can update the complaint")
-        case.presenting_complaint = request.presenting_complaint
+        if isinstance(request.presenting_complaint, list):
+            case.presenting_complaint = ". ".join(
+                c.strip() for c in request.presenting_complaint if c.strip()
+            )
+        else:
+            case.presenting_complaint = request.presenting_complaint
 
     if request.body_location is not None:
         case.body_location = request.body_location
@@ -477,9 +518,6 @@ async def assign_doctor(
 # Assessment Depth
 # ------------------------------------------------------------------ #
 
-_DEPTH_ROUNDS: dict[str, int] = {"quick": 5, "standard": 10, "full": 15}
-
-
 async def set_assessment_depth(
     db: AsyncSession,
     patient: User,
@@ -516,21 +554,19 @@ async def set_assessment_depth(
             message="Assessment depth cannot be changed once questions have started"
         )
 
-    rounds = _DEPTH_ROUNDS[request.depth]
-    case.max_question_rounds = rounds
+    case.max_question_rounds = request.rounds
     await db.flush()
 
     logger.info(
         "assessment_depth_set",
         case_id=case_id,
-        depth=request.depth,
-        max_rounds=rounds,
+        rounds=request.rounds,
     )
     return AssessmentDepthResponse(
         case_id=case_id,
-        depth=request.depth,
-        max_question_rounds=rounds,
-        message=f"Assessment set to {request.depth} ({rounds} question rounds).",
+        rounds=request.rounds,
+        max_question_rounds=request.rounds,
+        message=f"Assessment set to {request.rounds} question rounds.",
     )
 
 
@@ -640,6 +676,116 @@ async def trigger_red_flag_check(
         ) from exc
 
     return _build_red_flags_response(case)
+
+
+# ------------------------------------------------------------------ #
+# Complaint Suggestions
+# ------------------------------------------------------------------ #
+
+async def get_complaint_suggestions(
+    db: AsyncSession,
+    patient: User,
+    case_id: str,
+) -> ComplaintsResponse:
+    """
+    Return AI-generated complaint options for the Presenting Complaint screen.
+
+    Visible-lesion flow (has_visible_lesion=True):
+      - Requires at least one image to be uploaded first.
+      - Sends images + patient particulars to Gemini → image-contextual complaints.
+
+    No-lesion flow (has_visible_lesion=False):
+      - Text-only call using patient age/sex → general subjective complaints.
+
+    The Flutter app shows these as checkboxes. The patient selects items and
+    optionally adds free text, then submits via PATCH /cases/{id} as
+    presenting_complaint (comma-joined selected labels + custom text).
+    """
+    import asyncio
+    from datetime import date as _date
+
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None or case.patient_id != patient.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    # Build age / sex from patient profile
+    profile_result = await db.execute(
+        select(PatientProfile).where(PatientProfile.user_id == patient.id)
+    )
+    profile = profile_result.scalar_one_or_none()
+
+    age, sex = "unknown", "unknown"
+    if profile:
+        if profile.date_of_birth:
+            age = str((_date.today() - profile.date_of_birth).days // 365)
+        if profile.gender:
+            sex = profile.gender
+
+    from src.ai.gemini_client import call_gemini, extract_json
+    from src.ai.prompts.image_analysis_prompts import ImageAnalysisPrompts
+    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+
+    if case.has_visible_lesion:
+        # Require at least one uploaded image before generating image-based complaints
+        images_result = await db.execute(
+            select(CaseImage)
+            .where(CaseImage.case_id == case_id)
+            .order_by(CaseImage.upload_order)
+        )
+        images = list(images_result.scalars().all())
+
+        if not images:
+            raise BadRequestException(
+                message="Upload at least one photo before loading complaint suggestions"
+            )
+
+        from src.storage import gcs
+
+        image_bytes: list[bytes] = []
+        for img in images:
+            try:
+                image_bytes.append(gcs.download_bytes(img.gcs_path))
+            except Exception as exc:
+                raise AIServiceException(
+                    message=f"Could not load image for complaint suggestions: {exc}"
+                ) from exc
+
+        prompt = ImageAnalysisPrompts.get_complaints_from_image().format(
+            personal_particulars=f"Age: {age}, Sex: {sex}"
+        )
+
+        try:
+            response_text = await asyncio.to_thread(call_gemini, prompt, image_bytes)
+            data = await asyncio.to_thread(extract_json, response_text)
+        except Exception as exc:
+            raise AIServiceException(
+                message=f"Could not generate complaint suggestions: {exc}"
+            ) from exc
+
+        source = "image"
+
+    else:
+        prompt = PatientConsultationPrompts.get_general_complaints().format(
+            age=age, sex=sex
+        )
+
+        try:
+            response_text = await asyncio.to_thread(call_gemini, prompt)
+            data = await asyncio.to_thread(extract_json, response_text)
+        except Exception as exc:
+            raise AIServiceException(
+                message=f"Could not generate complaint suggestions: {exc}"
+            ) from exc
+
+        source = "general"
+
+    complaints = data.get("Complaint", [])
+    return ComplaintsResponse(
+        case_id=case_id,
+        complaints=complaints if isinstance(complaints, list) else [],
+        source=source,
+    )
 
 
 # ------------------------------------------------------------------ #

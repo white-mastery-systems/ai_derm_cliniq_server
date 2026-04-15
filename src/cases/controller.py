@@ -28,6 +28,7 @@ from src.cases.schemas import (
     CaseCreateRequest,
     CaseResponse,
     CaseUpdateRequest,
+    ComplaintsResponse,
     DoctorCaseCreateRequest,
     DoctorStatsResponse,
     PaginatedCasesResponse,
@@ -125,6 +126,30 @@ async def get_doctor_stats(
     db: AsyncSession = Depends(get_async_session),
 ) -> DoctorStatsResponse:
     return await service.get_doctor_stats(db, doctor)
+
+
+@router.get(
+    "/{case_id}/complaints",
+    response_model=ComplaintsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get AI-generated presenting complaint suggestions",
+    description=(
+        "Returns a list of complaint options to show as checkboxes on the "
+        "Presenting Complaint screen.\n\n"
+        "**Visible-lesion flow** (`has_visible_lesion=true`): requires at least one "
+        "uploaded image — Gemini analyses the photos and returns image-contextual options.\n\n"
+        "**No-lesion flow** (`has_visible_lesion=false`): returns general subjective "
+        "complaints based on patient age and sex.\n\n"
+        "After the patient selects items and optionally adds free text, submit via "
+        "`PATCH /cases/{case_id}` with `presenting_complaint`."
+    ),
+)
+async def get_complaint_suggestions(
+    case_id: str,
+    patient: User = Depends(require_patient),
+    db: AsyncSession = Depends(get_async_session),
+) -> ComplaintsResponse:
+    return await service.get_complaint_suggestions(db, patient, case_id)
 
 
 @router.get(

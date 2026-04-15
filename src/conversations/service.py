@@ -97,9 +97,12 @@ async def _get_all_messages(db: AsyncSession, case_id: str) -> list[Message]:
 
 
 def _parse_question(msg: Message) -> QuestionItem | None:
-    """Parse a Message(role=AI) into a QuestionItem. Returns None on parse error."""
+    """Parse a Message(role=AI) into a QuestionItem. Returns None on parse error
+    or if the message is a generation sentinel (task not yet run)."""
     try:
         data = json.loads(msg.content)
+        if data.get("sentinel"):
+            return None  # Skip sentinel placeholders in history
         return QuestionItem(
             question=data.get("question", ""),
             answer_options=data.get("answer_options", []),
@@ -141,11 +144,28 @@ async def trigger_questions(
             message="Questions for subsequent rounds are generated automatically after submitting answers"
         )
 
-    # Idempotency: don't re-generate if questions already exist for round 0
+    # Idempotency: don't re-generate if questions (or a generation sentinel) already
+    # exist for round 0. The sentinel is written synchronously below before the task
+    # is enqueued — so a second rapid call will find it and get 409 even if the
+    # Celery task hasn't run yet.
     existing = await _get_messages_for_round(db, case_id, 0)
     ai_msgs = [m for m in existing if m.role == MessageRole.AI]
     if ai_msgs:
         raise ConflictException(message="Questions for round 0 have already been generated")
+
+    # Write a sentinel message BEFORE enqueuing so that any concurrent call
+    # hitting this endpoint in the same window sees it and gets 409.
+    # The Celery task deletes this sentinel before saving the real questions.
+    sentinel = Message(
+        id=new_uuid(),
+        case_id=case_id,
+        role=MessageRole.AI,
+        content='{"sentinel": true}',
+        round_number=0,
+        question_index=0,
+    )
+    db.add(sentinel)
+    await db.flush()  # Visible to other requests immediately
 
     # Enqueue task
     try:
@@ -196,7 +216,11 @@ async def submit_answers(
     current_round = case.question_round
     messages = await _get_messages_for_round(db, case_id, current_round)
 
-    ai_msgs = [m for m in messages if m.role == MessageRole.AI]
+    # Exclude sentinel placeholders — they are not real questions
+    ai_msgs = [
+        m for m in messages
+        if m.role == MessageRole.AI and m.content != '{"sentinel": true}'
+    ]
     if not ai_msgs:
         raise BadRequestException(
             message="No questions have been generated for the current round yet. "
