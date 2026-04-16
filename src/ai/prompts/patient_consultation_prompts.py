@@ -52,7 +52,8 @@ Return the output in the following JSON format:
         """
         Generate 1 follow-up question from patient complaints when no image exists.
 
-        Template vars: {age}, {sex}, {complaints}
+        Template vars: {age}, {sex}, {complaints}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: Questions JSON schema.
         Used in: no-image consultation Q&A rounds.
         """
@@ -63,6 +64,7 @@ Provide answer options for the question.
 Age: {age}
 Sex: {sex}
 Complaints: {complaints}
+{follow_up_context}
 
 Return the output in the following JSON format:
 {{
@@ -84,7 +86,8 @@ Return the output in the following JSON format:
         """
         Generate initial differential when only complaints are available (no image).
 
-        Template vars: {age}, {sex}, {complaints}, {prescription}
+        Template vars: {age}, {sex}, {complaints}, {prescription}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: differential-diagnosis JSON schema.
         Used in: no-image path initial differential.
         """
@@ -98,6 +101,7 @@ Age: {age}
 Sex: {sex}
 Complaints: {complaints}
 Previous prescription: {prescription}
+{follow_up_context}
 
 The JSON format should be strictly as follows:
 {{
@@ -130,7 +134,8 @@ Be sure not to include '/' in the diagnosis.
         Keeps or updates most-probable diagnosis and ordering.
 
         Template vars: {conversation_history}, {previous_differential},
-                       {visual_description}, {prescription}
+                       {visual_description}, {prescription}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: differential-diagnosis JSON schema.
         Used in: after every patient answer round.
         """
@@ -148,6 +153,7 @@ Visual description:
 
 Previous prescription:
 {prescription}
+{follow_up_context}
 
 Generate a structured JSON output that includes:
 
@@ -189,7 +195,9 @@ The JSON format should be strictly as follows:
         Cuts round latency from ~29s (2 Gemini calls) to ~15s (1 Gemini call).
 
         Template vars: {conversation}, {visual_description}, {diagnoses},
-                       {previous_questions}, {prescription}, {datetime}
+                       {previous_questions}, {prescription}, {datetime},
+                       {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns:
           If more to ask: {{"doubt_present":"yes","Questions":[{{"question":"...","answer_options":[...]}}]}}
           If nothing more: {{"doubt_present":"no"}}
@@ -227,6 +235,7 @@ Previous prescription:
 
 Current date and time:
 {datetime}
+{follow_up_context}
 
 Respond in JSON only. No other text.
 
@@ -379,7 +388,8 @@ Respond only in the following JSON format:
         Generate a structured patient case summary (<150 words) for handoff to doctor.
 
         Template vars: {conversation_history}, {visual_language_model_text},
-                       {possible_diagnoses}
+                       {possible_diagnoses}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: {{"case_summary": "...", "display_statements": [...]}}
         Used in: final step of patient consultation before doctor review.
         """
@@ -395,6 +405,8 @@ Your output should follow this exact structure for easy parsing:
 6. **Most Probable Diagnosis**: Clearly state one single most probable diagnosis with its likelihood.
 7. **Differential Diagnosis**: Clearly state other differential diagnoses to consider with their likelihood.
 
+If this is a follow-up visit (previous visit context provided below), begin the History section with a reference to the previous visit diagnosis and note whether symptoms have improved, worsened, or stayed the same.
+
 Do not skip any part of the context provided. Do not fabricate any facts that are not present.
 
 Conversation history:
@@ -405,6 +417,7 @@ Visual language model text:
 
 Possible diagnoses:
 {possible_diagnoses}
+{follow_up_context}
 
 Return JSON in the following format:
 {{

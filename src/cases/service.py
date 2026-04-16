@@ -55,6 +55,7 @@ from src.exceptions import (
     ForbiddenException,
     UserNotFoundException,
 )
+from src.images.schemas import ImageResponse
 from src.logger import get_logger
 from src.models.base import new_uuid
 from src.models.case import AiStatus, Case, ClinicalStatus, ConsultationType, RedFlagStatus
@@ -62,6 +63,7 @@ from src.models.case_image import CaseImage
 from src.models.doctor_profile import DoctorProfile
 from src.models.patient_profile import PatientProfile
 from src.models.user import User, UserRole
+from src.storage import gcs
 
 logger = get_logger(__name__)
 
@@ -82,9 +84,29 @@ def _parse_symptom_tags(raw: str | None) -> list[str]:
         return []
 
 
+def _build_image_response(img: CaseImage) -> ImageResponse:
+    """Convert a CaseImage row to an ImageResponse with a fresh signed URL."""
+    try:
+        signed_url = gcs.get_signed_url(img.gcs_path)
+    except Exception:
+        signed_url = None
+    return ImageResponse(
+        id=img.id,
+        case_id=img.case_id,
+        image_type=img.image_type.value,
+        original_filename=img.original_filename,
+        mime_type=img.mime_type,
+        size_bytes=img.size_bytes,
+        upload_order=img.upload_order,
+        signed_url=signed_url,
+        created_at=img.created_at,
+    )
+
+
 def _to_case_response(
     case: Case,
     image_count: int = 0,
+    images: list[ImageResponse] | None = None,
     patient_name: str | None = None,
     patient_age: int | None = None,
     patient_gender: str | None = None,
@@ -125,6 +147,7 @@ def _to_case_response(
         question_round=case.question_round,
         max_question_rounds=case.max_question_rounds,
         image_count=image_count,
+        images=images or [],
         patient_name=patient_name,
         patient_age=patient_age,
         patient_gender=patient_gender,
@@ -242,6 +265,17 @@ async def create_case(
             message="Dependent information is required when is_for_self=False. "
                     "Provide either dependent_id (saved) or dependent (inline)."
         )
+
+    # Validate original_case_id belongs to this patient
+    if request.original_case_id:
+        orig_check = await db.execute(
+            select(Case.id, Case.patient_id).where(Case.id == request.original_case_id)
+        )
+        orig_row = orig_check.one_or_none()
+        if orig_row is None or orig_row.patient_id != patient.id:
+            raise BadRequestException(
+                message="original_case_id not found or does not belong to this patient"
+            )
 
     try:
         c_type = ConsultationType(request.consultation_type)
@@ -464,8 +498,16 @@ async def get_case(
     )
     visit_index = visit_index_result.scalar_one()
 
+    # ---- All images (initial + mid-consultation) ----
+    images_result = await db.execute(
+        select(CaseImage)
+        .where(CaseImage.case_id == case_id)
+        .order_by(CaseImage.upload_order)
+    )
+    images = [_build_image_response(img) for img in images_result.scalars().all()]
+
     return _to_case_response(
-        case, image_count,
+        case, image_count, images,
         patient_name, patient_age, patient_gender, patient_avatar_url,
         doctor_name, doctor_specialization, doctor_clinic_name, doctor_avatar_url,
         visit_index, total_visits,
@@ -499,14 +541,29 @@ async def get_adjacent_visits(
 
     _assert_access(user, case)
 
-    # All cases for this patient ordered chronologically
-    all_result = await db.execute(
+    # Resolve the root case ID for this condition thread.
+    # A follow-up stores original_case_id pointing to the case it follows.
+    # We walk up one level to find the root (new_complaint with no original_case_id).
+    root_id = case.original_case_id or case.id
+    if root_id != case.id:
+        root_check = await db.execute(
+            select(Case.original_case_id).where(Case.id == root_id)
+        )
+        root_row = root_check.one_or_none()
+        if root_row and root_row.original_case_id:
+            root_id = root_row.original_case_id
+
+    # All cases in this condition thread: the root itself + all follow-ups of it
+    thread_result = await db.execute(
         select(Case.id, Case.created_at)
-        .where(Case.patient_id == case.patient_id)
+        .where(or_(Case.id == root_id, Case.original_case_id == root_id))
         .order_by(Case.created_at.asc())
     )
-    ordered = all_result.all()  # list of (id, created_at)
-    ids = [row.id for row in ordered]
+    ids = [row.id for row in thread_result.all()]
+
+    # If case_id somehow isn't in the thread (shouldn't happen), fall back to it alone
+    if case_id not in ids:
+        ids = [case_id]
 
     try:
         idx = ids.index(case_id)

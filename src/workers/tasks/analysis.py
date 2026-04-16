@@ -65,6 +65,7 @@ from src.models.base import new_uuid
 from src.models.case import AiStatus, Case, RedFlagStatus
 from src.models.case_image import CaseImage
 from src.models.differential_diagnosis import DifferentialDiagnosis
+from src.models.doctor_review import DoctorReview
 from src.models.patient_profile import PatientProfile
 from src.models.visual_description import VisualDescription
 from src.storage import gcs
@@ -130,6 +131,56 @@ async def _get_patient_particulars(session: AsyncSession, patient_id: str) -> st
     if profile.gender:
         parts.append(f"Sex: {profile.gender}")
     return ", ".join(parts) if parts else "Age: unknown, Sex: unknown"
+
+
+async def _get_follow_up_context(session: AsyncSession, case: Case) -> str:
+    """
+    Build a follow-up context block to inject into AI prompts.
+    Returns an empty string when this is a new complaint (no original_case_id).
+    When it IS a follow-up, returns a formatted block with previous diagnosis,
+    confirmed diagnosis, treatment, symptom progression, and trimmed summary.
+    """
+    if not case.original_case_id:
+        return ""
+
+    orig_result = await session.execute(select(Case).where(Case.id == case.original_case_id))
+    orig = orig_result.scalar_one_or_none()
+    if orig is None:
+        return ""
+
+    parts = ["This is a follow-up consultation. Previous visit context:"]
+
+    if orig.case_title:
+        parts.append(f"- Previous AI diagnosis: {orig.case_title}")
+
+    if case.symptom_progression:
+        parts.append(f"- Symptom progression since last visit: {case.symptom_progression}")
+
+    dr_result = await session.execute(
+        select(DoctorReview).where(DoctorReview.case_id == case.original_case_id)
+    )
+    dr = dr_result.scalar_one_or_none()
+    if dr:
+        if dr.confirmed_diagnosis:
+            parts.append(f"- Doctor's confirmed diagnosis: {dr.confirmed_diagnosis}")
+        if dr.treatment_plan_json:
+            import json as _json
+            try:
+                plan = _json.loads(dr.treatment_plan_json)
+                meds = plan.get("treatment_plan", {}).get("medications", [])
+                if meds:
+                    med_names = [m.get("medication", "") for m in meds if isinstance(m, dict)]
+                    med_str = ", ".join(m for m in med_names if m)
+                    if med_str:
+                        parts.append(f"- Previous treatment: {med_str}")
+            except Exception:
+                pass
+
+    if orig.case_summary:
+        trimmed = orig.case_summary[:400] + "..." if len(orig.case_summary) > 400 else orig.case_summary
+        parts.append(f"- Previous case summary: {trimmed}")
+
+    return "\n".join(parts)
 
 
 async def _fail_case(session: AsyncSession, case_id: str, reason: str) -> None:
@@ -278,6 +329,7 @@ def analyse_images_task(self, case_id: str) -> dict:
 
             images = await _get_case_images(session, case_id)
             personal_particulars = await _get_patient_particulars(session, case.patient_id)
+            follow_up_context = await _get_follow_up_context(session, case)
 
         # Download image bytes
         image_bytes = []
@@ -304,7 +356,8 @@ def analyse_images_task(self, case_id: str) -> dict:
         # Call LLM: first differential (with automatic fallback)
         try:
             diag_prompt = ImageAnalysisPrompts.generate_first_differential().format(
-                personal_particulars=personal_particulars
+                personal_particulars=personal_particulars,
+                follow_up_context=follow_up_context,
             )
             diag_text = call_llm(diag_prompt, images=image_bytes)
             diagnosis_json = extract_json(diag_text)
@@ -645,6 +698,7 @@ def analyse_complaint_task(self, case_id: str) -> dict:
 
             personal_particulars = await _get_patient_particulars(session, case.patient_id)
             complaint = case.presenting_complaint or "No specific complaint provided."
+            follow_up_context = await _get_follow_up_context(session, case)
 
         # Parse age / sex out of personal_particulars for prompt template vars
         age, sex = "unknown", "unknown"
@@ -661,6 +715,7 @@ def analyse_complaint_task(self, case_id: str) -> dict:
                 sex=sex,
                 complaints=complaint,
                 prescription="None",
+                follow_up_context=follow_up_context,
             )
             diag_text = call_llm(diag_prompt)
             diagnosis_json = extract_json(diag_text)

@@ -25,6 +25,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
+from src.images.schemas import ImageResponse
+
 
 # ================================================================== #
 # Create
@@ -189,6 +191,7 @@ class CaseResponse(BaseModel):
     question_round: int
     max_question_rounds: int
     image_count: int = 0
+    images: list[ImageResponse] = []        # Full image list with signed URLs — always current
     patient_name: str | None = None         # Full name of the patient
     patient_age: int | None = None          # Computed from PatientProfile.date_of_birth
     patient_gender: str | None = None       # From PatientProfile.gender

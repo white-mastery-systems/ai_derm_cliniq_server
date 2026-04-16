@@ -197,7 +197,38 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     """POST /api/v1/auth/reset-password"""
-    token: str = Field(description="Raw token received in the password-reset email")
+    email: EmailStr = Field(description="The email address the OTP was sent to")
+    otp: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+        description="6-digit OTP received in the password-reset email",
+    )
+    new_password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        has_letter = any(c.isalpha() for c in v)
+        has_digit = any(c.isdigit() for c in v)
+        if not (has_letter and has_digit):
+            raise ValueError("Password must contain at least one letter and one digit")
+        return v
+
+
+class VerifyEmailOTPRequest(BaseModel):
+    """POST /api/v1/auth/verify-email/confirm"""
+    otp: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+        description="6-digit OTP received in the verification email",
+    )
+
+
+class ChangePasswordRequest(BaseModel):
+    """POST /api/v1/auth/change-password"""
+    current_password: str = Field(min_length=1, description="The user's current password")
     new_password: str = Field(min_length=8, max_length=128)
 
     @field_validator("new_password")

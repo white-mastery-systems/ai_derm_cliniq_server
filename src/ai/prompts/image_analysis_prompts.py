@@ -148,7 +148,8 @@ Ensure that your response follows this JSON format:
         Preliminary differential from image + demographics only.
         Run BEFORE any conversation context is collected.
 
-        Template vars: {personal_particulars}
+        Template vars: {personal_particulars}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: differential-diagnosis JSON schema.
         Used in: Celery `generate_differential_task` (initial pass).
         """
@@ -160,6 +161,8 @@ confidence in answer: high or medium or low
 
 Personal particulars:
 {personal_particulars}
+
+{follow_up_context}
 
 The JSON format should be strictly as follows:
 
@@ -299,12 +302,15 @@ The JSON format should be strictly as follows:
         Generate 1 initial question + answer options from the uploaded image.
         These are the FIRST questions shown to a patient after image upload.
 
+        Template vars: {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: Questions JSON schema.
         Used in: Celery `generate_questions_task` (first pass).
         """
         return """You are an intelligent dermatological assistant who is generating a question to ask to a patient based on the photograph they have uploaded.
 Generate 1 distinct question to ask to the patient. Choose the single most important question that will best help narrow down the diagnosis. Also provide as many descriptive answer choices for the question as possible that encompasses all likely patient responses.
 Ask any other question other than "What brings you here" because that has already been asked before.
+{follow_up_context}
 
 Give your response in json format as:
 

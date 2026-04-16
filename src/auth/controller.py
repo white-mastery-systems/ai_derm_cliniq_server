@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.auth import service
 from src.auth.schemas import (
+    ChangePasswordRequest,
     DoctorRegisterRequest,
     DoctorRegisterResponse,
     ForgotPasswordRequest,
@@ -48,6 +49,7 @@ from src.auth.schemas import (
     ResetPasswordRequest,
     TokenResponse,
     UserResponse,
+    VerifyEmailOTPRequest,
 )
 from src.auth.dependencies import get_current_user
 from src.database.core import get_async_session
@@ -222,7 +224,11 @@ async def forgot_password(
     "/reset-password",
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="Set a new password using a reset token",
+    summary="Set a new password using the OTP from the reset email",
+    description=(
+        "Validates the 6-digit OTP sent to the user's email and updates the password. "
+        "The OTP expires in 15 minutes and is single-use."
+    ),
 )
 @limiter.limit("10/minute")
 async def reset_password(
@@ -230,7 +236,7 @@ async def reset_password(
     body: ResetPasswordRequest,
     db: AsyncSession = Depends(get_async_session),
 ) -> MessageResponse:
-    await service.reset_password(db, body.token, body.new_password)
+    await service.reset_password(db, body.email, body.otp, body.new_password)
     return MessageResponse(message="Password updated successfully. You can now log in.")
 
 
@@ -249,18 +255,44 @@ async def resend_email_verification(
     return MessageResponse(message="Verification email sent. Check your inbox.")
 
 
-@router.get(
-    "/verify/{token}",
+@router.post(
+    "/verify-email/confirm",
     response_model=MessageResponse,
     status_code=status.HTTP_200_OK,
-    summary="Confirm email address from the link in the verification email",
+    summary="Confirm email address using the OTP from the verification email",
+    description=(
+        "Requires a valid access token. "
+        "Validates the 6-digit OTP sent to the user's inbox and marks the account as verified. "
+        "The OTP expires in 30 minutes and is single-use."
+    ),
 )
 async def verify_email(
-    token: str,
+    body: VerifyEmailOTPRequest,
     db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
 ) -> MessageResponse:
-    await service.verify_email(db, token)
+    await service.verify_email(db, current_user, body.otp)
     return MessageResponse(message="Email verified successfully.")
+
+
+@router.post(
+    "/change-password",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Change password (logged-in user)",
+    description=(
+        "Allows a logged-in user to change their password by providing their "
+        "current password and a new one. Requires a valid access token. "
+        "Not applicable to Google-only accounts."
+    ),
+)
+async def change_password(
+    body: ChangePasswordRequest,
+    db: AsyncSession = Depends(get_async_session),
+    current_user: User = Depends(get_current_user),
+) -> MessageResponse:
+    await service.change_password(db, current_user, body.current_password, body.new_password)
+    return MessageResponse(message="Password changed successfully.")
 
 
 @router.post(

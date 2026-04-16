@@ -62,6 +62,7 @@ from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
 from src.models.case_image import CaseImage
 from src.models.differential_diagnosis import DifferentialDiagnosis
+from src.models.doctor_review import DoctorReview
 from src.models.message import Message, MessageRole
 from src.models.patient_profile import PatientProfile
 from src.models.visual_description import VisualDescription
@@ -180,6 +181,56 @@ async def _get_all_messages(session, case_id: str) -> list[Message]:
     return list(result.scalars().all())
 
 
+async def _get_follow_up_context(session, case: Case) -> str:
+    """
+    Build a follow-up context block to inject into AI prompts.
+    Returns empty string for new complaints (no original_case_id).
+    For follow-ups, returns previous diagnosis, confirmed diagnosis,
+    treatment, symptom progression, and a trimmed previous case summary.
+    """
+    if not case.original_case_id:
+        return ""
+
+    orig_result = await session.execute(select(Case).where(Case.id == case.original_case_id))
+    orig = orig_result.scalar_one_or_none()
+    if orig is None:
+        return ""
+
+    parts = ["This is a follow-up consultation. Previous visit context:"]
+
+    if orig.case_title:
+        parts.append(f"- Previous AI diagnosis: {orig.case_title}")
+
+    if case.symptom_progression:
+        parts.append(f"- Symptom progression since last visit: {case.symptom_progression}")
+
+    dr_result = await session.execute(
+        select(DoctorReview).where(DoctorReview.case_id == case.original_case_id)
+    )
+    dr = dr_result.scalar_one_or_none()
+    if dr:
+        if dr.confirmed_diagnosis:
+            parts.append(f"- Doctor's confirmed diagnosis: {dr.confirmed_diagnosis}")
+        if dr.treatment_plan_json:
+            import json as _json
+            try:
+                plan = _json.loads(dr.treatment_plan_json)
+                meds = plan.get("treatment_plan", {}).get("medications", [])
+                if meds:
+                    med_names = [m.get("medication", "") for m in meds if isinstance(m, dict)]
+                    med_str = ", ".join(m for m in med_names if m)
+                    if med_str:
+                        parts.append(f"- Previous treatment: {med_str}")
+            except Exception:
+                pass
+
+    if orig.case_summary:
+        trimmed = orig.case_summary[:400] + "..." if len(orig.case_summary) > 400 else orig.case_summary
+        parts.append(f"- Previous case summary: {trimmed}")
+
+    return "\n".join(parts)
+
+
 async def _download_case_images(session, case_id: str) -> list[bytes]:
     result = await session.execute(
         select(CaseImage)
@@ -235,6 +286,7 @@ def generate_questions_task(self, case_id: str) -> None:
             visual_desc = await _get_latest_visual_desc(session, case_id)
             differential = await _get_latest_differential(session, case_id)
             patient_particulars = await _get_patient_particulars(session, case.patient_id)
+            follow_up_context = await _get_follow_up_context(session, case)
 
             if round_number == 0:
                 # max_question_rounds is already set by the patient's explicit depth
@@ -245,7 +297,9 @@ def generate_questions_task(self, case_id: str) -> None:
                     # Image-based first questions
                     image_bytes = await _download_case_images(session, case_id)
                     try:
-                        prompt = ImageAnalysisPrompts.first_question()
+                        prompt = ImageAnalysisPrompts.first_question().format(
+                            follow_up_context=follow_up_context,
+                        )
                         response_text = gemini_client.call_gemini(prompt, images=image_bytes)
                         questions_data = gemini_client.extract_json(response_text)
                     except AIProviderException as exc:
@@ -266,6 +320,7 @@ def generate_questions_task(self, case_id: str) -> None:
                             age=age,
                             sex=sex,
                             complaints=complaint,
+                            follow_up_context=follow_up_context,
                         )
                         response_text = gemini_client.call_gemini(prompt)
                         questions_data = gemini_client.extract_json(response_text)
@@ -286,6 +341,7 @@ def generate_questions_task(self, case_id: str) -> None:
                         previous_questions=prev_questions,
                         prescription="None",
                         datetime=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                        follow_up_context=follow_up_context,
                     )
                     response_text = gemini_client.call_gemini(combined_prompt)
                     questions_data = gemini_client.extract_json(response_text)
@@ -299,7 +355,7 @@ def generate_questions_task(self, case_id: str) -> None:
                 if questions_data.get("doubt_present") == "no":
                     logger.info("no_more_doubts_finalizing", case_id=case_id)
                     case.question_round = case.max_question_rounds
-                    await _finalize_case(session, case_id, conv_history, visual_desc, differential)
+                    await _finalize_case(session, case_id, conv_history, visual_desc, differential, follow_up_context)
                     await session.commit()
                     await engine.dispose()
                     return
@@ -415,7 +471,8 @@ def refine_analysis_task(self, case_id: str) -> None:
                     visual_desc = await _get_latest_visual_desc(session, case_id)
                     differential = await _get_latest_differential(session, case_id)
                     diff_json = differential.diagnosis_json if differential else "{}"
-                    await _finalize_case(session, case_id, conv_history, visual_desc, diff_json)
+                    guard_follow_up = await _get_follow_up_context(session, case)
+                    await _finalize_case(session, case_id, conv_history, visual_desc, diff_json, guard_follow_up)
                     await session.commit()
                 raise Ignore()
 
@@ -424,6 +481,7 @@ def refine_analysis_task(self, case_id: str) -> None:
             visual_desc = await _get_latest_visual_desc(session, case_id)
             differential = await _get_latest_differential(session, case_id)
             patient_particulars = await _get_patient_particulars(session, case.patient_id)
+            follow_up_context = await _get_follow_up_context(session, case)
 
             # Step 1: Revised differential from conversation (works for both paths)
             try:
@@ -432,6 +490,7 @@ def refine_analysis_task(self, case_id: str) -> None:
                     previous_differential=differential,
                     visual_description=visual_desc,
                     prescription="None",
+                    follow_up_context=follow_up_context,
                 )
                 diff_text = gemini_client.call_gemini(diff_prompt)
                 new_diff = gemini_client.extract_json(diff_text)
@@ -504,7 +563,7 @@ def refine_analysis_task(self, case_id: str) -> None:
 
             if new_round >= max_rounds:
                 # Max rounds reached — finalize
-                await _finalize_case(session, case_id, conv_history, visual_desc, new_diff_json)
+                await _finalize_case(session, case_id, conv_history, visual_desc, new_diff_json, follow_up_context)
             # else: generate_questions_task will be enqueued after commit
 
             should_generate_more = new_round < max_rounds
@@ -544,16 +603,20 @@ async def _finalize_case(
     conv_history: str,
     visual_desc: str,
     differential_json: str,
+    follow_up_context: str = "",
 ) -> None:
     """
     Generate final case summary and mark consultation as complete.
     Called when max_question_rounds is reached or doctor doubts end.
+    follow_up_context is passed through from the Q&A tasks so the summary
+    references the previous visit when this is a follow-up case.
     """
     try:
         summary_prompt = PatientConsultationPrompts.make_case_summary().format(
             conversation_history=conv_history,
             visual_language_model_text=visual_desc,
             possible_diagnoses=differential_json,
+            follow_up_context=follow_up_context,
         )
         summary_text = gemini_client.call_gemini(summary_prompt)
         summary_data = gemini_client.extract_json(summary_text)

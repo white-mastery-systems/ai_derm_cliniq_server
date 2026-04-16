@@ -71,7 +71,7 @@ if TYPE_CHECKING:
 
 # Expiry constants
 _PASSWORD_RESET_EXPIRY_MINUTES = 15
-_EMAIL_VERIFY_EXPIRY_HOURS = 24
+_EMAIL_VERIFY_EXPIRY_MINUTES = 30
 
 logger = get_logger(__name__)
 
@@ -482,13 +482,13 @@ async def google_auth(
 
 
 # ------------------------------------------------------------------ #
-# Verification token helpers
+# OTP helpers
 # ------------------------------------------------------------------ #
 
-def _generate_verification_token() -> str:
-    """Return a cryptographically secure URL-safe raw token (43 chars)."""
+def _generate_otp() -> str:
+    """Return a cryptographically secure 6-digit OTP string."""
     import secrets
-    return secrets.token_urlsafe(32)
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 async def _create_verification_token(
@@ -497,44 +497,72 @@ async def _create_verification_token(
     purpose: TokenPurpose,
     expiry_minutes: int,
 ) -> str:
-    """Persist a hashed verification token and return the raw token."""
-    raw = _generate_verification_token()
+    """
+    Generate a 6-digit OTP, persist its hash, and return the raw code.
+
+    Any previous unused OTPs for this user+purpose are invalidated first —
+    this ensures only the latest OTP is valid and avoids hash collisions
+    from duplicate codes sitting in the table.
+    """
+    # Invalidate any outstanding OTPs for this user+purpose
+    existing = await db.execute(
+        select(VerificationToken).where(
+            VerificationToken.user_id == user_id,
+            VerificationToken.purpose == purpose,
+            VerificationToken.used == False,  # noqa: E712
+        )
+    )
+    now = datetime.now(tz=timezone.utc)
+    for row in existing.scalars():
+        row.used = True
+        row.used_at = now
+    await db.flush()
+
+    otp = _generate_otp()
     token_row = VerificationToken(
         user_id=user_id,
-        token_hash=hash_refresh_token(raw),   # SHA-256 — same util as refresh tokens
+        token_hash=hash_refresh_token(otp),
         purpose=purpose,
-        expires_at=datetime.now(tz=timezone.utc) + timedelta(minutes=expiry_minutes),
+        expires_at=now + timedelta(minutes=expiry_minutes),
         used=False,
     )
     db.add(token_row)
     await db.flush()
-    return raw
+    return otp
 
 
-async def _redeem_verification_token(
+async def _redeem_otp(
     db: AsyncSession,
-    raw_token: str,
+    user_id: str,
+    otp: str,
     purpose: TokenPurpose,
 ) -> VerificationToken:
     """
-    Look up and validate a raw token. Marks it as used.
+    Look up and validate an OTP for a specific user. Marks it as used.
 
-    Raises InvalidTokenException for expired, wrong-purpose, or already-used tokens.
+    Scoped to user_id so a valid OTP for user A cannot redeem user B's token.
+
+    Raises InvalidTokenException for not-found, already-used, or expired OTPs.
     """
-    token_hash = hash_refresh_token(raw_token)
+    otp_hash = hash_refresh_token(otp)
     result = await db.execute(
-        select(VerificationToken).where(VerificationToken.token_hash == token_hash)
+        select(VerificationToken).where(
+            VerificationToken.user_id == user_id,
+            VerificationToken.token_hash == otp_hash,
+            VerificationToken.purpose == purpose,
+            VerificationToken.used == False,  # noqa: E712
+        )
     )
     token_row = result.scalar_one_or_none()
 
-    if token_row is None or token_row.purpose != purpose or token_row.used:
-        raise InvalidTokenException(message="Token is invalid or has already been used")
+    if token_row is None:
+        raise InvalidTokenException(message="OTP is invalid or has already been used")
 
     expires_at = token_row.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at < datetime.now(tz=timezone.utc):
-        raise InvalidTokenException(message="Token has expired")
+        raise InvalidTokenException(message="OTP has expired")
 
     token_row.used = True
     token_row.used_at = datetime.now(tz=timezone.utc)
@@ -548,17 +576,15 @@ async def _redeem_verification_token(
 
 async def forgot_password(db: AsyncSession, email: str) -> None:
     """
-    Generate a password-reset token and email it to the user.
+    Generate a 6-digit OTP and email it to the user for password reset.
 
     Deliberately succeeds silently even when the email is not registered —
     this prevents user enumeration attacks (attacker cannot tell if the
     email exists from the response).
 
-    Google-only accounts (no password_hash) receive a different message
-    directing them to use Google Sign-In.
+    Google-only accounts (no password_hash) receive a friendly redirect message.
     """
-    from src.config import settings
-    from src.core.email import render_password_reset_email, send_email
+    from src.core.email import render_password_reset_otp_email, send_email
 
     user = await _get_user_by_email(db, email)
     if user is None or not user.is_active:
@@ -579,40 +605,74 @@ async def forgot_password(db: AsyncSession, email: str) -> None:
         )
         return
 
-    raw_token = await _create_verification_token(
+    otp = await _create_verification_token(
         db, user.id, TokenPurpose.PASSWORD_RESET,
         expiry_minutes=_PASSWORD_RESET_EXPIRY_MINUTES,
     )
-    reset_url = f"{settings.FRONTEND_URL}/reset-password?token={raw_token}"
-    html = render_password_reset_email(name=user.full_name, reset_url=reset_url)
+    html = render_password_reset_otp_email(name=user.full_name, otp=otp)
     send_email(
         to_email=email,
-        subject="AiDerm Cliniq — Reset Your Password",
+        subject="AiDerm Cliniq — Password Reset OTP",
         html_body=html,
     )
-    logger.info("password_reset_email_sent", user_id=user.id)
+    logger.info("password_reset_otp_sent", user_id=user.id)
 
 
 # ------------------------------------------------------------------ #
 # Reset Password
 # ------------------------------------------------------------------ #
 
-async def reset_password(db: AsyncSession, raw_token: str, new_password: str) -> None:
+async def reset_password(db: AsyncSession, email: str, otp: str, new_password: str) -> None:
     """
-    Validate the reset token and update the user's password.
+    Validate the OTP and update the user's password.
 
     Raises:
-        InvalidTokenException — expired, already used, or not found
+        InvalidTokenException — OTP expired, already used, or not found
     """
-    token_row = await _redeem_verification_token(db, raw_token, TokenPurpose.PASSWORD_RESET)
-
-    user_result = await db.execute(select(User).where(User.id == token_row.user_id))
-    user = user_result.scalar_one_or_none()
+    user = await _get_user_by_email(db, email)
     if user is None or not user.is_active:
-        raise InvalidTokenException(message="Token is invalid")
+        # Use same error as invalid OTP to prevent user enumeration
+        raise InvalidTokenException(message="OTP is invalid or has expired")
 
+    await _redeem_otp(db, user.id, otp, TokenPurpose.PASSWORD_RESET)
     user.password_hash = await asyncio.to_thread(hash_password, new_password)
     logger.info("password_reset_complete", user_id=user.id)
+
+
+# ------------------------------------------------------------------ #
+# Change Password (logged-in user)
+# ------------------------------------------------------------------ #
+
+async def change_password(
+    _db: AsyncSession,
+    user: User,
+    current_password: str,
+    new_password: str,
+) -> None:
+    """
+    Change password for a logged-in user who knows their current password.
+
+    Raises:
+        BadRequestException     — current_password is wrong
+        BadRequestException     — Google-only account (no password to change)
+        BadRequestException     — new password same as current
+    """
+    if not user.password_hash:
+        raise BadRequestException(
+            message="Your account uses Google Sign-In and does not have a password. "
+                    "Use 'Sign in with Google' to access your account."
+        )
+
+    is_valid = await asyncio.to_thread(verify_password, current_password, user.password_hash)
+    if not is_valid:
+        raise BadRequestException(message="Current password is incorrect")
+
+    is_same = await asyncio.to_thread(verify_password, new_password, user.password_hash)
+    if is_same:
+        raise BadRequestException(message="New password must be different from the current password")
+
+    user.password_hash = await asyncio.to_thread(hash_password, new_password)
+    logger.info("password_changed", user_id=user.id)
 
 
 # ------------------------------------------------------------------ #
@@ -621,48 +681,40 @@ async def reset_password(db: AsyncSession, raw_token: str, new_password: str) ->
 
 async def request_email_verification(db: AsyncSession, user: User) -> None:
     """
-    Send (or resend) the email verification link to the given user.
+    Send (or resend) a 6-digit OTP to the user's email for verification.
 
     No-op if the user is already verified.
     """
-    from src.config import settings
-    from src.core.email import render_email_verify_email, send_email
+    from src.core.email import render_email_verify_otp_email, send_email
 
     if user.is_verified:
         logger.info("email_already_verified", user_id=user.id)
         return
 
-    raw_token = await _create_verification_token(
+    otp = await _create_verification_token(
         db, user.id, TokenPurpose.EMAIL_VERIFY,
-        expiry_minutes=_EMAIL_VERIFY_EXPIRY_HOURS * 60,
+        expiry_minutes=_EMAIL_VERIFY_EXPIRY_MINUTES,
     )
-    verify_url = f"{settings.FRONTEND_URL}/verify-email?token={raw_token}"
-    html = render_email_verify_email(name=user.full_name, verify_url=verify_url)
+    html = render_email_verify_otp_email(name=user.full_name, otp=otp)
     send_email(
         to_email=user.email,
         subject="AiDerm Cliniq — Verify Your Email",
         html_body=html,
     )
-    logger.info("email_verification_sent", user_id=user.id)
+    logger.info("email_verification_otp_sent", user_id=user.id)
 
 
-async def verify_email(db: AsyncSession, raw_token: str) -> None:
+async def verify_email(db: AsyncSession, user: User, otp: str) -> None:
     """
-    Confirm email ownership and mark the user as verified.
+    Confirm email ownership using a 6-digit OTP and mark the user as verified.
 
     Raises:
-        InvalidTokenException — expired, already used, or not found
-        BadRequestException   — user already verified (no-op would be confusing via link click)
+        BadRequestException   — user already verified
+        InvalidTokenException — OTP expired, already used, or not found
     """
-    token_row = await _redeem_verification_token(db, raw_token, TokenPurpose.EMAIL_VERIFY)
-
-    user_result = await db.execute(select(User).where(User.id == token_row.user_id))
-    user = user_result.scalar_one_or_none()
-    if user is None:
-        raise InvalidTokenException(message="Token is invalid")
-
     if user.is_verified:
         raise BadRequestException(message="Email address is already verified")
 
+    await _redeem_otp(db, user.id, otp, TokenPurpose.EMAIL_VERIFY)
     user.is_verified = True
     logger.info("email_verified", user_id=user.id)
