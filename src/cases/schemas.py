@@ -23,7 +23,7 @@ DoctorStatsResponse — dashboard numbers for the doctor home screen
 
 from datetime import date, datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from src.images.schemas import ImageResponse
 
@@ -278,11 +278,34 @@ class DoctorCaseCreateRequest(BaseModel):
     """
     POST /api/v1/cases/doctor
 
-    Doctor creates a case on behalf of a patient.
-    patient_id comes from GET /users/by-code/{patient_code} lookup.
-    Consent is implied — the doctor is initiating the clinical workflow.
+    Doctor creates a case on behalf of a patient identified by name + email.
+
+    FIND-OR-CREATE LOGIC
+    ---------------------
+    - Email found in DB → use that patient (must be an active PATIENT account).
+      DOB and gender are filled in if missing and provided here.
+    - Email not found → a new patient account is created with no password.
+      The patient claims their account later via forgot-password OTP.
+
+    Consent is implied by the clinical encounter — consent_ai_analysis = True.
     """
-    patient_id: str = Field(description="UUID of the patient (from patient code lookup)")
+    patient_name: str = Field(
+        min_length=2,
+        max_length=255,
+        description="Patient's full name — used when creating a new account",
+    )
+    patient_email: EmailStr = Field(
+        description="Patient's email — used to find or create their account",
+    )
+    patient_date_of_birth: date | None = Field(
+        default=None,
+        description="Patient's date of birth — stored in profile if missing",
+    )
+    patient_gender: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Patient's gender — stored in profile if missing",
+    )
     consultation_type: str = Field(
         default="new_complaint",
         pattern="^(new_complaint|follow_up)$",
@@ -291,6 +314,15 @@ class DoctorCaseCreateRequest(BaseModel):
     body_location: str | None = Field(default=None, max_length=100)
     presenting_complaint: str | None = Field(default=None, max_length=2000)
     consent_research: bool = Field(default=False)
+    original_case_id: str | None = Field(
+        default=None,
+        description="For follow-up consultations — ID of the original case being followed up",
+    )
+    symptom_progression: str | None = Field(
+        default=None,
+        pattern="^(better|same|worse)$",
+        description="For follow-up consultations — how symptoms changed: better | same | worse",
+    )
 
 
 class CaseSearchItem(BaseModel):

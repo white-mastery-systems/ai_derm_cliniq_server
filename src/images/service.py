@@ -106,7 +106,7 @@ async def _get_case_or_404(db: AsyncSession, case_id: str, patient: User) -> Cas
 
 async def upload_image(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
     file: UploadFile,
     image_type: str = "skin",
@@ -115,7 +115,7 @@ async def upload_image(
     Validate and upload one image to GCS, then persist metadata.
 
     Gates:
-    1. Case exists + patient owns it
+    1. Case exists + caller owns it (patient) or is the assigned doctor
     2. Consent given
     3. MIME type allowed
     4. File size ≤ limit
@@ -123,15 +123,22 @@ async def upload_image(
     6. Image count < max
 
     Raises:
-        CaseNotFoundException     — case not found or not owned by patient
+        CaseNotFoundException     — case not found or caller has no access
         ForbiddenException        — consent not given
         InvalidFileTypeException  — unsupported MIME type
         FileTooLargeException     — file exceeds MAX_IMAGE_SIZE_MB
         TooManyImagesException    — already at MAX_IMAGES_PER_CASE
         StorageException          — GCS upload failed
     """
-    # 1. Case access
-    case = await _get_case_or_404(db, case_id, patient)
+    # 1. Case access (patient owns it, or doctor is assigned)
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    if user.role == UserRole.PATIENT and case.patient_id != user.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    if user.role == UserRole.DOCTOR and case.doctor_id != user.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
 
     # 2. Consent gate
     if not case.consent_ai_analysis:

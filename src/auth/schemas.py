@@ -22,6 +22,8 @@ NAMING CONVENTION
 <Resource>In       → alternative name for requests (both are used)
 """
 
+from datetime import date
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
@@ -33,8 +35,9 @@ class PatientRegisterRequest(BaseModel):
     """
     POST /api/v1/auth/register/patient
 
-    Minimum required to create a patient account.
-    Profile fields (DOB, phone, gender) are set via PATCH /users/me later.
+    Creates a patient account. DOB and gender are collected upfront so the
+    AI can use them immediately for complaint suggestions and diagnosis context.
+    Phone and avatar can be updated later via PATCH /users/me.
     """
     full_name: str = Field(min_length=2, max_length=255)
     email: EmailStr
@@ -42,6 +45,15 @@ class PatientRegisterRequest(BaseModel):
         min_length=8,
         max_length=128,
         description="Min 8 characters",
+    )
+    date_of_birth: date | None = Field(
+        default=None,
+        description="Patient's date of birth — used to compute age for AI analysis",
+    )
+    gender: str | None = Field(
+        default=None,
+        max_length=50,
+        description="Male | Female | Other | Prefer not to say",
     )
 
     @field_validator("password")

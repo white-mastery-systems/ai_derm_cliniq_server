@@ -48,6 +48,7 @@ from src.auth.jwt import decode_access_token
 from src.database.core import get_async_session
 from src.exceptions import (
     DoctorPendingApprovalException,
+    ForbiddenException,
     InsufficientRoleException,
     InvalidTokenException,
     UnauthorizedException,
@@ -188,6 +189,36 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
             message="This endpoint requires the 'admin' role"
         )
     return user
+
+
+async def require_patient_or_assigned_doctor(
+    case_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> User:
+    """
+    Dependency: route is accessible to:
+    - Any PATIENT (ownership is enforced in the service layer)
+    - A verified DOCTOR who is the assigned doctor for the case
+
+    Use on endpoints that patients initiate but doctors can also action
+    when they have been assigned to the case (e.g. upload image, complaint
+    suggestions, assessment depth, red flag check).
+    """
+    if user.role == UserRole.PATIENT:
+        return user
+    if user.role == UserRole.DOCTOR:
+        if not user.is_verified:
+            raise DoctorPendingApprovalException()
+        from src.models.case import Case
+        result = await db.execute(select(Case).where(Case.id == case_id))
+        case = result.scalar_one_or_none()
+        if case is not None and case.doctor_id == user.id:
+            return user
+        raise ForbiddenException(message="You are not the assigned doctor for this case")
+    raise InsufficientRoleException(
+        message="This endpoint requires the 'patient' role or being the assigned doctor"
+    )
 
 
 def require_roles(allowed_roles: list[UserRole]):

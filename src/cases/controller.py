@@ -20,7 +20,7 @@ GET    /doctors/me/stats    → Doctor: dashboard numbers
 from fastapi import APIRouter, Body, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.auth.dependencies import get_current_user, require_doctor, require_patient
+from src.auth.dependencies import get_current_user, require_doctor, require_patient, require_patient_or_assigned_doctor
 from src.cases import service
 from src.cases.schemas import (
     AdjacentVisitsResponse,
@@ -147,10 +147,10 @@ async def get_doctor_stats(
 )
 async def get_complaint_suggestions(
     case_id: str,
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> ComplaintsResponse:
-    return await service.get_complaint_suggestions(db, patient, case_id)
+    return await service.get_complaint_suggestions(db, user, case_id)
 
 
 @router.get(
@@ -224,10 +224,10 @@ async def delete_case(
 async def set_assessment_depth(
     case_id: str,
     request: AssessmentDepthRequest,
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> AssessmentDepthResponse:
-    return await service.set_assessment_depth(db, patient, case_id, request)
+    return await service.set_assessment_depth(db, user, case_id, request)
 
 
 @router.get(
@@ -253,11 +253,11 @@ async def get_red_flags(
 async def trigger_red_flag_check(
     case_id: str,
     body: RedFlagsCheckRequest | None = Body(default=None),
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> RedFlagsResponse:
     selected = body.selected_symptoms if body else []
-    return await service.trigger_red_flag_check(db, patient, case_id, selected)
+    return await service.trigger_red_flag_check(db, user, case_id, selected)
 
 
 @router.patch(

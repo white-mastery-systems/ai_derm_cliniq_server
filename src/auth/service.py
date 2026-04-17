@@ -181,6 +181,8 @@ async def register_patient(
     profile = PatientProfile(
         user_id=user.id,
         patient_code=patient_code,
+        date_of_birth=request.date_of_birth,
+        gender=request.gender,
     )
     db.add(profile)
 

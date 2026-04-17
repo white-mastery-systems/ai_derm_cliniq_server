@@ -26,7 +26,7 @@ Doctors read images to review the case — they never upload or delete.
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.auth.dependencies import get_current_user, require_patient
+from src.auth.dependencies import get_current_user, require_patient, require_patient_or_assigned_doctor
 from src.database.core import get_async_session
 from src.images import service
 from src.images.schemas import ImageListResponse, ImageResponse
@@ -45,10 +45,10 @@ async def upload_image(
     case_id: str,
     file: UploadFile = File(...),
     image_type: str = Form(default="skin"),
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> ImageResponse:
-    return await service.upload_image(db, patient, case_id, file, image_type)
+    return await service.upload_image(db, user, case_id, file, image_type)
 
 
 @router.get(

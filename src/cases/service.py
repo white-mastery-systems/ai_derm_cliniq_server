@@ -53,7 +53,6 @@ from src.exceptions import (
     BadRequestException,
     CaseNotFoundException,
     ForbiddenException,
-    UserNotFoundException,
 )
 from src.images.schemas import ImageResponse
 from src.logger import get_logger
@@ -687,7 +686,7 @@ async def assign_doctor(
 
 async def set_assessment_depth(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
     request: AssessmentDepthRequest,
 ) -> AssessmentDepthResponse:
@@ -698,17 +697,14 @@ async def set_assessment_depth(
     and before the first question round starts (question_round = 0).
 
     Raises:
-        CaseNotFoundException  — case not found or patient does not own it
-        ForbiddenException     — caller is not a patient
+        CaseNotFoundException  — case not found or caller does not have access
         BadRequestException    — AI not yet complete, or questions already started
     """
-    if patient.role != UserRole.PATIENT:
-        raise ForbiddenException(message="Only the patient can set assessment depth")
-
     result = await db.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
-    if case is None or case.patient_id != patient.id:
+    if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(user, case)
 
     if case.ai_status != AiStatus.COMPLETED:
         raise BadRequestException(
@@ -788,7 +784,7 @@ async def get_red_flags(
 
 async def trigger_red_flag_check(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
     selected_symptoms: list[str] | None = None,
 ) -> RedFlagsResponse:
@@ -802,13 +798,11 @@ async def trigger_red_flag_check(
     Only valid after the conversation is complete (question_round >= max_question_rounds).
     Idempotent — re-triggering a CLEAR or FLAGGED case returns the existing result.
     """
-    if patient.role != UserRole.PATIENT:
-        raise ForbiddenException(message="Only the patient can trigger the red flag check")
-
     result = await db.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
-    if case is None or case.patient_id != patient.id:
+    if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(user, case)
 
     if case.ai_status != AiStatus.COMPLETED:
         raise BadRequestException(
@@ -851,7 +845,7 @@ async def trigger_red_flag_check(
 
 async def get_complaint_suggestions(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
 ) -> ComplaintsResponse:
     """
@@ -873,12 +867,13 @@ async def get_complaint_suggestions(
 
     result = await db.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
-    if case is None or case.patient_id != patient.id:
+    if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(user, case)
 
-    # Build age / sex from patient profile
+    # Build age / sex from the patient's profile (not the caller's — caller may be doctor)
     profile_result = await db.execute(
-        select(PatientProfile).where(PatientProfile.user_id == patient.id)
+        select(PatientProfile).where(PatientProfile.user_id == case.patient_id)
     )
     profile = profile_result.scalar_one_or_none()
 
@@ -1001,27 +996,83 @@ async def create_case_by_doctor(
     request: DoctorCaseCreateRequest,
 ) -> CaseResponse:
     """
-    Doctor creates a case on behalf of a patient.
+    Doctor creates a case on behalf of a patient identified by name + email.
 
-    The patient must exist and be active — looked up by patient_id from
-    the patient code lookup (GET /users/by-code/{code}).
+    FIND-OR-CREATE:
+    - Email found → use that patient; fill in missing DOB/gender if provided.
+    - Email not found → create new patient account (no password set).
+      The patient claims the account later via forgot-password OTP.
 
     Doctor is immediately assigned (doctor_id = doctor.id).
-    Consent is implied by the clinical encounter — consent_ai_analysis = True.
-
-    Raises:
-        UserNotFoundException — patient_id does not match an active patient
+    Consent is implied by the clinical encounter.
     """
-    from sqlalchemy.orm import selectinload as _sil
+    from src.auth.security import generate_patient_code
 
-    # Verify the patient exists and is active
-    result = await db.execute(
-        select(User)
-        .where(User.id == request.patient_id)
+    # ── 1. Find or create patient ─────────────────────────────────── #
+    patient_result = await db.execute(
+        select(User).where(User.email == request.patient_email)
     )
-    patient = result.scalar_one_or_none()
-    if patient is None or not patient.is_active or patient.role != UserRole.PATIENT:
-        raise UserNotFoundException(message=f"No active patient found with id: {request.patient_id}")
+    patient = patient_result.scalar_one_or_none()
+
+    if patient is not None:
+        # Existing account — must be an active patient
+        if not patient.is_active or patient.role != UserRole.PATIENT:
+            raise BadRequestException(
+                message=f"An account with email {request.patient_email!r} exists "
+                        "but is not an active patient account"
+            )
+        # Fill in missing profile fields if doctor provided them
+        if request.patient_date_of_birth or request.patient_gender:
+            profile_result = await db.execute(
+                select(PatientProfile).where(PatientProfile.user_id == patient.id)
+            )
+            profile = profile_result.scalar_one_or_none()
+            if profile:
+                if not profile.date_of_birth and request.patient_date_of_birth:
+                    profile.date_of_birth = request.patient_date_of_birth
+                if not profile.gender and request.patient_gender:
+                    profile.gender = request.patient_gender
+        logger.info("doctor_case_patient_found", patient_id=patient.id, doctor_id=doctor.id)
+
+    else:
+        # New patient — create account without a password
+        # Patient claims account later via forgot-password OTP
+        patient = User(
+            email=request.patient_email,
+            full_name=request.patient_name,
+            role=UserRole.PATIENT,
+            password_hash=None,
+            is_active=True,
+            is_verified=False,
+        )
+        db.add(patient)
+        await db.flush()  # assigns patient.id
+
+        # Generate unique patient_code
+        for _ in range(10):
+            code = generate_patient_code()
+            existing_code = await db.execute(
+                select(PatientProfile).where(PatientProfile.patient_code == code)
+            )
+            if existing_code.scalar_one_or_none() is None:
+                break
+        else:
+            raise RuntimeError("Failed to generate a unique patient code")
+
+        profile = PatientProfile(
+            user_id=patient.id,
+            patient_code=code,
+            date_of_birth=request.patient_date_of_birth,
+            gender=request.patient_gender,
+        )
+        db.add(profile)
+        await db.flush()
+        logger.info(
+            "doctor_case_patient_created",
+            patient_id=patient.id,
+            email=request.patient_email,
+            doctor_id=doctor.id,
+        )
 
     try:
         c_type = ConsultationType(request.consultation_type)
@@ -1030,16 +1081,29 @@ async def create_case_by_doctor(
             message=f"Invalid consultation_type: {request.consultation_type!r}"
         )
 
+    # Validate original_case_id belongs to the patient
+    if request.original_case_id:
+        orig_check = await db.execute(
+            select(Case.id, Case.patient_id).where(Case.id == request.original_case_id)
+        )
+        orig_row = orig_check.one_or_none()
+        if orig_row is None or orig_row.patient_id != patient.id:
+            raise BadRequestException(
+                message="original_case_id not found or does not belong to this patient"
+            )
+
     now = datetime.now(tz=timezone.utc)
     case = Case(
         id=new_uuid(),
-        patient_id=request.patient_id,
+        patient_id=patient.id,
         doctor_id=doctor.id,
         consultation_type=c_type,
         has_visible_lesion=request.has_visible_lesion,
         is_for_self=True,
         body_location=request.body_location,
         presenting_complaint=request.presenting_complaint,
+        original_case_id=request.original_case_id,
+        symptom_progression=request.symptom_progression,
         consent_ai_analysis=True,
         consent_ai_analysis_at=now,
         consent_research=request.consent_research,
@@ -1054,7 +1118,7 @@ async def create_case_by_doctor(
     logger.info(
         "case_created_by_doctor",
         case_id=case.id,
-        patient_id=request.patient_id,
+        patient_id=patient.id,
         doctor_id=doctor.id,
     )
     return _to_case_response(case, image_count=0)
