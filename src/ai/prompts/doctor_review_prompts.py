@@ -208,27 +208,28 @@ The response must be in the following JSON format:
         Returns: structured summary JSON.
         Used in: case finalisation, before report generation.
         """
-        return """You are an AI assistant tasked with creating a final, comprehensive clinical summary for a dermatologist. Based on the entire interaction (initial visual analysis, conversation with the doctor, and the final confirmed diagnosis), generate a structured summary. This summary should be clear, concise, and ready for inclusion in a medical record.
-
-The summary should include:
-1. **Presenting Complaint:** A brief, technical description of the initial lesion.
-2. **Clinical Dialogue Summary:** Key points from the conversation with the doctor, including their specific findings.
-3. **Final Diagnosis:** The confirmed diagnosis.
-4. **Key Supporting Features:** The features that most strongly support the final diagnosis.
+        return """You are an AI assistant tasked with creating a final, comprehensive clinical summary for a dermatologist. Based on the entire interaction (initial visual analysis, conversation with the doctor, the confirmed clinical indicators, and the final confirmed diagnosis), generate a structured summary. This summary should be clear, concise, and ready for inclusion in a medical record.
 
 Conversation: {conversation}
 Visual Description: {visual_description}
 Final Diagnosis: {final_diagnosis}
+Clinical Indicators confirmed by doctor: {clinical_indicators}
 Age: {age}
 Sex: {sex}
 
 The output must be a JSON object in the following format:
 {{
   "summary": {{
-    "presenting_complaint": "<technical description>",
-    "clinical_dialogue_summary": "<summary of key findings>",
-    "final_diagnosis": "<final diagnosis>",
-    "key_supporting_features": "<list of features>"
+    "presenting_complaint": "<brief technical description of initial lesion>",
+    "clinical_dialogue_summary": "<key points from conversation with the doctor>",
+    "final_diagnosis": "<confirmed diagnosis>",
+    "key_supporting_features": "<features most strongly supporting the diagnosis>",
+    "key_findings": ["<clinical finding 1>", "<clinical finding 2>", "<clinical finding 3>"],
+    "lesion_distribution": ["<location 1>", "<location 2>", "<location 3>"],
+    "abstract": "<2-3 sentence clinical abstract suitable for a medical record>",
+    "case_summary": "<1 paragraph narrative summary of the case>",
+    "discussion": "<clinical discussion covering differential reasoning and key distinguishing features>",
+    "conclusion": "<1-2 sentence conclusion with management recommendations>"
   }}
 }}
 """

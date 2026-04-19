@@ -41,12 +41,17 @@ from src.cases.schemas import (
     CaseSearchItem,
     CaseSummaryResponse,
     CaseUpdateRequest,
+    ClinicalFeaturesRequest,
+    ClinicalFeaturesResponse,
     ComplaintsResponse,
     DoctorCaseCreateRequest,
     DoctorStatsResponse,
     PaginatedCasesResponse,
     PaginatedSearchResponse,
     RedFlagsResponse,
+    VisualFindingsGenerateResponse,
+    VisualFindingsPatchRequest,
+    VisualFindingsResponse,
 )
 from src.exceptions import (
     AIServiceException,
@@ -602,8 +607,9 @@ async def update_case(
     _assert_access(user, case)
 
     if request.presenting_complaint is not None:
-        if user.role != UserRole.PATIENT:
-            raise ForbiddenException(message="Only the patient can update the complaint")
+        is_assigned_doctor = (user.role == UserRole.DOCTOR and case.doctor_id == user.id)
+        if user.role != UserRole.PATIENT and not is_assigned_doctor:
+            raise ForbiddenException(message="Only the patient or assigned doctor can update the complaint")
         if isinstance(request.presenting_complaint, list):
             case.presenting_complaint = ". ".join(
                 c.strip() for c in request.presenting_complaint if c.strip()
@@ -1008,6 +1014,13 @@ async def create_case_by_doctor(
     """
     from src.auth.security import generate_patient_code
 
+    # Resolve effective DOB: explicit date wins; otherwise approximate from age
+    effective_dob = request.patient_date_of_birth
+    if effective_dob is None and request.patient_age is not None:
+        from datetime import timedelta
+        effective_dob = (datetime.now(tz=timezone.utc).date()
+                         - timedelta(days=request.patient_age * 365))
+
     # ── 1. Find or create patient ─────────────────────────────────── #
     patient_result = await db.execute(
         select(User).where(User.email == request.patient_email)
@@ -1028,8 +1041,8 @@ async def create_case_by_doctor(
             )
             profile = profile_result.scalar_one_or_none()
             if profile:
-                if not profile.date_of_birth and request.patient_date_of_birth:
-                    profile.date_of_birth = request.patient_date_of_birth
+                if not profile.date_of_birth and effective_dob:
+                    profile.date_of_birth = effective_dob
                 if not profile.gender and request.patient_gender:
                     profile.gender = request.patient_gender
         logger.info("doctor_case_patient_found", patient_id=patient.id, doctor_id=doctor.id)
@@ -1062,7 +1075,7 @@ async def create_case_by_doctor(
         profile = PatientProfile(
             user_id=patient.id,
             patient_code=code,
-            date_of_birth=request.patient_date_of_birth,
+            date_of_birth=effective_dob,
             gender=request.patient_gender,
         )
         db.add(profile)
@@ -1204,4 +1217,250 @@ async def search_cases(
         page=page,
         page_size=page_size,
         has_next=(offset + page_size) < total,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Doctor Diagnose Flow — Visual Findings
+# ------------------------------------------------------------------ #
+
+async def generate_visual_findings(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+) -> VisualFindingsGenerateResponse:
+    """
+    Enqueue the Celery task that runs 3-image AI analysis (clinical →
+    dermoscopy → pathology) and stores the result in Case.visual_findings.
+
+    Rules:
+    - Doctor must be assigned to this case.
+    - At least one image of type clinical, dermoscopy, or pathology must exist.
+    - Idempotent: if visual_findings already populated, returns immediately.
+    """
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(doctor, case)
+
+    if case.visual_findings:
+        return VisualFindingsGenerateResponse(
+            case_id=case_id,
+            task_id=case.celery_task_id or "",
+            message="Visual findings already generated. Use GET /visual-findings to read them.",
+        )
+
+    # Require at least one doctor-flow image type to be uploaded
+    from src.models.case_image import ImageType
+    image_check = await db.execute(
+        select(func.count()).where(
+            CaseImage.case_id == case_id,
+            CaseImage.image_type.in_([
+                ImageType.CLINICAL, ImageType.DERMOSCOPY, ImageType.PATHOLOGY
+            ]),
+        )
+    )
+    if image_check.scalar_one() == 0:
+        raise BadRequestException(
+            message="Upload at least one clinical, dermoscopy, or pathology image "
+                    "before generating visual findings."
+        )
+
+    try:
+        from src.workers.tasks.doctor_analysis import generate_visual_findings_task
+        task = generate_visual_findings_task.delay(case_id)
+        case.celery_task_id = task.id
+        case.ai_status = AiStatus.PROCESSING
+        await db.flush()
+        logger.info("visual_findings_enqueued", case_id=case_id, task_id=task.id)
+    except Exception as exc:
+        raise BadRequestException(
+            message="Could not enqueue visual findings task. Is Redis running?"
+        ) from exc
+
+    return VisualFindingsGenerateResponse(
+        case_id=case_id,
+        task_id=task.id,
+        message="Visual findings generation started. Poll GET /ai/status for progress.",
+    )
+
+
+async def get_visual_findings(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+) -> VisualFindingsResponse:
+    """Return the stored visual findings JSON for a case."""
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(doctor, case)
+
+    findings: dict = {}
+    if case.visual_findings:
+        import json as _json
+        try:
+            findings = _json.loads(case.visual_findings)
+        except (ValueError, TypeError):
+            findings = {}
+
+    return VisualFindingsResponse(
+        case_id=case_id,
+        ai_status=case.ai_status.value,
+        clinical=findings.get("clinical", {}),
+        dermoscopy=findings.get("dermoscopy", {}),
+        pathology=findings.get("pathology", {}),
+    )
+
+
+async def patch_visual_findings(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+    request: VisualFindingsPatchRequest,
+) -> VisualFindingsResponse:
+    """
+    Doctor edits the overall description text for clinical or dermoscopy findings.
+    AI reconcile prompt updates the structured fields to stay consistent.
+    """
+    import asyncio as _asyncio
+    import json as _json
+
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(doctor, case)
+
+    if not case.visual_findings:
+        raise BadRequestException(
+            message="Visual findings have not been generated yet for this case."
+        )
+
+    findings: dict = {}
+    try:
+        findings = _json.loads(case.visual_findings)
+    except (ValueError, TypeError):
+        findings = {}
+
+    # Fetch personal particulars for reconcile context
+    profile_result = await db.execute(
+        select(PatientProfile).where(PatientProfile.user_id == case.patient_id)
+    )
+    profile = profile_result.scalar_one_or_none()
+    parts = []
+    if profile:
+        if profile.date_of_birth:
+            from datetime import date as _date
+            age = (_date.today() - profile.date_of_birth).days // 365
+            parts.append(f"Age: {age}")
+        if profile.gender:
+            parts.append(f"Sex: {profile.gender}")
+    personal_particulars = ", ".join(parts) if parts else "Age: unknown, Sex: unknown"
+
+    from src.ai.gemini_client import call_gemini, extract_json
+    from src.ai.prompts.doctor_image_prompts import DoctorImageAnalysisPrompts
+
+    # ── Reconcile clinical section ──────────────────────────────── #
+    if request.clinical_overall_description is not None:
+        clinical_data = findings.get("clinical", {})
+        clinical_data["overall_description"] = request.clinical_overall_description
+        prompt = DoctorImageAnalysisPrompts.reconcile_clinical().format(
+            overall_description=request.clinical_overall_description,
+            structured_data_json=_json.dumps(clinical_data),
+            personal_particulars=personal_particulars,
+        )
+        try:
+            raw = await _asyncio.to_thread(call_gemini, prompt)
+            reconciled = await _asyncio.to_thread(extract_json, raw)
+            reconciled["overall_description"] = request.clinical_overall_description
+            findings["clinical"] = reconciled
+        except Exception as exc:
+            logger.warning("reconcile_clinical_failed", case_id=case_id, error=str(exc))
+            findings["clinical"] = clinical_data
+
+    # ── Reconcile dermoscopy section ────────────────────────────── #
+    if request.dermoscopy_overall_description is not None:
+        dermoscopy_data = findings.get("dermoscopy", {})
+        dermoscopy_data["overall_dermoscopic_summary"] = request.dermoscopy_overall_description
+        prompt = DoctorImageAnalysisPrompts.reconcile_dermoscopic().format(
+            overall_description=request.dermoscopy_overall_description,
+            structured_data_json=_json.dumps(dermoscopy_data),
+            personal_particulars=personal_particulars,
+        )
+        try:
+            raw = await _asyncio.to_thread(call_gemini, prompt)
+            reconciled = await _asyncio.to_thread(extract_json, raw)
+            reconciled["overall_dermoscopic_summary"] = request.dermoscopy_overall_description
+            findings["dermoscopy"] = reconciled
+        except Exception as exc:
+            logger.warning("reconcile_dermoscopy_failed", case_id=case_id, error=str(exc))
+            findings["dermoscopy"] = dermoscopy_data
+
+    case.visual_findings = _json.dumps(findings)
+    await db.flush()
+    logger.info("visual_findings_patched", case_id=case_id)
+
+    return VisualFindingsResponse(
+        case_id=case_id,
+        ai_status=case.ai_status.value,
+        clinical=findings.get("clinical", {}),
+        dermoscopy=findings.get("dermoscopy", {}),
+        pathology=findings.get("pathology", {}),
+    )
+
+
+async def save_clinical_features(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+    request: ClinicalFeaturesRequest,
+) -> ClinicalFeaturesResponse:
+    """
+    Save the doctor's confirmed clinical feature checklist.
+    Stored in DoctorReview.clinical_indicators (creates the review row if needed).
+    additional_observations stored in DoctorReview.review_notes.
+    """
+    import json as _json
+    from src.models.doctor_review import DoctorReview
+
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+    _assert_access(doctor, case)
+
+    review_result = await db.execute(
+        select(DoctorReview).where(DoctorReview.case_id == case_id)
+    )
+    review = review_result.scalar_one_or_none()
+
+    features_json = _json.dumps(request.features)
+
+    if review is None:
+        from src.models.base import new_uuid
+        review = DoctorReview(
+            id=new_uuid(),
+            case_id=case_id,
+            doctor_id=doctor.id,
+            clinical_indicators=features_json,
+            review_notes=request.additional_observations,
+            review_status="in_progress",
+        )
+        db.add(review)
+    else:
+        review.clinical_indicators = features_json
+        if request.additional_observations is not None:
+            review.review_notes = request.additional_observations
+
+    await db.flush()
+    logger.info("clinical_features_saved", case_id=case_id, count=len(request.features))
+
+    return ClinicalFeaturesResponse(
+        case_id=case_id,
+        features=request.features,
+        additional_observations=request.additional_observations,
+        message=f"Saved {len(request.features)} clinical features.",
     )

@@ -311,15 +311,16 @@ def _render_html(context: dict) -> str:
 
 def _html_to_pdf(html: str) -> bytes:
     """
-    Convert HTML string to PDF bytes using WeasyPrint.
-
-    WeasyPrint requires system libraries (libpango, Cairo, libffi).
-    The import is deferred inside this function so the module can be
-    imported even if WeasyPrint's system dependencies are missing —
-    tests mock this function entirely.
+    Convert HTML string to PDF bytes using xhtml2pdf (pure Python, Windows-compatible).
+    WeasyPrint requires GTK/Cairo system libraries unavailable on Windows.
     """
-    from weasyprint import HTML  # deferred import — system deps
-    return HTML(string=html).write_pdf()
+    import io
+    from xhtml2pdf import pisa
+    buffer = io.BytesIO()
+    result = pisa.CreatePDF(html, dest=buffer)
+    if result.err:
+        raise RuntimeError(f"xhtml2pdf conversion failed with {result.err} errors")
+    return buffer.getvalue()
 
 
 # ------------------------------------------------------------------ #
@@ -393,10 +394,24 @@ def generate_report_task(self, case_id: str) -> None:
         summary_data = {}
         if review and review.confirmed_diagnosis:
             try:
+                _cd = review.confirmed_diagnosis
+                try:
+                    _cd_list = json.loads(_cd)
+                    final_diagnosis_str = ", ".join(_cd_list) if _cd_list else _cd
+                except (ValueError, TypeError):
+                    final_diagnosis_str = _cd
+                _ci = "None recorded"
+                if review.clinical_indicators:
+                    try:
+                        _ci_list = json.loads(review.clinical_indicators)
+                        _ci = ", ".join(_ci_list) if _ci_list else "None recorded"
+                    except (ValueError, TypeError):
+                        _ci = review.clinical_indicators
                 prompt = DoctorReviewPrompts.generate_final_summary().format(
                     conversation=history or "No Q&A recorded.",
                     visual_description=visual.overall_description if visual else "Not available.",
-                    final_diagnosis=review.confirmed_diagnosis,
+                    final_diagnosis=final_diagnosis_str,
+                    clinical_indicators=_ci,
                     age=age,
                     sex=sex,
                 )
@@ -428,7 +443,7 @@ def generate_report_task(self, case_id: str) -> None:
             "sex": sex,
             "consultation_type": case.consultation_type.value.replace("_", " ").title(),
             "presenting_complaint": case.presenting_complaint,
-            "confirmed_diagnosis": review.confirmed_diagnosis if review else None,
+            "confirmed_diagnosis": final_diagnosis_str if (review and review.confirmed_diagnosis) else None,
             "review_notes": review.review_notes if review else None,
             "overall_description": visual.overall_description if visual else None,
             "final_diff": _parse_differential(final_dd.diagnosis_json if final_dd else None),

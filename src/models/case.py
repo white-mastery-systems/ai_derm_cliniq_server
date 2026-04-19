@@ -295,6 +295,18 @@ class Case(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Doctor Diagnose Flow — visual findings from 3-image AI analysis
+    # ------------------------------------------------------------------ #
+    visual_findings: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment=(
+            "JSON: {clinical:{...}, dermoscopy:{...}, pathology:{...}} — "
+            "populated by generate_visual_findings_task after doctor uploads images"
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
     # Red Flag Check — runs after Q&A, before case summary
     # ------------------------------------------------------------------ #
     red_flag_status: Mapped[RedFlagStatus] = mapped_column(

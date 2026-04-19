@@ -93,9 +93,9 @@ class DoctorReview(TimestampMixin, Base):
     # Review Content
     # ------------------------------------------------------------------ #
     confirmed_diagnosis: Mapped[str | None] = mapped_column(
-        String(500),
+        Text,
         nullable=True,
-        comment="Doctor's confirmed final diagnosis (may differ from AI's)",
+        comment="JSON array of confirmed diagnosis names — mirrors selected_differentials",
     )
     review_notes: Mapped[str | None] = mapped_column(
         Text,

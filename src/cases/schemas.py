@@ -297,9 +297,16 @@ class DoctorCaseCreateRequest(BaseModel):
     patient_email: EmailStr = Field(
         description="Patient's email — used to find or create their account",
     )
+    patient_age: int | None = Field(
+        default=None,
+        ge=0,
+        le=120,
+        description="Patient's age in years — used when date_of_birth is not available",
+    )
     patient_date_of_birth: date | None = Field(
         default=None,
-        description="Patient's date of birth — stored in profile if missing",
+        description="Patient's date of birth — stored in profile if missing. "
+                    "Takes precedence over patient_age.",
     )
     patient_gender: str | None = Field(
         default=None,
@@ -396,5 +403,83 @@ class DoctorStatsResponse(BaseModel):
     in_progress: int
     completed_today: int
     total_assigned: int
+
+
+# ================================================================== #
+# Doctor Diagnose Flow — Visual Findings
+# ================================================================== #
+
+class VisualFindingsGenerateResponse(BaseModel):
+    """
+    POST /api/v1/cases/{case_id}/visual-findings/generate
+
+    Returned immediately (202) when the visual findings Celery task is enqueued.
+    Flutter polls GET /cases/{case_id}/ai/status until ai_status == 'completed'.
+    """
+    case_id: str
+    task_id: str
+    message: str
+
+
+class VisualFindingsResponse(BaseModel):
+    """
+    GET /api/v1/cases/{case_id}/visual-findings
+
+    Returns the three-part visual analysis stored in Case.visual_findings.
+    Each section is a dict of structured AI findings (or empty dict if that
+    image type was not uploaded).
+    """
+    case_id: str
+    ai_status: str
+    clinical: dict = Field(default_factory=dict)
+    dermoscopy: dict = Field(default_factory=dict)
+    pathology: dict = Field(default_factory=dict)
+
+
+class VisualFindingsPatchRequest(BaseModel):
+    """
+    PATCH /api/v1/cases/{case_id}/visual-findings
+
+    Doctor edits the overall_description (clinical) or
+    overall_dermoscopic_summary (dermoscopy) text.
+    The AI reconcile prompt updates the structured fields to match.
+    Only send the section(s) being edited.
+    """
+    clinical_overall_description: str | None = Field(
+        default=None,
+        description="Doctor's corrected clinical overall_description — "
+                    "triggers AI reconciliation of clinical structured fields",
+    )
+    dermoscopy_overall_description: str | None = Field(
+        default=None,
+        description="Doctor's corrected overall_dermoscopic_summary — "
+                    "triggers AI reconciliation of dermoscopy structured fields",
+    )
+
+
+class ClinicalFeaturesRequest(BaseModel):
+    """
+    POST /api/v1/cases/{case_id}/clinical-features
+
+    Doctor submits the confirmed clinical feature checklist after reviewing
+    the AI visual findings. Stored in DoctorReview.clinical_indicators.
+    """
+    features: list[str] = Field(
+        min_length=1,
+        description="List of clinical feature strings the doctor confirmed (from the checklist)",
+    )
+    additional_observations: str | None = Field(
+        default=None,
+        max_length=5000,
+        description="Doctor's free-text additional observations",
+    )
+
+
+class ClinicalFeaturesResponse(BaseModel):
+    """Response after saving clinical features."""
+    case_id: str
+    features: list[str]
+    additional_observations: str | None = None
+    message: str
 
 

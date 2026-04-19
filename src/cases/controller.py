@@ -29,6 +29,8 @@ from src.cases.schemas import (
     CaseCreateRequest,
     CaseResponse,
     CaseUpdateRequest,
+    ClinicalFeaturesRequest,
+    ClinicalFeaturesResponse,
     ComplaintsResponse,
     DoctorCaseCreateRequest,
     DoctorStatsResponse,
@@ -36,6 +38,9 @@ from src.cases.schemas import (
     PaginatedSearchResponse,
     RedFlagsCheckRequest,
     RedFlagsResponse,
+    VisualFindingsGenerateResponse,
+    VisualFindingsPatchRequest,
+    VisualFindingsResponse,
 )
 from src.database.core import get_async_session
 from src.models.user import User
@@ -272,3 +277,89 @@ async def assign_doctor(
     db: AsyncSession = Depends(get_async_session),
 ) -> CaseResponse:
     return await service.assign_doctor(db, doctor, case_id)
+
+
+# ------------------------------------------------------------------ #
+# Doctor Diagnose Flow — Visual Findings
+# ------------------------------------------------------------------ #
+
+@router.post(
+    "/{case_id}/visual-findings/generate",
+    response_model=VisualFindingsGenerateResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Trigger AI visual findings generation (doctor diagnose flow)",
+    description=(
+        "Enqueues a Celery task that runs 3-step image analysis: "
+        "clinical → dermoscopy → pathology. "
+        "At least one clinical, dermoscopy, or pathology image must be uploaded first. "
+        "Poll GET /ai/status until ai_status == 'completed', then call "
+        "GET /visual-findings to read the results."
+    ),
+)
+async def generate_visual_findings(
+    case_id: str,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> VisualFindingsGenerateResponse:
+    return await service.generate_visual_findings(db, doctor, case_id)
+
+
+@router.get(
+    "/{case_id}/visual-findings",
+    response_model=VisualFindingsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get AI visual findings (doctor diagnose flow)",
+    description=(
+        "Returns the three-part structured visual analysis stored after "
+        "POST /visual-findings/generate completes. "
+        "Each section (clinical, dermoscopy, pathology) is a dict of AI findings, "
+        "or an empty dict if that image type was not uploaded."
+    ),
+)
+async def get_visual_findings(
+    case_id: str,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> VisualFindingsResponse:
+    return await service.get_visual_findings(db, doctor, case_id)
+
+
+@router.patch(
+    "/{case_id}/visual-findings",
+    response_model=VisualFindingsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Doctor edits visual findings — AI reconciles structured fields",
+    description=(
+        "When the doctor edits the overall_description (clinical) or "
+        "overall_dermoscopic_summary (dermoscopy) text, the AI reconcile prompt "
+        "re-derives the structured fields to stay consistent. "
+        "Only send the section(s) being edited."
+    ),
+)
+async def patch_visual_findings(
+    case_id: str,
+    request: VisualFindingsPatchRequest,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> VisualFindingsResponse:
+    return await service.patch_visual_findings(db, doctor, case_id, request)
+
+
+@router.post(
+    "/{case_id}/clinical-features",
+    response_model=ClinicalFeaturesResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Save doctor's confirmed clinical feature checklist",
+    description=(
+        "Doctor submits the confirmed clinical findings from the checklist screen. "
+        "Stored in DoctorReview.clinical_indicators. "
+        "Creates the DoctorReview row if it does not yet exist."
+    ),
+)
+async def save_clinical_features(
+    case_id: str,
+    request: ClinicalFeaturesRequest,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> ClinicalFeaturesResponse:
+    return await service.save_clinical_features(db, doctor, case_id, request)

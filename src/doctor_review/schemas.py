@@ -59,7 +59,7 @@ class CreateReviewRequest(BaseModel):
         pattern="^(low|high)$",
         description="Doctor's confidence in confirmed diagnosis: low | high",
     )
-    confirmed_diagnosis: str | None = None
+    confirmed_diagnosis: list[str] | None = None
     review_notes: str | None = None
     treatment_plan_json: str | None = None
     qa_history: list[dict] | None = Field(
@@ -87,7 +87,7 @@ class UpdateReviewRequest(BaseModel):
         default=None,
         pattern="^(low|high)$",
     )
-    confirmed_diagnosis: str | None = None
+    confirmed_diagnosis: list[str] | None = None
     review_notes: str | None = None
     treatment_plan_json: str | None = None
     qa_history: list[dict] | None = None
@@ -104,7 +104,7 @@ class DoctorReviewResponse(BaseModel):
     is_ai_correct: bool | None
     selected_differentials: list[str] = []
     confidence_level: str | None
-    confirmed_diagnosis: str | None
+    confirmed_diagnosis: list[str] = []
     review_notes: str | None
     treatment_plan_json: str | None
     qa_history: list[dict] = []

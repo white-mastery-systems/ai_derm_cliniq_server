@@ -69,6 +69,7 @@ celery_app = Celery(
         "src.workers.tasks.questions",
         "src.workers.tasks.reports",
         "src.workers.tasks.email",
+        "src.workers.tasks.doctor_analysis",
     ],
 )
 

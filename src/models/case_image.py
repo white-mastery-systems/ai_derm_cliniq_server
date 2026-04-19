@@ -39,6 +39,9 @@ class ImageType(str, enum.Enum):
     SKIN = "skin"
     PRESCRIPTION = "prescription"
     DERMOSCOPY = "dermoscopy"
+    # Doctor diagnose flow image types
+    CLINICAL = "clinical"
+    PATHOLOGY = "pathology"
 
 
 class CaseImage(TimestampMixin, Base):

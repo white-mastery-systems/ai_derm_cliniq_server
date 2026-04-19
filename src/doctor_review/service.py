@@ -73,6 +73,14 @@ def _to_response(review: DoctorReview) -> DoctorReviewResponse:
         except (ValueError, TypeError):
             selected = []
 
+    confirmed: list[str] = []
+    if review.confirmed_diagnosis:
+        try:
+            confirmed = json.loads(review.confirmed_diagnosis)
+        except (ValueError, TypeError):
+            # backwards-compat: old rows stored a plain string
+            confirmed = [review.confirmed_diagnosis]
+
     qa: list[dict] = []
     if review.qa_history:
         try:
@@ -94,7 +102,7 @@ def _to_response(review: DoctorReview) -> DoctorReviewResponse:
         is_ai_correct=review.is_ai_correct,
         selected_differentials=selected,
         confidence_level=review.confidence_level,
-        confirmed_diagnosis=review.confirmed_diagnosis,
+        confirmed_diagnosis=confirmed,
         review_notes=review.review_notes,
         treatment_plan_json=review.treatment_plan_json,
         qa_history=qa,
@@ -166,7 +174,12 @@ async def create_review(
             if request.selected_differentials is not None else None
         ),
         confidence_level=request.confidence_level,
-        confirmed_diagnosis=request.confirmed_diagnosis,
+        confirmed_diagnosis=(
+            json.dumps(request.confirmed_diagnosis)
+            if request.confirmed_diagnosis is not None
+            else json.dumps(request.selected_differentials)
+            if request.selected_differentials else None
+        ),
         review_notes=request.review_notes,
         treatment_plan_json=request.treatment_plan_json,
         qa_history=(
@@ -227,10 +240,13 @@ async def update_review(
         review.is_ai_correct = request.is_ai_correct
     if request.selected_differentials is not None:
         review.selected_differentials = json.dumps(request.selected_differentials)
+        # Auto-sync confirmed_diagnosis unless explicitly overridden in this request
+        if request.confirmed_diagnosis is None:
+            review.confirmed_diagnosis = json.dumps(request.selected_differentials)
     if request.confidence_level is not None:
         review.confidence_level = request.confidence_level
     if request.confirmed_diagnosis is not None:
-        review.confirmed_diagnosis = request.confirmed_diagnosis
+        review.confirmed_diagnosis = json.dumps(request.confirmed_diagnosis)
     if request.review_notes is not None:
         review.review_notes = request.review_notes
     if request.treatment_plan_json is not None:

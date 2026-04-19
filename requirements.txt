@@ -38,7 +38,7 @@ google-generativeai==0.8.3       # Gemini SDK
 openai==1.59.3                   # OpenAI SDK
 
 # --- PDF Generation ---
-weasyprint==63.1                 # HTML → PDF renderer
+xhtml2pdf==0.2.17                # HTML → PDF renderer (pure Python, Windows-compatible)
 
 # --- QR Codes ---
 qrcode[pil]==8.0                 # QR code image generator

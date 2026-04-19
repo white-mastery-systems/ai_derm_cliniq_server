@@ -453,12 +453,27 @@ async def generate_summary(
     # Use doctor's confirmed diagnosis if available
     final_diagnosis = case.case_title or "Not yet confirmed"
     if case.doctor_review and case.doctor_review.confirmed_diagnosis:
-        final_diagnosis = case.doctor_review.confirmed_diagnosis
+        try:
+            import json as _json
+            diagnoses = _json.loads(case.doctor_review.confirmed_diagnosis)
+            final_diagnosis = ", ".join(diagnoses) if diagnoses else final_diagnosis
+        except (ValueError, TypeError):
+            final_diagnosis = case.doctor_review.confirmed_diagnosis
+
+    clinical_indicators = "None recorded"
+    if case.doctor_review and case.doctor_review.clinical_indicators:
+        try:
+            import json as _json
+            indicators = _json.loads(case.doctor_review.clinical_indicators)
+            clinical_indicators = ", ".join(indicators) if indicators else "None recorded"
+        except (ValueError, TypeError):
+            clinical_indicators = case.doctor_review.clinical_indicators
 
     prompt = DoctorReviewPrompts.generate_final_summary().format(
         conversation=ctx["conversation_history"],
         visual_description=ctx["visual_description"],
         final_diagnosis=final_diagnosis,
+        clinical_indicators=clinical_indicators,
         age=ctx["age"],
         sex=ctx["sex"],
     )
@@ -487,7 +502,12 @@ async def generate_treatment_plan(
 
     final_diagnosis = case.case_title or "Not yet confirmed"
     if case.doctor_review and case.doctor_review.confirmed_diagnosis:
-        final_diagnosis = case.doctor_review.confirmed_diagnosis
+        try:
+            import json as _json
+            diagnoses = _json.loads(case.doctor_review.confirmed_diagnosis)
+            final_diagnosis = ", ".join(diagnoses) if diagnoses else final_diagnosis
+        except (ValueError, TypeError):
+            final_diagnosis = case.doctor_review.confirmed_diagnosis
 
     prompt = DoctorReviewPrompts.generate_treatment_plan().format(
         conversation=ctx["conversation_history"],

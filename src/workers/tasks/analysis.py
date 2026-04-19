@@ -162,7 +162,13 @@ async def _get_follow_up_context(session: AsyncSession, case: Case) -> str:
     dr = dr_result.scalar_one_or_none()
     if dr:
         if dr.confirmed_diagnosis:
-            parts.append(f"- Doctor's confirmed diagnosis: {dr.confirmed_diagnosis}")
+            try:
+                import json as _json
+                _cd_list = _json.loads(dr.confirmed_diagnosis)
+                _cd_str = ", ".join(_cd_list) if _cd_list else dr.confirmed_diagnosis
+            except (ValueError, TypeError):
+                _cd_str = dr.confirmed_diagnosis
+            parts.append(f"- Doctor's confirmed diagnosis: {_cd_str}")
         if dr.treatment_plan_json:
             import json as _json
             try:
