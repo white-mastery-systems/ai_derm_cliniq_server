@@ -94,7 +94,18 @@ async def test_engine():
 
     # Create all tables defined in our models
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        # SQLite doesn't support sequences — strip sequence-based server_defaults
+        # before create_all so tests work without PostgreSQL.
+        from src.models.case import Case as _CaseModel
+        _col = _CaseModel.__table__.c["case_number"]
+        _saved_sd, _saved_d = _col.server_default, _col.default
+        _col.server_default = None
+        _col.default = None
+        try:
+            await conn.run_sync(Base.metadata.create_all)
+        finally:
+            _col.server_default = _saved_sd
+            _col.default = _saved_d
 
     yield engine
 

@@ -153,6 +153,10 @@ class CaseSummaryResponse(BaseModel):
     image_count: int = 0
     patient_name: str | None = None        # Populated for doctor/admin list views
     patient_avatar_url: str | None = None  # Populated for doctor/admin list views
+    doctor_name: str | None = None
+    doctor_specialization: str | None = None
+    doctor_clinic_name: str | None = None
+    doctor_avatar_url: str | None = None
     created_at: datetime
     updated_at: datetime
 

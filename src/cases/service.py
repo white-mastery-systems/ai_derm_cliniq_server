@@ -30,6 +30,7 @@ Uses simple offset pagination: page=1 returns rows 0..page_size-1.
 from datetime import date, datetime, timezone
 
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.cases.schemas import (
@@ -172,6 +173,10 @@ def _to_summary_response(
     image_count: int = 0,
     patient_name: str | None = None,
     patient_avatar_url: str | None = None,
+    doctor_name: str | None = None,
+    doctor_specialization: str | None = None,
+    doctor_clinic_name: str | None = None,
+    doctor_avatar_url: str | None = None,
 ) -> CaseSummaryResponse:
     return CaseSummaryResponse(
         id=case.id,
@@ -193,6 +198,10 @@ def _to_summary_response(
         image_count=image_count,
         patient_name=patient_name,
         patient_avatar_url=patient_avatar_url,
+        doctor_name=doctor_name,
+        doctor_specialization=doctor_specialization,
+        doctor_clinic_name=doctor_clinic_name,
+        doctor_avatar_url=doctor_avatar_url,
         created_at=case.created_at,
         updated_at=case.updated_at,
     )
@@ -390,10 +399,21 @@ async def list_cases(
     )
     total = count_result.scalar_one()
 
+    DoctorUser = aliased(User)
     rows_result = await db.execute(
-        select(Case, User.full_name.label("patient_name"), PatientProfile.avatar_url.label("patient_avatar_url"))
+        select(
+            Case,
+            User.full_name.label("patient_name"),
+            PatientProfile.avatar_url.label("patient_avatar_url"),
+            DoctorUser.full_name.label("doctor_name"),
+            DoctorProfile.specialization.label("doctor_specialization"),
+            DoctorProfile.clinic_name.label("doctor_clinic_name"),
+            DoctorProfile.avatar_url.label("doctor_avatar_url"),
+        )
         .join(User, User.id == Case.patient_id)
         .outerjoin(PatientProfile, PatientProfile.user_id == Case.patient_id)
+        .outerjoin(DoctorUser, DoctorUser.id == Case.doctor_id)
+        .outerjoin(DoctorProfile, DoctorProfile.user_id == Case.doctor_id)
         .where(where_clause)
         .order_by(Case.created_at.desc())
         .offset(offset)
@@ -409,6 +429,10 @@ async def list_cases(
             counts.get(row.Case.id, 0),
             patient_name=row.patient_name,
             patient_avatar_url=row.patient_avatar_url,
+            doctor_name=row.doctor_name,
+            doctor_specialization=row.doctor_specialization,
+            doctor_clinic_name=row.doctor_clinic_name,
+            doctor_avatar_url=row.doctor_avatar_url,
         )
         for row in rows
     ]

@@ -117,7 +117,8 @@ async def _build_case_context(db: AsyncSession, case: Case) -> dict:
         visual_description, differential_diagnosis,
         conversation_history, age, sex
     """
-    # Visual description (latest round)
+    # Visual description — patient flow uses VisualDescription table;
+    # doctor flow stores findings in case.visual_findings JSON column.
     vd_result = await db.execute(
         select(VisualDescription)
         .where(VisualDescription.case_id == case.id)
@@ -125,7 +126,12 @@ async def _build_case_context(db: AsyncSession, case: Case) -> dict:
         .limit(1)
     )
     vd = vd_result.scalar_one_or_none()
-    visual_description = vd.description_json if vd else "{}"
+    if vd:
+        visual_description = vd.description_json
+    elif case.visual_findings:
+        visual_description = case.visual_findings
+    else:
+        visual_description = "{}"
 
     # Differential (final)
     dd_result = await db.execute(
@@ -290,31 +296,31 @@ async def get_first_question(
     case_id: str,
 ) -> AiQuestionResponse:
     """
-    Run generate_doctor_doubts() → generate_doctor_questions() to produce
-    the first clarifying question for the doctor.
+    Single Gemini call to produce the first clarifying question for the doctor.
+    Replaces the previous 2-call chain (doubts → questions) to avoid Flutter timeout.
     """
     case = await _load_case_for_doctor_ai(db, doctor, case_id)
     ctx = await _build_case_context(db, case)
 
-    # Step 1: check if there's a doubt
-    doubts_prompt = DoctorReviewPrompts.generate_doctor_doubts().format(
-        conversation=ctx["conversation_history"],
+    prompt = DoctorReviewPrompts.generate_doctor_question_direct().format(
         visual_description=ctx["visual_description"],
         diagnoses=ctx["differential_diagnosis"],
+        conversation=ctx["conversation_history"],
+        qa_history="None yet.",
         age=ctx["age"],
         sex=ctx["sex"],
         questions_left=5,
     )
 
-    doubts_raw = await asyncio.to_thread(call_gemini, doubts_prompt)
-    doubts_raw = _parse_json_safe(doubts_raw)
+    raw = await asyncio.to_thread(call_gemini, prompt)
+    raw = _parse_json_safe(raw)
 
     try:
-        doubts_data = json.loads(doubts_raw)
+        data = json.loads(raw)
     except (ValueError, TypeError):
-        raise AIServiceException(message="AI returned unexpected format for doubts.")
+        raise AIServiceException(message="AI returned unexpected format for question.")
 
-    if doubts_data.get("doubt_present") == "no":
+    if not data.get("has_question", False):
         return AiQuestionResponse(
             case_id=case_id,
             question="No further clarification needed.",
@@ -323,31 +329,12 @@ async def get_first_question(
             has_more=False,
         )
 
-    # Step 2: convert doubt → question
-    doubts_str = json.dumps(doubts_data.get("doubt", []))
-    question_prompt = DoctorReviewPrompts.generate_doctor_questions().format(
-        conversation_history=ctx["conversation_history"],
-        visual_description=ctx["visual_description"],
-        diagnoses=ctx["differential_diagnosis"],
-        doubts=doubts_str,
-        age=ctx["age"],
-        sex=ctx["sex"],
-    )
-
-    question_raw = await asyncio.to_thread(call_gemini, question_prompt)
-    question_raw = _parse_json_safe(question_raw)
-
-    try:
-        q_data = json.loads(question_raw)
-    except (ValueError, TypeError):
-        raise AIServiceException(message="AI returned unexpected format for question.")
-
     logger.info("ai_first_question_generated", case_id=case_id)
     return AiQuestionResponse(
         case_id=case_id,
-        question=q_data.get("question", ""),
-        answer_options=q_data.get("answer_options", []),
-        reason=q_data.get("reason", ""),
+        question=data.get("question", ""),
+        answer_options=data.get("answer_options", []),
+        reason=data.get("reason", ""),
         has_more=True,
     )
 
@@ -363,40 +350,47 @@ async def get_next_question(
     request: NextQuestionRequest,
 ) -> AiQuestionResponse:
     """
-    Given the full Q&A history so far, decide if another question is needed.
-    Returns has_more=False when the AI is satisfied.
+    Single Gemini call to decide if another question is needed and generate it.
+    Replaces the previous 2-call chain (doubts → questions) to avoid Flutter timeout.
+    Returns has_more=False when the AI is satisfied or questions_left hits 0.
     """
+    if request.questions_left <= 0:
+        return AiQuestionResponse(
+            case_id=case_id,
+            question="No further clarification needed.",
+            answer_options=[],
+            reason="Question budget exhausted.",
+            has_more=False,
+        )
+
     case = await _load_case_for_doctor_ai(db, doctor, case_id)
     ctx = await _build_case_context(db, case)
 
-    # Build conversation including doctor Q&A history
     qa_lines = []
     for qa in request.qa_history:
         qa_lines.append(f"Doctor Q: {qa.question}")
         qa_lines.append(f"Doctor A: {qa.answer}")
+    qa_history_str = "\n".join(qa_lines) if qa_lines else "None yet."
 
-    full_conversation = ctx["conversation_history"]
-    if qa_lines:
-        full_conversation += "\n\n--- Doctor Q&A ---\n" + "\n".join(qa_lines)
-
-    doubts_prompt = DoctorReviewPrompts.generate_doctor_doubts().format(
-        conversation=full_conversation,
+    prompt = DoctorReviewPrompts.generate_doctor_question_direct().format(
         visual_description=ctx["visual_description"],
         diagnoses=ctx["differential_diagnosis"],
+        conversation=ctx["conversation_history"],
+        qa_history=qa_history_str,
         age=ctx["age"],
         sex=ctx["sex"],
         questions_left=request.questions_left,
     )
 
-    doubts_raw = await asyncio.to_thread(call_gemini, doubts_prompt)
-    doubts_raw = _parse_json_safe(doubts_raw)
+    raw = await asyncio.to_thread(call_gemini, prompt)
+    raw = _parse_json_safe(raw)
 
     try:
-        doubts_data = json.loads(doubts_raw)
+        data = json.loads(raw)
     except (ValueError, TypeError):
-        raise AIServiceException(message="AI returned unexpected format for doubts.")
+        raise AIServiceException(message="AI returned unexpected format for question.")
 
-    if doubts_data.get("doubt_present") == "no" or request.questions_left <= 0:
+    if not data.get("has_question", False):
         return AiQuestionResponse(
             case_id=case_id,
             question="No further clarification needed.",
@@ -405,30 +399,12 @@ async def get_next_question(
             has_more=False,
         )
 
-    doubts_str = json.dumps(doubts_data.get("doubt", []))
-    question_prompt = DoctorReviewPrompts.generate_doctor_questions().format(
-        conversation_history=full_conversation,
-        visual_description=ctx["visual_description"],
-        diagnoses=ctx["differential_diagnosis"],
-        doubts=doubts_str,
-        age=ctx["age"],
-        sex=ctx["sex"],
-    )
-
-    question_raw = await asyncio.to_thread(call_gemini, question_prompt)
-    question_raw = _parse_json_safe(question_raw)
-
-    try:
-        q_data = json.loads(question_raw)
-    except (ValueError, TypeError):
-        raise AIServiceException(message="AI returned unexpected format for question.")
-
     logger.info("ai_next_question_generated", case_id=case_id, questions_left=request.questions_left)
     return AiQuestionResponse(
         case_id=case_id,
-        question=q_data.get("question", ""),
-        answer_options=q_data.get("answer_options", []),
-        reason=q_data.get("reason", ""),
+        question=data.get("question", ""),
+        answer_options=data.get("answer_options", []),
+        reason=data.get("reason", ""),
         has_more=True,
     )
 

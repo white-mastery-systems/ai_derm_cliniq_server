@@ -129,6 +129,15 @@ class DoctorReview(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Diagnosis Type — clinical | histological | dermoscopic radio button
+    # ------------------------------------------------------------------ #
+    diagnosis_type: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="clinical | histological | dermoscopic",
+    )
+
+    # ------------------------------------------------------------------ #
     # Status & Timing
     # ------------------------------------------------------------------ #
     review_status: Mapped[ReviewStatus] = mapped_column(

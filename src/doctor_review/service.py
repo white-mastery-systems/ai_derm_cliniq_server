@@ -103,6 +103,7 @@ def _to_response(review: DoctorReview) -> DoctorReviewResponse:
         selected_differentials=selected,
         confidence_level=review.confidence_level,
         confirmed_diagnosis=confirmed,
+        diagnosis_type=review.diagnosis_type,
         review_notes=review.review_notes,
         treatment_plan_json=review.treatment_plan_json,
         qa_history=qa,
@@ -190,11 +191,17 @@ async def create_review(
             json.dumps(request.clinical_indicators)
             if request.clinical_indicators is not None else None
         ),
+        diagnosis_type=request.diagnosis_type,
         review_status=request.review_status,
     )
 
     if request.review_status == ReviewStatus.COMPLETED:
         review.reviewed_at = datetime.now(tz=timezone.utc)
+
+    # Sync case_title to first confirmed diagnosis
+    title_source = request.confirmed_diagnosis or request.selected_differentials
+    if title_source:
+        case.case_title = title_source[0]
 
     db.add(review)
     await db.flush()
@@ -243,10 +250,13 @@ async def update_review(
         # Auto-sync confirmed_diagnosis unless explicitly overridden in this request
         if request.confirmed_diagnosis is None:
             review.confirmed_diagnosis = json.dumps(request.selected_differentials)
+            case.case_title = request.selected_differentials[0]
     if request.confidence_level is not None:
         review.confidence_level = request.confidence_level
     if request.confirmed_diagnosis is not None:
         review.confirmed_diagnosis = json.dumps(request.confirmed_diagnosis)
+        if request.confirmed_diagnosis:
+            case.case_title = request.confirmed_diagnosis[0]
     if request.review_notes is not None:
         review.review_notes = request.review_notes
     if request.treatment_plan_json is not None:
@@ -255,6 +265,8 @@ async def update_review(
         review.qa_history = json.dumps(request.qa_history)
     if request.clinical_indicators is not None:
         review.clinical_indicators = json.dumps(request.clinical_indicators)
+    if request.diagnosis_type is not None:
+        review.diagnosis_type = request.diagnosis_type
 
     if request.review_status is not None:
         review.review_status = request.review_status

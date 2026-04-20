@@ -60,6 +60,10 @@ class CreateReviewRequest(BaseModel):
         description="Doctor's confidence in confirmed diagnosis: low | high",
     )
     confirmed_diagnosis: list[str] | None = None
+    diagnosis_type: str | None = Field(
+        default=None,
+        description="clinical | histological | dermoscopic",
+    )
     review_notes: str | None = None
     treatment_plan_json: str | None = None
     qa_history: list[dict] | None = Field(
@@ -88,6 +92,10 @@ class UpdateReviewRequest(BaseModel):
         pattern="^(low|high)$",
     )
     confirmed_diagnosis: list[str] | None = None
+    diagnosis_type: str | None = Field(
+        default=None,
+        description="clinical | histological | dermoscopic",
+    )
     review_notes: str | None = None
     treatment_plan_json: str | None = None
     qa_history: list[dict] | None = None
@@ -105,6 +113,7 @@ class DoctorReviewResponse(BaseModel):
     selected_differentials: list[str] = []
     confidence_level: str | None
     confirmed_diagnosis: list[str] = []
+    diagnosis_type: str | None = None
     review_notes: str | None
     treatment_plan_json: str | None
     qa_history: list[dict] = []

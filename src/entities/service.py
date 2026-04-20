@@ -100,7 +100,10 @@ async def get_entities(
     result = await db.execute(
         select(Case)
         .where(Case.id == case_id)
-        .options(selectinload(Case.differential_diagnoses))
+        .options(
+            selectinload(Case.differential_diagnoses),
+            selectinload(Case.doctor_review),
+        )
     )
     case = result.scalar_one_or_none()
 
@@ -121,10 +124,43 @@ async def get_entities(
         if case.differential_diagnoses else None
     )
 
+    # Doctor flow: no DifferentialDiagnosis rows — use confirmed_diagnosis from review
     if final_dd is None:
-        raise NotFoundException(
-            message="No differential diagnosis found for this case. "
-                    "AI analysis must complete before entities can be retrieved."
+        dr = case.doctor_review
+        confirmed_raw = dr.confirmed_diagnosis if dr else None
+        if not confirmed_raw:
+            raise NotFoundException(
+                message="No differential diagnosis found for this case. "
+                        "AI analysis must complete before entities can be retrieved."
+            )
+        try:
+            confirmed_list: list[str] = json.loads(confirmed_raw)
+        except (json.JSONDecodeError, TypeError):
+            confirmed_list = [confirmed_raw]
+
+        entities: list[ClinicalEntity] = []
+        for i, text in enumerate(confirmed_list):
+            if not text:
+                continue
+            code, term = await _get_snomed(db, text)
+            entities.append(ClinicalEntity(
+                diagnosis_text=text,
+                snomed_code=code,
+                snomed_term=term,
+                is_most_probable=(i == 0),
+                confidence=None,
+            ))
+
+        logger.info(
+            "entities_retrieved_from_review",
+            case_id=case_id,
+            entity_count=len(entities),
+            snomed_hits=sum(1 for e in entities if e.snomed_code),
+        )
+        return CaseEntitiesResponse(
+            case_id=case_id,
+            differential_round=0,
+            entities=entities,
         )
 
     # Parse diagnosis JSON
@@ -137,7 +173,7 @@ async def get_entities(
     differentials = diag_data.get("differential_diagnoses", [])
     confidence = diag_data.get("confidence in answer") or diag_data.get("confidence")
 
-    entities: list[ClinicalEntity] = []
+    entities = []
 
     # Most probable diagnosis first
     if isinstance(most_probable, dict) and most_probable.get("diagnosis"):
