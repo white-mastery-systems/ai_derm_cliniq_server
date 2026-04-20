@@ -109,7 +109,10 @@ def call_gemini(prompt: str, images: list[bytes] | None = None) -> str:
 
         parts.append(prompt)
 
-        response = model.generate_content(parts)
+        response = model.generate_content(
+            parts,
+            request_options={"timeout": 45},
+        )
         text = response.text
         logger.info(
             "gemini_call_ok",

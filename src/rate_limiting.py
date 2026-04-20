@@ -52,4 +52,5 @@ limiter = Limiter(
     default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
     storage_uri=settings.REDIS_URL,   # Use Redis so limits persist across workers
     swallow_errors=True,              # Prevent Redis errors from crashing requests
+    enabled=settings.RATE_LIMIT_ENABLED,
 )
