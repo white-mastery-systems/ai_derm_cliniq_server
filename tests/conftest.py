@@ -37,7 +37,8 @@ os.environ.setdefault("SECRET_KEY", "test-secret-key-do-not-use-in-production-32
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
 os.environ.setdefault("DEBUG", "false")
-os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "100000")  # Disable effective rate limiting in tests
+os.environ.setdefault("RATE_LIMIT_PER_MINUTE", "100000")  # Fallback — RATE_LIMIT_ENABLED=false is the real guard
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")      # Disable rate limiter entirely in tests
 
 # ------------------------------------------------------------------ #
 # STEP 2: Now safe to import src modules.

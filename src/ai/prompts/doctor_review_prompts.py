@@ -94,18 +94,20 @@ The JSON format must be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": 85,
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": 60,
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer": "<one out of high, medium, low>"
 }}
+
+IMPORTANT: "likelihood" must be an integer between 0 and 100 (no % sign, no quotes).
 """
 
     # ------------------------------------------------------------------
@@ -191,6 +193,55 @@ The response must be in the following JSON format:
   "answer_options": ["<clinical finding 1>", "<clinical finding 2>", ...],
   "reason": "<reason for asking the question>"
 }}
+"""
+
+    # ------------------------------------------------------------------
+    # 4b. Direct single-call question generation (replaces doubts + questions)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def generate_doctor_question_direct() -> str:
+        """
+        Single Gemini call that replaces the previous 2-call chain:
+            generate_doctor_doubts() → generate_doctor_questions()
+
+        Combines doubt detection + question formatting into one prompt.
+        Cuts response time by ~50% and eliminates the Flutter 20s timeout.
+
+        Template vars: {visual_description}, {diagnoses}, {conversation},
+                       {qa_history}, {age}, {sex}, {questions_left}
+        Returns:
+            Question needed : {"has_question": true, "question": "...",
+                               "answer_options": [...], "reason": "..."}
+            No question     : {"has_question": false}
+        """
+        return """You are a dermatologist AI assistant helping a doctor review a patient case.
+
+Based on the clinical context below, decide if you need ONE more clarifying question from the doctor to better refine the diagnosis. If yes, generate that single most important question. If no more clarification is needed, say so.
+
+Be mindful: you have {questions_left} question(s) remaining. Prioritize only the most critical gap in information.
+
+--- CLINICAL CONTEXT ---
+Visual Description: {visual_description}
+Differential Diagnosis: {diagnoses}
+Patient Q&A History: {conversation}
+Doctor Q&A So Far: {qa_history}
+Age: {age}
+Sex: {sex}
+------------------------
+
+Rules:
+- Ask only if the answer would meaningfully change or confirm the diagnosis.
+- Use direct clinical language appropriate for a dermatologist.
+- If questions_left is 0 or all critical gaps are already covered, return has_question: false.
+
+Respond ONLY with valid JSON in one of these two formats:
+
+If a question is needed:
+{{"has_question": true, "question": "<direct clinical question>", "answer_options": ["<option 1>", "<option 2>", "<option 3>"], "reason": "<why this question matters for the diagnosis>"}}
+
+If no question is needed:
+{{"has_question": false}}
 """
 
     # ------------------------------------------------------------------

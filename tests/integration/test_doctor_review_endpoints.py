@@ -134,7 +134,7 @@ async def test_create_review_success(db_app_client: AsyncClient, test_engine):
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
         json={
-            "confirmed_diagnosis": "Eczema",
+            "confirmed_diagnosis": ["Eczema"],
             "review_notes": "Mild atopic dermatitis on forearm.",
             "review_status": "in_progress",
         },
@@ -142,7 +142,7 @@ async def test_create_review_success(db_app_client: AsyncClient, test_engine):
     assert resp.status_code == 201
     body = resp.json()
     assert body["case_id"] == case_id
-    assert body["confirmed_diagnosis"] == "Eczema"
+    assert body["confirmed_diagnosis"] == ["Eczema"]
     assert body["review_status"] == "in_progress"
     assert body["reviewed_at"] is None
 
@@ -176,7 +176,7 @@ async def test_create_review_not_assigned_doctor(db_app_client: AsyncClient, tes
         headers=auth_header(other_doctor_token),
         json={"review_status": "in_progress"},
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 404  # not 403 — enumeration prevention hides unassigned cases
 
 
 @pytest.mark.asyncio
@@ -226,13 +226,13 @@ async def test_update_review_success(db_app_client: AsyncClient, test_engine):
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
         json={
-            "confirmed_diagnosis": "Psoriasis",
+            "confirmed_diagnosis": ["Psoriasis"],
             "review_notes": "Plaque psoriasis, moderate severity.",
         },
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["confirmed_diagnosis"] == "Psoriasis"
+    assert body["confirmed_diagnosis"] == ["Psoriasis"]
     assert body["review_notes"] == "Plaque psoriasis, moderate severity."
 
 
@@ -322,7 +322,7 @@ async def test_get_review_by_patient(db_app_client: AsyncClient, test_engine):
     await db_app_client.post(
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
-        json={"confirmed_diagnosis": "Vitiligo", "review_status": "completed"},
+        json={"confirmed_diagnosis": ["Vitiligo"], "review_status": "completed"},
     )
 
     resp = await db_app_client.get(
@@ -330,7 +330,7 @@ async def test_get_review_by_patient(db_app_client: AsyncClient, test_engine):
         headers=auth_header(patient_token),
     )
     assert resp.status_code == 200
-    assert resp.json()["confirmed_diagnosis"] == "Vitiligo"
+    assert resp.json()["confirmed_diagnosis"] == ["Vitiligo"]
 
 
 @pytest.mark.asyncio
@@ -343,7 +343,7 @@ async def test_get_review_by_doctor(db_app_client: AsyncClient, test_engine):
     await db_app_client.post(
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
-        json={"confirmed_diagnosis": "Melanoma suspected", "review_status": "in_progress"},
+        json={"confirmed_diagnosis": ["Melanoma suspected"], "review_status": "in_progress"},
     )
 
     resp = await db_app_client.get(
@@ -351,7 +351,7 @@ async def test_get_review_by_doctor(db_app_client: AsyncClient, test_engine):
         headers=auth_header(doctor_token),
     )
     assert resp.status_code == 200
-    assert resp.json()["confirmed_diagnosis"] == "Melanoma suspected"
+    assert resp.json()["confirmed_diagnosis"] == ["Melanoma suspected"]
 
 
 @pytest.mark.asyncio

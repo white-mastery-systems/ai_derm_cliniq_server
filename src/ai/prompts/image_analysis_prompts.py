@@ -169,18 +169,20 @@ The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": 85,
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": 85,
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be an integer between 0 and 100 (no % sign, no quotes).
 """
 
     # ------------------------------------------------------------------
@@ -220,18 +222,20 @@ The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": 85,
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": 85,
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be an integer between 0 and 100 (no % sign, no quotes).
 
 Be sure not to include '/' in the diagnosis.
 """
@@ -278,18 +282,20 @@ The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": 85,
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": 85,
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be an integer between 0 and 100 (no % sign, no quotes).
 """
 
     # ------------------------------------------------------------------
