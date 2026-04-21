@@ -415,7 +415,7 @@ def generate_report_task(self, case_id: str) -> None:
                     age=age,
                     sex=sex,
                 )
-                response_text = call_llm(prompt)
+                response_text = call_llm(prompt, json_mode=True)
                 parsed = extract_json(response_text)
                 summary_data = parsed.get("summary", {})
             except (AIProviderException, Exception) as exc:

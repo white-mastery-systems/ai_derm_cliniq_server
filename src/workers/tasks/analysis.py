@@ -267,7 +267,7 @@ def inspect_images_task(self, case_id: str) -> str:
         # Call LLM inspect gate (with automatic fallback)
         try:
             prompt = ImageAnalysisPrompts.inspect_images()
-            response_text = call_llm(prompt, images=image_bytes)
+            response_text = call_llm(prompt, images=image_bytes, json_mode=True)
             result = extract_json(response_text)
         except AIProviderException as exc:
             async with factory() as session:
@@ -352,7 +352,7 @@ def analyse_images_task(self, case_id: str) -> dict:
             desc_prompt = ImageAnalysisPrompts.get_description().format(
                 personal_particulars=personal_particulars
             )
-            desc_text = call_llm(desc_prompt, images=image_bytes)
+            desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
             description_json = extract_json(desc_text)
         except AIProviderException as exc:
             async with factory() as session:
@@ -365,7 +365,7 @@ def analyse_images_task(self, case_id: str) -> dict:
                 personal_particulars=personal_particulars,
                 follow_up_context=follow_up_context,
             )
-            diag_text = call_llm(diag_prompt, images=image_bytes)
+            diag_text = call_llm(diag_prompt, images=image_bytes, json_mode=True)
             diagnosis_json = extract_json(diag_text)
         except AIProviderException as exc:
             async with factory() as session:
@@ -517,7 +517,7 @@ def save_results_task(self, analysis_result: dict) -> None:
                 rounds_prompt = PatientConsultationPrompts.question_numbers().format(
                     diagnoses=diagnosis_json_str
                 )
-                rounds_text = call_llm(rounds_prompt)
+                rounds_text = call_llm(rounds_prompt, json_mode=True)
                 rounds_data = extract_json(rounds_text)
                 raw = rounds_data.get("no_of_questions")
                 if isinstance(raw, int) and 1 <= raw <= 15:
@@ -613,7 +613,7 @@ def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None 
                 answers=answers_text,
                 patient_reported_symptoms=symptoms_text,
             )
-            raw = call_llm(prompt)
+            raw = call_llm(prompt, json_mode=True)
             result = extract_json(raw)
         except Exception as exc:
             logger.error("red_flag_check_llm_failed", case_id=case_id, error=str(exc))
@@ -723,7 +723,7 @@ def analyse_complaint_task(self, case_id: str) -> dict:
                 prescription="None",
                 follow_up_context=follow_up_context,
             )
-            diag_text = call_llm(diag_prompt)
+            diag_text = call_llm(diag_prompt, json_mode=True)
             diagnosis_json = extract_json(diag_text)
         except AIProviderException as exc:
             async with factory() as session:
