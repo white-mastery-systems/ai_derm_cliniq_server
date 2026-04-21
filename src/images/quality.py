@@ -137,15 +137,17 @@ def validate_image_quality(raw_bytes: bytes, filename: str = "") -> None:
 
     # ── 4. Blur (Laplacian variance) ─────────────────────────────── #
     laplacian_variance = _laplacian_variance(rgb)
-    if laplacian_variance < MIN_LAPLACIAN_VARIANCE:
-        logger.warning(
-            "image_quality_too_blurry",
-            filename=filename,
-            laplacian_variance=laplacian_variance,
-        )
-        raise ImageQualityException(
-            message="Image appears to be blurry. Please hold the camera steady and retake the photo."
-        )
+
+    # Blur check disabled — Gemini's inspect_images_task handles semantic
+    # if laplacian_variance < MIN_LAPLACIAN_VARIANCE:
+    #     logger.warning(
+    #         "image_quality_too_blurry",
+    #         filename=filename,
+    #         laplacian_variance=laplacian_variance,
+    #     )
+    #     raise ImageQualityException(
+    #         message="Image appears to be blurry. Please hold the camera steady and retake the photo."
+    #     )
 
     logger.info(
         "image_quality_passed",
