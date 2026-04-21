@@ -34,13 +34,12 @@ Requiring a separate assignment step after scan would be redundant UX.
 """
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from src.config import settings
 from src.exceptions import (
     BadRequestException,
     CaseNotFoundException,
@@ -88,36 +87,41 @@ async def generate_qr(
                     f"Current status: {case.ai_status.value}"
         )
 
-    # Create token
-    token_value = secrets.token_urlsafe(32)
-    expires_at = datetime.now(tz=timezone.utc) + timedelta(
-        hours=settings.QR_TOKEN_EXPIRE_HOURS
+    # Return existing unused QR for this case (one-per-case rule)
+    existing = await db.execute(
+        select(QRToken)
+        .where(QRToken.case_id == request.case_id, QRToken.used == False)  # noqa: E712
+        .order_by(QRToken.created_at.desc())
+        .limit(1)
     )
+    qr_token = existing.scalar_one_or_none()
 
-    qr_token = QRToken(
-        id=new_uuid(),
-        case_id=request.case_id,
-        token=token_value,
-        expires_at=expires_at,
-        used=False,
-    )
-    db.add(qr_token)
+    if qr_token is None:
+        # No active QR exists — create one that never expires
+        _NEVER = datetime(9999, 12, 31, tzinfo=timezone.utc)
+        qr_token = QRToken(
+            id=new_uuid(),
+            case_id=request.case_id,
+            token=secrets.token_urlsafe(32),
+            expires_at=_NEVER,
+            used=False,
+        )
+        db.add(qr_token)
 
-    logger.info("qr_generated", case_id=request.case_id, expires_at=expires_at)
+    logger.info("qr_generated", case_id=request.case_id, reused=qr_token.id is not None)
 
     # Fire-and-forget: send visit summary email with QR code attachment
     try:
-        send_visit_email_task.delay(request.case_id, token_value)
+        send_visit_email_task.delay(request.case_id, qr_token.token)
     except Exception as exc:
-        # Redis may be unavailable in dev — log and continue, never block QR generation
         logger.warning("email_task_enqueue_failed", case_id=request.case_id, error=str(exc))
 
     return QRTokenResponse(
-        token=token_value,
+        token=qr_token.token,
         case_id=request.case_id,
         display_id=f"AI-{case.case_number}" if case.case_number else None,
-        expires_at=expires_at,
-        qr_url=f"{_QR_BASE_URL}/{token_value}",
+        expires_at=qr_token.expires_at,
+        qr_url=f"{_QR_BASE_URL}/{qr_token.token}",
     )
 
 
@@ -148,14 +152,6 @@ async def scan_qr(
 
     if qr_token is None:
         raise QRTokenExpiredException(message="QR code is invalid or has expired")
-
-    # Normalise naive datetime from SQLite
-    expires_at = qr_token.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-    if expires_at < datetime.now(tz=timezone.utc):
-        raise QRTokenExpiredException(message="This QR code has expired. Ask the patient to generate a new one.")
 
     if qr_token.used:
         raise QRTokenExpiredException(message="This QR code has already been used.")
