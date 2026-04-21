@@ -723,24 +723,18 @@ async def set_assessment_depth(
     """
     Set the number of Q&A rounds before the case summary is generated.
 
-    Must be called after AI analysis completes (ai_status = completed)
-    and before the first question round starts (question_round = 0).
+    Can be called any time before the first question round starts (question_round = 0).
+    Works for both patient flow (after AI completes) and doctor flow (before AI is triggered).
 
     Raises:
         CaseNotFoundException  — case not found or caller does not have access
-        BadRequestException    — AI not yet complete, or questions already started
+        BadRequestException    — questions already started
     """
     result = await db.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
     _assert_access(user, case)
-
-    if case.ai_status != AiStatus.COMPLETED:
-        raise BadRequestException(
-            message="AI analysis must complete before setting assessment depth. "
-                    f"Current status: {case.ai_status.value}"
-        )
 
     if case.question_round > 0:
         raise BadRequestException(
