@@ -31,11 +31,20 @@ class ImageAnalysisPrompts:
         Returns JSON: {"answer":"yes"} or {"answer":"no","reason":"..."}
         Used in: Celery task `inspect_images_task` (Layer 6)
         """
-        return """Determine whether the image(s) are legible and whether or not they allow for any meaningful dermatological observation.
+        return """You are reviewing an image submitted by a patient for a dermatology consultation.
+
+Decide whether the image is usable for skin analysis. Be LENIENT — accept the image if it shows any part of a human body or skin, even if the photo is slightly blurry, low resolution, poorly lit, or taken at an angle. Patients are not professional photographers.
+
+Only reject the image if it falls into one of these specific categories:
+- The image contains NO human skin or body part at all (e.g. a random object, plain background, text document)
+- The image is completely black, completely white, or fully corrupted/unreadable
+- The image is clearly a screenshot of a UI, cartoon, or digital graphic with no real skin present
+
+If in doubt, answer "yes".
 
 Give your answer in the json format as below:
-If the images are adequate for dermatological diagnosis: {"answer":"yes"}
-If the images are inadequate for dermatological diagnosis: {"answer":"no", "reason":"brief explanation of the issue(s) with the image(s)"}
+If the image is usable: {"answer":"yes"}
+If the image is completely unusable: {"answer":"no", "reason":"brief explanation"}
 """
 
     # ------------------------------------------------------------------

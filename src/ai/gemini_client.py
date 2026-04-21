@@ -111,7 +111,9 @@ def call_gemini(prompt: str, images: list[bytes] | None = None, json_mode: bool 
 
         parts.append(prompt)
 
-        generation_config = {"response_mime_type": "application/json"} if json_mode else {}
+        generation_config: dict = {"max_output_tokens": 4096}
+        if json_mode:
+            generation_config["response_mime_type"] = "application/json"
 
         response = model.generate_content(
             parts,
