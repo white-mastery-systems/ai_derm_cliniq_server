@@ -50,9 +50,10 @@ from src.exceptions import (
 from src.logger import get_logger
 from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
+from src.models.patient_profile import PatientProfile
 from src.models.qr_token import QRToken
 from src.models.user import User, UserRole
-from src.qr.schemas import GenerateQRRequest, QRScanResponse, QRTokenResponse
+from src.qr.schemas import GenerateQRRequest, PatientCodeAccessResponse, QRScanResponse, QRTokenResponse
 from src.workers.tasks.email import send_visit_email_task
 
 logger = get_logger(__name__)
@@ -182,6 +183,67 @@ async def scan_qr(
     logger.info("qr_scanned", case_id=case.id, doctor_id=doctor.id)
 
     return QRScanResponse(
+        case_id=case.id,
+        patient_name=patient.full_name,
+    )
+
+
+async def access_by_patient_code(
+    db: AsyncSession,
+    doctor: User,
+    patient_code: str,
+) -> PatientCodeAccessResponse:
+    """
+    Grant a doctor access to a patient's latest completed case via patient code.
+
+    Same outcome as scan_qr() — doctor is auto-assigned, case_id returned —
+    but the entry method is a human-readable code instead of a QR token.
+    """
+    if doctor.role != UserRole.DOCTOR:
+        raise ForbiddenException(message="Only doctors can access cases via patient code")
+
+    # Find patient profile by code (case-insensitive)
+    result = await db.execute(
+        select(PatientProfile)
+        .where(PatientProfile.patient_code == patient_code.upper())
+        .options(selectinload(PatientProfile.user))
+    )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        raise CaseNotFoundException(message=f"No patient found with code: {patient_code}")
+
+    patient = profile.user
+
+    # Find their latest AI-completed case
+    result = await db.execute(
+        select(Case)
+        .where(Case.patient_id == patient.id)
+        .where(Case.ai_status == AiStatus.COMPLETED)
+        .order_by(Case.created_at.desc())
+        .limit(1)
+    )
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise BadRequestException(
+            message="This patient has no completed AI analysis yet. "
+                    "Ask the patient to complete their case first."
+        )
+
+    # Auto-assign doctor (same logic as QR scan)
+    if case.doctor_id is None:
+        case.doctor_id = doctor.id
+        logger.info("doctor_auto_assigned_via_code", case_id=case.id, doctor_id=doctor.id)
+    elif case.doctor_id != doctor.id:
+        logger.info(
+            "code_access_case_already_assigned",
+            case_id=case.id,
+            existing_doctor=case.doctor_id,
+            scanning_doctor=doctor.id,
+        )
+
+    logger.info("patient_code_access", case_id=case.id, doctor_id=doctor.id, patient_code=patient_code.upper())
+
+    return PatientCodeAccessResponse(
         case_id=case.id,
         patient_name=patient.full_name,
     )

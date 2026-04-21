@@ -71,14 +71,16 @@ def _get_model():
         raise AIProviderException(message=f"Failed to initialise Gemini client: {exc}") from exc
 
 
-def call_gemini(prompt: str, images: list[bytes] | None = None) -> str:
+def call_gemini(prompt: str, images: list[bytes] | None = None, json_mode: bool = False) -> str:
     """
     Send a prompt (+ optional images) to Gemini and return the raw text response.
 
     Parameters
     ----------
-    prompt : The text instruction for Gemini
-    images : List of raw image bytes (JPEG, PNG, HEIC). Optional.
+    prompt     : The text instruction for Gemini
+    images     : List of raw image bytes (JPEG, PNG, HEIC). Optional.
+    json_mode  : When True, sets response_mime_type="application/json" so Gemini
+                 always returns valid JSON with no markdown fences or prose preamble.
 
     Returns
     -------
@@ -109,8 +111,11 @@ def call_gemini(prompt: str, images: list[bytes] | None = None) -> str:
 
         parts.append(prompt)
 
+        generation_config = {"response_mime_type": "application/json"} if json_mode else {}
+
         response = model.generate_content(
             parts,
+            generation_config=generation_config,
             request_options={"timeout": 45},
         )
         text = response.text

@@ -53,6 +53,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.pool import NullPool
 
 from src.ai import gemini_client
+from src.ai.llm_router import call_llm
 from src.ai.prompts.image_analysis_prompts import ImageAnalysisPrompts
 from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
 from src.config import settings
@@ -306,7 +307,7 @@ def generate_questions_task(self, case_id: str) -> None:
                         prompt = ImageAnalysisPrompts.first_question().format(
                             follow_up_context=follow_up_context,
                         )
-                        response_text = gemini_client.call_gemini(prompt, images=image_bytes)
+                        response_text = call_llm(prompt, images=image_bytes, json_mode=True)
                         questions_data = gemini_client.extract_json(response_text)
                     except AIProviderException as exc:
                         await _fail_case(session, case_id, f"Question generation failed: {exc}")
@@ -328,7 +329,7 @@ def generate_questions_task(self, case_id: str) -> None:
                             complaints=complaint,
                             follow_up_context=follow_up_context,
                         )
-                        response_text = gemini_client.call_gemini(prompt)
+                        response_text = call_llm(prompt, json_mode=True)
                         questions_data = gemini_client.extract_json(response_text)
                     except AIProviderException as exc:
                         await _fail_case(session, case_id, f"Question generation failed: {exc}")
@@ -349,7 +350,7 @@ def generate_questions_task(self, case_id: str) -> None:
                         datetime=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
                         follow_up_context=follow_up_context,
                     )
-                    response_text = gemini_client.call_gemini(combined_prompt)
+                    response_text = call_llm(combined_prompt, json_mode=True)
                     questions_data = gemini_client.extract_json(response_text)
                 except AIProviderException as exc:
                     await _fail_case(session, case_id, f"Question generation failed: {exc}")
@@ -498,7 +499,7 @@ def refine_analysis_task(self, case_id: str) -> None:
                     prescription="None",
                     follow_up_context=follow_up_context,
                 )
-                diff_text = gemini_client.call_gemini(diff_prompt)
+                diff_text = call_llm(diff_prompt, json_mode=True)
                 new_diff = gemini_client.extract_json(diff_text)
                 new_diff_json = json.dumps(new_diff)
             except AIProviderException as exc:
@@ -513,7 +514,7 @@ def refine_analysis_task(self, case_id: str) -> None:
                         personal_particulars=patient_particulars,
                         previous_conversation=conv_history,
                     )
-                    desc_text = gemini_client.call_gemini(desc_prompt, images=image_bytes)
+                    desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
                     new_desc = gemini_client.extract_json(desc_text)
                     new_desc_json = json.dumps(new_desc)
                 except AIProviderException as exc:
@@ -624,7 +625,7 @@ async def _finalize_case(
             possible_diagnoses=differential_json,
             follow_up_context=follow_up_context,
         )
-        summary_text = gemini_client.call_gemini(summary_prompt)
+        summary_text = call_llm(summary_prompt, json_mode=True)
         summary_data = gemini_client.extract_json(summary_text)
         case_summary = summary_data.get("case_summary", "Consultation complete.")
     except (AIProviderException, Exception) as exc:

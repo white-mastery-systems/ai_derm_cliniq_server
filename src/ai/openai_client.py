@@ -51,14 +51,16 @@ except ImportError:
 # OpenAI
 # ------------------------------------------------------------------ #
 
-def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
+def call_openai(prompt: str, images: list[bytes] | None = None, json_mode: bool = False) -> str:
     """
     Send a prompt (+ optional images) to OpenAI GPT-4o.
 
     Parameters
     ----------
-    prompt : str    — Text instruction
-    images : list   — Raw image bytes (JPEG/PNG). Optional.
+    prompt    : str   — Text instruction
+    images    : list  — Raw image bytes (JPEG/PNG). Optional.
+    json_mode : bool  — When True, sets response_format=json_object to force
+                        valid JSON output with no markdown fences.
 
     Returns
     -------
@@ -94,12 +96,12 @@ def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
             })
 
+    kwargs: dict = {"model": model_name, "messages": [{"role": "user", "content": content}], "max_tokens": 4096}
+    if json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+
     try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": content}],
-            max_tokens=4096,
-        )
+        response = client.chat.completions.create(**kwargs)
         text = response.choices[0].message.content or ""
         logger.info(
             "openai_call_ok",
@@ -122,7 +124,7 @@ def call_openai(prompt: str, images: list[bytes] | None = None) -> str:
 _DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
 
-def call_deepseek(prompt: str, images: list[bytes] | None = None) -> str:
+def call_deepseek(prompt: str, images: list[bytes] | None = None, json_mode: bool = False) -> str:
     """
     Send a prompt to DeepSeek via its OpenAI-compatible API.
 
@@ -132,8 +134,9 @@ def call_deepseek(prompt: str, images: list[bytes] | None = None) -> str:
 
     Parameters
     ----------
-    prompt : str    — Text instruction
-    images : list   — Ignored (DeepSeek chat is text-only in this config)
+    prompt    : str   — Text instruction
+    images    : list  — Ignored (DeepSeek chat is text-only in this config)
+    json_mode : bool  — When True, sets response_format=json_object.
 
     Returns
     -------
@@ -171,12 +174,12 @@ def call_deepseek(prompt: str, images: list[bytes] | None = None) -> str:
             f"directly processed. Please respond based on the text prompt only.]\n\n{prompt}"
         )
 
+    ds_kwargs: dict = {"model": model_name, "messages": [{"role": "user", "content": full_prompt}], "max_tokens": 4096}
+    if json_mode:
+        ds_kwargs["response_format"] = {"type": "json_object"}
+
     try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": full_prompt}],
-            max_tokens=4096,
-        )
+        response = client.chat.completions.create(**ds_kwargs)
         text = response.choices[0].message.content or ""
         logger.info(
             "deepseek_call_ok",

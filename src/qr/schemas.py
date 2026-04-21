@@ -53,3 +53,13 @@ class QRScanResponse(BaseModel):
     case_id: str
     patient_name: str
     message: str = "QR code verified. You have been granted access to this case."
+
+
+class PatientCodeAccessResponse(BaseModel):
+    """
+    Returned when a doctor accesses a case via patient code.
+    Same shape as QRScanResponse so the Flutter app handles both identically.
+    """
+    case_id: str
+    patient_name: str
+    message: str = "Access granted via patient code."

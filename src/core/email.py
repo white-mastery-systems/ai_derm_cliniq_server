@@ -38,6 +38,7 @@ USAGE (from Celery tasks only)
     )
 """
 
+import asyncio
 import smtplib
 import ssl
 from email import encoders
@@ -299,3 +300,16 @@ def send_email(
     except Exception as exc:
         logger.error("email_unexpected_error", to=to_email, error=str(exc))
         return False
+
+
+async def send_email_async(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> bool:
+    """Non-blocking wrapper — runs send_email in a thread pool so it doesn't block the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: send_email(to_email, subject, html_body, attachments)
+    )

@@ -90,4 +90,10 @@ celery_app.conf.update(
 
     # Result expiry — keep results 24 hours (enough for polling)
     result_expires=86400,
+
+    # Default queue — tasks without explicit queue= go here
+    # task_default_queue="default",
+
+    # Suppress Celery 6.0 deprecation warning
+    # broker_connection_retry_on_startup=True,
 )

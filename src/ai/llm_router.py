@@ -118,7 +118,7 @@ def _get_provider_order() -> list[tuple[str, str, callable]]:
 # Public interface
 # ------------------------------------------------------------------ #
 
-def call_llm(prompt: str, images: list[bytes] | None = None) -> str:
+def call_llm(prompt: str, images: list[bytes] | None = None, json_mode: bool = False) -> str:
     """
     Send a prompt (+ optional images) to the best available LLM provider.
 
@@ -127,8 +127,11 @@ def call_llm(prompt: str, images: list[bytes] | None = None) -> str:
 
     Parameters
     ----------
-    prompt : str            — Text instruction for the LLM
-    images : list[bytes]    — Optional raw image bytes (JPEG/PNG)
+    prompt    : str           — Text instruction for the LLM
+    images    : list[bytes]   — Optional raw image bytes (JPEG/PNG)
+    json_mode : bool          — When True, requests structured JSON output from the
+                                provider (Gemini: response_mime_type, OpenAI: json_object).
+                                Eliminates markdown fences and prose preambles.
 
     Returns
     -------
@@ -143,7 +146,7 @@ def call_llm(prompt: str, images: list[bytes] | None = None) -> str:
 
     for key, display_name, call_fn in providers:
         try:
-            result = call_fn(prompt, images)
+            result = call_fn(prompt, images, json_mode)
             if failures:
                 # Log that we fell back — useful for debugging
                 logger.warning(

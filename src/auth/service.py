@@ -586,7 +586,7 @@ async def forgot_password(db: AsyncSession, email: str) -> None:
 
     Google-only accounts (no password_hash) receive a friendly redirect message.
     """
-    from src.core.email import render_password_reset_otp_email, send_email
+    from src.core.email import render_password_reset_otp_email, send_email_async
 
     user = await _get_user_by_email(db, email)
     if user is None or not user.is_active:
@@ -596,7 +596,7 @@ async def forgot_password(db: AsyncSession, email: str) -> None:
 
     if not user.password_hash:
         # Google-only account — send a friendly redirect message
-        send_email(
+        await send_email_async(
             to_email=email,
             subject="AiDerm Cliniq — Password Reset",
             html_body=(
@@ -612,7 +612,7 @@ async def forgot_password(db: AsyncSession, email: str) -> None:
         expiry_minutes=_PASSWORD_RESET_EXPIRY_MINUTES,
     )
     html = render_password_reset_otp_email(name=user.full_name, otp=otp)
-    send_email(
+    await send_email_async(
         to_email=email,
         subject="AiDerm Cliniq — Password Reset OTP",
         html_body=html,
@@ -687,7 +687,7 @@ async def request_email_verification(db: AsyncSession, user: User) -> None:
 
     No-op if the user is already verified.
     """
-    from src.core.email import render_email_verify_otp_email, send_email
+    from src.core.email import render_email_verify_otp_email, send_email_async
 
     if user.is_verified:
         logger.info("email_already_verified", user_id=user.id)
@@ -698,7 +698,7 @@ async def request_email_verification(db: AsyncSession, user: User) -> None:
         expiry_minutes=_EMAIL_VERIFY_EXPIRY_MINUTES,
     )
     html = render_email_verify_otp_email(name=user.full_name, otp=otp)
-    send_email(
+    await send_email_async(
         to_email=user.email,
         subject="AiDerm Cliniq — Verify Your Email",
         html_body=html,

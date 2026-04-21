@@ -30,7 +30,7 @@ from src.auth.dependencies import require_doctor, require_patient
 from src.database.core import get_async_session
 from src.models.user import User
 from src.qr import service
-from src.qr.schemas import GenerateQRRequest, QRScanResponse, QRTokenResponse
+from src.qr.schemas import GenerateQRRequest, PatientCodeAccessResponse, QRScanResponse, QRTokenResponse
 
 router = APIRouter()
 
@@ -81,3 +81,26 @@ async def scan_qr(
     Returns 410 Gone if the token is expired, already used, or not found.
     """
     return await service.scan_qr(db, doctor, token)
+
+
+@router.post(
+    "/by-code/{patient_code}",
+    response_model=PatientCodeAccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Access a patient's case via patient code (doctor only)",
+)
+async def access_by_patient_code(
+    patient_code: str,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> PatientCodeAccessResponse:
+    """
+    Alternative to QR scan — doctor types the patient's code instead of scanning.
+
+    Finds the patient's latest AI-completed case, auto-assigns the doctor,
+    and returns case_id so the Flutter app navigates to the case review screen.
+
+    Returns 404 if the patient code doesn't exist.
+    Returns 400 if the patient has no completed case yet.
+    """
+    return await service.access_by_patient_code(db, doctor, patient_code)
