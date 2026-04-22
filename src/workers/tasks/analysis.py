@@ -47,6 +47,7 @@ is independent and long-lived connections in workers are problematic.
 """
 
 import asyncio
+import functools
 import json
 
 from celery import chain
@@ -310,16 +311,18 @@ def inspect_images_task(self, case_id: str) -> str:
 )
 def analyse_images_task(self, case_id: str) -> dict:
     """
-    Core analysis task: generate visual description + first differential.
+    Core analysis task: gate check + visual description + first differential.
 
-    Receives case_id from inspect_images_task (via chain).
-    Returns dict passed to save_results_task.
+    Replaces the old inspect_images_task → analyse_images_task two-step:
+    - Downloads image once (was downloaded twice before)
+    - Runs inspect+describe and differential IN PARALLEL (asyncio.gather)
+    - Inspect gate is merged into the describe call (inspect_and_describe prompt)
 
     Steps:
     1. Fetch case, images, patient profile from DB
-    2. Download image bytes from GCS
-    3. Call Gemini: get_description (visual description JSON)
-    4. Call Gemini: generate_first_differential (diagnosis JSON)
+    2. Download image bytes from GCS (once)
+    3. Parallel: [inspect_and_describe(), generate_first_differential()]
+    4. If image inadequate → fail case, abort
     5. Return {"case_id": ..., "description_json": ..., "diagnosis_json": ...}
     """
     logger.info("analyse_images_task_start", case_id=case_id)
@@ -334,10 +337,15 @@ def analyse_images_task(self, case_id: str) -> dict:
                 raise Ignore()
 
             images = await _get_case_images(session, case_id)
+            if not images:
+                async with factory() as session:
+                    await _fail_case(session, case_id, "No images uploaded for this case")
+                raise Ignore()
+
             personal_particulars = await _get_patient_particulars(session, case.patient_id)
             follow_up_context = await _get_follow_up_context(session, case)
 
-        # Download image bytes
+        # Download image bytes once (previously downloaded separately in inspect + analyse)
         image_bytes = []
         for img in images:
             try:
@@ -347,29 +355,59 @@ def analyse_images_task(self, case_id: str) -> dict:
                     await _fail_case(session, case_id, f"Could not download image: {exc}")
                 raise Ignore() from exc
 
-        # Call LLM: visual description (with automatic fallback)
+        desc_prompt = ImageAnalysisPrompts.inspect_and_describe().format(
+            personal_particulars=personal_particulars
+        )
+        diag_prompt = ImageAnalysisPrompts.generate_first_differential().format(
+            personal_particulars=personal_particulars,
+            follow_up_context=follow_up_context,
+        )
+
+        # Run both calls in parallel — each is a blocking sync call so we
+        # push them onto the thread pool and await together.
+        loop = asyncio.get_running_loop()
+        desc_fut = loop.run_in_executor(
+            None, functools.partial(call_llm, desc_prompt, image_bytes, True)
+        )
+        diag_fut = loop.run_in_executor(
+            None, functools.partial(call_llm, diag_prompt, image_bytes, True)
+        )
+        desc_text, diag_text = await asyncio.gather(desc_fut, diag_fut, return_exceptions=True)
+
+        # Handle describe/gate result first
+        if isinstance(desc_text, Exception):
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Description AI call failed: {desc_text}")
+            raise Ignore()
+
         try:
-            desc_prompt = ImageAnalysisPrompts.get_description().format(
-                personal_particulars=personal_particulars
-            )
-            desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
             description_json = extract_json(desc_text)
         except AIProviderException as exc:
             async with factory() as session:
-                await _fail_case(session, case_id, f"Description AI call failed: {exc}")
+                await _fail_case(session, case_id, f"Description parse failed: {exc}")
             raise Ignore() from exc
 
-        # Call LLM: first differential (with automatic fallback)
+        # Gate check — image inadequate
+        if description_json.get("adequate") == "no":
+            reason = description_json.get("reason", "Images are not adequate for analysis")
+            async with factory() as session:
+                await _fail_case(session, case_id, reason)
+            raise Ignore()
+
+        # Remove the gate field before saving — save_results_task doesn't need it
+        description_json.pop("adequate", None)
+
+        # Handle differential result
+        if isinstance(diag_text, Exception):
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Differential AI call failed: {diag_text}")
+            raise Ignore()
+
         try:
-            diag_prompt = ImageAnalysisPrompts.generate_first_differential().format(
-                personal_particulars=personal_particulars,
-                follow_up_context=follow_up_context,
-            )
-            diag_text = call_llm(diag_prompt, images=image_bytes, json_mode=True)
             diagnosis_json = extract_json(diag_text)
         except AIProviderException as exc:
             async with factory() as session:
-                await _fail_case(session, case_id, f"Differential AI call failed: {exc}")
+                await _fail_case(session, case_id, f"Differential parse failed: {exc}")
             raise Ignore() from exc
 
         logger.info("analyse_images_task_ok", case_id=case_id)
@@ -771,9 +809,11 @@ def build_analysis_chain(case_id: str, has_visible_lesion: bool = True):
         → save_results_task(result_dict)
     """
     if has_visible_lesion:
+        # inspect_images_task removed — gate check is now merged into
+        # analyse_images_task (inspect_and_describe prompt) and runs in
+        # parallel with the differential call. Image downloaded once.
         return chain(
-            inspect_images_task.s(case_id),
-            analyse_images_task.s(),
+            analyse_images_task.s(case_id),
             save_results_task.s(),
         )
     return chain(

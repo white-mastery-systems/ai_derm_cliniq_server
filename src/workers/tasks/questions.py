@@ -162,6 +162,27 @@ async def _get_latest_visual_desc(session, case_id: str) -> str:
         return vd.overall_description or "No description available."
 
 
+async def _get_latest_visual_desc_full(session, case_id: str) -> tuple[str, dict]:
+    """
+    Return (description_json_str, description_dict) for the most recent VisualDescription.
+    Used when carrying forward the existing description without re-running Gemini.
+    """
+    result = await session.execute(
+        select(VisualDescription)
+        .where(VisualDescription.case_id == case_id)
+        .order_by(VisualDescription.round_number.desc())
+        .limit(1)
+    )
+    vd = result.scalar_one_or_none()
+    if vd is None:
+        return "{}", {}
+    try:
+        desc_dict = json.loads(vd.description_json)
+        return vd.description_json, desc_dict
+    except (json.JSONDecodeError, TypeError):
+        return vd.description_json, {}
+
+
 async def _get_latest_differential(session, case_id: str) -> str:
     result = await session.execute(
         select(DifferentialDiagnosis)
@@ -493,16 +514,46 @@ def refine_analysis_task(self, case_id: str) -> None:
             new_diff = gemini_client.extract_json(diff_text)
             new_diff_json = json.dumps(new_diff)
 
-            # Step 2: Updated visual description — image path only
+            # Step 2: Updated visual description — only re-run if a new image was uploaded
+            # since the last analysis. The image pixels don't change mid-consultation,
+            # so re-describing the same image every round adds no diagnostic value.
+            # If the patient uploads a new photo between rounds, the check detects it
+            # and re-analysis runs automatically.
             if case.has_visible_lesion:
-                image_bytes = await _download_case_images(session, case_id)
-                desc_prompt = ImageAnalysisPrompts.get_description_with_context().format(
-                    personal_particulars=patient_particulars,
-                    previous_conversation=conv_history,
+                latest_vd_result = await session.execute(
+                    select(VisualDescription)
+                    .where(VisualDescription.case_id == case_id)
+                    .order_by(VisualDescription.created_at.desc())
+                    .limit(1)
                 )
-                desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
-                new_desc = gemini_client.extract_json(desc_text)
-                new_desc_json = json.dumps(new_desc)
+                latest_vd_row = latest_vd_result.scalar_one_or_none()
+
+                if latest_vd_row is None:
+                    has_new_image = True  # No prior description — must analyse
+                else:
+                    new_img_result = await session.execute(
+                        select(CaseImage)
+                        .where(
+                            CaseImage.case_id == case_id,
+                            CaseImage.created_at > latest_vd_row.created_at,
+                        )
+                        .limit(1)
+                    )
+                    has_new_image = new_img_result.scalar_one_or_none() is not None
+
+                if has_new_image:
+                    image_bytes = await _download_case_images(session, case_id)
+                    desc_prompt = ImageAnalysisPrompts.get_description_with_context().format(
+                        personal_particulars=patient_particulars,
+                        previous_conversation=conv_history,
+                    )
+                    desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
+                    new_desc = gemini_client.extract_json(desc_text)
+                    new_desc_json = json.dumps(new_desc)
+                    logger.info("image_reanalysis_ran", case_id=case_id, new_round=new_round)
+                else:
+                    new_desc_json, new_desc = await _get_latest_visual_desc_full(session, case_id)
+                    logger.info("image_reanalysis_skipped", case_id=case_id, new_round=new_round, reason="no_new_image")
             else:
                 # No visible lesion — no image to describe; carry forward empty description
                 new_desc = {}

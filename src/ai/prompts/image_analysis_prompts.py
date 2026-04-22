@@ -48,7 +48,68 @@ If the image is completely unusable: {"answer":"no", "reason":"brief explanation
 """
 
     # ------------------------------------------------------------------
-    # 2. Visual description (no prior context)
+    # 2. Inspect + describe (combined gate — single call replaces two)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def inspect_and_describe() -> str:
+        """
+        Combined adequacy gate + visual description in one Gemini call.
+
+        Replaces running inspect_images() and get_description() sequentially.
+        Gemini checks the image quality first; if adequate it returns the full
+        lesion description in the same response. Saves one Gemini call (~5s).
+
+        Template vars: {personal_particulars}
+
+        Returns one of:
+          {"adequate": "no",  "reason": "<why rejected>"}
+          {"adequate": "yes", "type_of_lesion": ..., ... (full description schema)}
+
+        Used in: Celery `analyse_images_task` (merged initial analysis).
+        """
+        return """You are a dermatology assistant reviewing an image submitted by a patient.
+
+STEP 1 — Adequacy check:
+Decide if the image is usable for skin analysis. Be LENIENT — accept if it shows any part of human skin or body, even if slightly blurry, low resolution, poorly lit, or taken at an angle. Patients are not professional photographers.
+
+Only reject if:
+- No human skin or body part at all (random object, plain background, text document)
+- Completely black, completely white, or fully corrupted/unreadable
+- Clearly a screenshot of a UI, cartoon, or digital graphic with no real skin
+
+If in doubt, accept it.
+
+If the image is NOT adequate, return exactly:
+{{"adequate": "no", "reason": "<brief explanation>"}}
+
+STEP 2 — If adequate, describe the lesion:
+Provide a structured JSON of the visible lesion(s). Combine all images into one response.
+
+Personal particulars:
+{personal_particulars}
+
+If the image IS adequate, return this JSON (include adequate: yes):
+
+{{"adequate": "yes",
+ "type_of_lesion": "<describe the lesion type>",
+ "site": "<mention site of the lesion>",
+ "count": "<mention the number of lesions>",
+ "arrangement": "<describe the distribution>",
+ "size": "<approximate lesion size>",
+ "color_pattern": "<describe the color and pattern>",
+ "border": "<mention if well-defined or ill-defined>",
+ "surface_changes": "<describe scaling, crusting, ulceration, etc.>",
+ "presence_of_exudate_or_discharge": "<yes/no, and describe if present>",
+ "surrounding_skin_changes": "<mention any erythema, dryness, etc.>",
+ "secondary_changes": "<mention any secondary changes>",
+ "pattern_or_shape": "<describe any specific shape or distribution>",
+ "additional_notes": "<mention any extra details>",
+ "overall_description": "<provide a paragraph summarizing the lesion>"}}
+"""
+
+    # ------------------------------------------------------------------
+    # 3. Visual description (no prior context)
     # ------------------------------------------------------------------
 
     @staticmethod
