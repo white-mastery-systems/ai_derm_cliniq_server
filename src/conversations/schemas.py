@@ -55,6 +55,7 @@ class AnswerItem(BaseModel):
     """One patient answer for a specific question in the current round."""
     question_index: int = Field(ge=0, description="0-indexed position in the question set")
     answer: str = Field(min_length=1, max_length=2000)
+    image_url: str | None = Field(default=None, description="Optional signed URL of an image uploaded with this answer via POST /cases/{id}/images")
 
 
 class SubmitAnswersRequest(BaseModel):
@@ -85,6 +86,7 @@ class MessageOut(BaseModel):
     content: str                    # Raw content (JSON for AI questions, plain text for answers)
     round_number: int
     question_index: int | None
+    image_url: str | None = None    # Signed URL of image attached to this answer (patient only)
     created_at: datetime
 
     model_config = {"from_attributes": True}

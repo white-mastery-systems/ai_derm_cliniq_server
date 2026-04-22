@@ -249,6 +249,7 @@ async def submit_answers(
             content=ans.answer,
             round_number=current_round,
             question_index=ans.question_index,
+            image_url=ans.image_url,
         )
         db.add(msg)
 
@@ -366,6 +367,7 @@ async def get_history(
             content=m.content,
             round_number=m.round_number,
             question_index=m.question_index,
+            image_url=m.image_url,
             created_at=m.created_at,
         )
         for m in all_messages

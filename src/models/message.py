@@ -92,6 +92,11 @@ class Message(TimestampMixin, Base):
         nullable=True,
         comment="Position within a round (0-indexed). NULL for free-text replies.",
     )
+    image_url: Mapped[str | None] = mapped_column(
+        String(2000),
+        nullable=True,
+        comment="Signed GCS URL of an image the patient attached to this answer",
+    )
 
     # ------------------------------------------------------------------ #
     # Relationship
