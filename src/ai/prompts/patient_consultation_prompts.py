@@ -388,7 +388,7 @@ Respond only in the following JSON format:
         Generate a structured patient case summary (<150 words) for handoff to doctor.
 
         Template vars: {conversation_history}, {visual_language_model_text},
-                       {possible_diagnoses}, {follow_up_context}
+                       {possible_diagnoses}, {personal_particulars}, {follow_up_context}
         follow_up_context is an empty string for new complaints.
         Returns: {{"case_summary": "...", "display_statements": [...]}}
         Used in: final step of patient consultation before doctor review.
@@ -408,6 +408,9 @@ Your output should follow this exact structure for easy parsing:
 If this is a follow-up visit (previous visit context provided below), begin the History section with a reference to the previous visit diagnosis and note whether symptoms have improved, worsened, or stayed the same.
 
 Do not skip any part of the context provided. Do not fabricate any facts that are not present.
+
+Patient particulars:
+{personal_particulars}
 
 Conversation history:
 {conversation_history}

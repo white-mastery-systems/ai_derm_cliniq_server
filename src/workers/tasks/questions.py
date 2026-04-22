@@ -371,7 +371,7 @@ def generate_questions_task(self, case_id: str) -> None:
                 if questions_data.get("doubt_present") == "no":
                     logger.info("no_more_doubts_finalizing", case_id=case_id)
                     case.question_round = case.max_question_rounds
-                    await _finalize_case(session, case_id, conv_history, visual_desc, differential, follow_up_context)
+                    await _finalize_case(session, case_id, conv_history, visual_desc, differential, follow_up_context, patient_particulars)
                     await session.commit()
                     await engine.dispose()
                     return
@@ -491,7 +491,8 @@ def refine_analysis_task(self, case_id: str) -> None:
                     differential = await _get_latest_differential(session, case_id)
                     diff_json = differential.diagnosis_json if differential else "{}"
                     guard_follow_up = await _get_follow_up_context(session, case)
-                    await _finalize_case(session, case_id, conv_history, visual_desc, diff_json, guard_follow_up)
+                    guard_particulars = await _get_patient_particulars(session, case.patient_id)
+                    await _finalize_case(session, case_id, conv_history, visual_desc, diff_json, guard_follow_up, guard_particulars)
                     await session.commit()
                 raise Ignore()
 
@@ -604,7 +605,7 @@ def refine_analysis_task(self, case_id: str) -> None:
 
             if new_round >= max_rounds:
                 # Max rounds reached — finalize
-                await _finalize_case(session, case_id, conv_history, visual_desc, new_diff_json, follow_up_context)
+                await _finalize_case(session, case_id, conv_history, visual_desc, new_diff_json, follow_up_context, patient_particulars)
             # else: generate_questions_task will be enqueued after commit
 
             should_generate_more = new_round < max_rounds
@@ -648,18 +649,21 @@ async def _finalize_case(
     visual_desc: str,
     differential_json: str,
     follow_up_context: str = "",
+    patient_particulars: str = "Age: unknown, Sex: unknown",
 ) -> None:
     """
     Generate final case summary and mark consultation as complete.
     Called when max_question_rounds is reached or doctor doubts end.
     follow_up_context is passed through from the Q&A tasks so the summary
     references the previous visit when this is a follow-up case.
+    patient_particulars provides age/sex so the summary is never "Not provided".
     """
     try:
         summary_prompt = PatientConsultationPrompts.make_case_summary().format(
             conversation_history=conv_history,
             visual_language_model_text=visual_desc,
             possible_diagnoses=differential_json,
+            personal_particulars=patient_particulars,
             follow_up_context=follow_up_context,
         )
         summary_text = call_llm(summary_prompt, json_mode=True)
