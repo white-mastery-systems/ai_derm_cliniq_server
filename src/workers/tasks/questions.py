@@ -303,15 +303,11 @@ def generate_questions_task(self, case_id: str) -> None:
                 if case.has_visible_lesion:
                     # Image-based first questions
                     image_bytes = await _download_case_images(session, case_id)
-                    try:
-                        prompt = ImageAnalysisPrompts.first_question().format(
-                            follow_up_context=follow_up_context,
-                        )
-                        response_text = call_llm(prompt, images=image_bytes, json_mode=True)
-                        questions_data = gemini_client.extract_json(response_text)
-                    except AIProviderException as exc:
-                        await _fail_case(session, case_id, f"Question generation failed: {exc}")
-                        raise Ignore() from exc
+                    prompt = ImageAnalysisPrompts.first_question().format(
+                        follow_up_context=follow_up_context,
+                    )
+                    response_text = call_llm(prompt, images=image_bytes, json_mode=True)
+                    questions_data = gemini_client.extract_json(response_text)
                 else:
                     # Complaint-only first questions (no visible lesion path)
                     age, sex = "unknown", "unknown"
@@ -322,39 +318,31 @@ def generate_questions_task(self, case_id: str) -> None:
                         elif part.startswith("Sex:"):
                             sex = part.split(":", 1)[1].strip()
                     complaint = case.presenting_complaint or ""
-                    try:
-                        prompt = PatientConsultationPrompts.generate_questions_from_complaints().format(
-                            age=age,
-                            sex=sex,
-                            complaints=complaint,
-                            follow_up_context=follow_up_context,
-                        )
-                        response_text = call_llm(prompt, json_mode=True)
-                        questions_data = gemini_client.extract_json(response_text)
-                    except AIProviderException as exc:
-                        await _fail_case(session, case_id, f"Question generation failed: {exc}")
-                        raise Ignore() from exc
+                    prompt = PatientConsultationPrompts.generate_questions_from_complaints().format(
+                        age=age,
+                        sex=sex,
+                        complaints=complaint,
+                        follow_up_context=follow_up_context,
+                    )
+                    response_text = call_llm(prompt, json_mode=True)
+                    questions_data = gemini_client.extract_json(response_text)
 
             else:
                 # Round 1+: single combined call — think medically + generate patient question
                 conv_history = _build_conversation_history(messages)
                 prev_questions = _build_previous_questions_text(messages)
 
-                try:
-                    combined_prompt = PatientConsultationPrompts.generate_question_from_context().format(
-                        conversation=conv_history,
-                        visual_description=visual_desc,
-                        diagnoses=differential,
-                        previous_questions=prev_questions,
-                        prescription="None",
-                        datetime=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-                        follow_up_context=follow_up_context,
-                    )
-                    response_text = call_llm(combined_prompt, json_mode=True)
-                    questions_data = gemini_client.extract_json(response_text)
-                except AIProviderException as exc:
-                    await _fail_case(session, case_id, f"Question generation failed: {exc}")
-                    raise Ignore() from exc
+                combined_prompt = PatientConsultationPrompts.generate_question_from_context().format(
+                    conversation=conv_history,
+                    visual_description=visual_desc,
+                    diagnoses=differential,
+                    previous_questions=prev_questions,
+                    prescription="None",
+                    datetime=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+                    follow_up_context=follow_up_context,
+                )
+                response_text = call_llm(combined_prompt, json_mode=True)
+                questions_data = gemini_client.extract_json(response_text)
 
                 # If no more doubts — finalize early (no more questions needed).
                 # Also set question_round = max_question_rounds so GET /chat
@@ -494,35 +482,27 @@ def refine_analysis_task(self, case_id: str) -> None:
             follow_up_context = await _get_follow_up_context(session, case)
 
             # Step 1: Revised differential from conversation (works for both paths)
-            try:
-                diff_prompt = PatientConsultationPrompts.diagnosis_analysis_from_conversation().format(
-                    conversation_history=conv_history,
-                    previous_differential=differential,
-                    visual_description=visual_desc,
-                    prescription="None",
-                    follow_up_context=follow_up_context,
-                )
-                diff_text = call_llm(diff_prompt, json_mode=True)
-                new_diff = gemini_client.extract_json(diff_text)
-                new_diff_json = json.dumps(new_diff)
-            except AIProviderException as exc:
-                await _fail_case(session, case_id, f"Analysis refinement failed: {exc}")
-                raise Ignore() from exc
+            diff_prompt = PatientConsultationPrompts.diagnosis_analysis_from_conversation().format(
+                conversation_history=conv_history,
+                previous_differential=differential,
+                visual_description=visual_desc,
+                prescription="None",
+                follow_up_context=follow_up_context,
+            )
+            diff_text = call_llm(diff_prompt, json_mode=True)
+            new_diff = gemini_client.extract_json(diff_text)
+            new_diff_json = json.dumps(new_diff)
 
             # Step 2: Updated visual description — image path only
             if case.has_visible_lesion:
                 image_bytes = await _download_case_images(session, case_id)
-                try:
-                    desc_prompt = ImageAnalysisPrompts.get_description_with_context().format(
-                        personal_particulars=patient_particulars,
-                        previous_conversation=conv_history,
-                    )
-                    desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
-                    new_desc = gemini_client.extract_json(desc_text)
-                    new_desc_json = json.dumps(new_desc)
-                except AIProviderException as exc:
-                    await _fail_case(session, case_id, f"Visual description update failed: {exc}")
-                    raise Ignore() from exc
+                desc_prompt = ImageAnalysisPrompts.get_description_with_context().format(
+                    personal_particulars=patient_particulars,
+                    previous_conversation=conv_history,
+                )
+                desc_text = call_llm(desc_prompt, images=image_bytes, json_mode=True)
+                new_desc = gemini_client.extract_json(desc_text)
+                new_desc_json = json.dumps(new_desc)
             else:
                 # No visible lesion — no image to describe; carry forward empty description
                 new_desc = {}
@@ -634,6 +614,9 @@ async def _finalize_case(
         summary_text = call_llm(summary_prompt, json_mode=True)
         summary_data = gemini_client.extract_json(summary_text)
         case_summary = summary_data.get("case_summary", "Consultation complete.")
+        # LLM occasionally returns case_summary as a nested dict instead of a string
+        if isinstance(case_summary, dict):
+            case_summary = json.dumps(case_summary)
     except (AIProviderException, Exception) as exc:
         logger.warning("make_case_summary_failed", case_id=case_id, error=str(exc))
         case_summary = "AI consultation rounds complete. Please review with your doctor."

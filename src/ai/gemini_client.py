@@ -2,12 +2,12 @@
 ai/gemini_client.py — Gemini API Client
 =========================================
 
-Thin wrapper around the google-generativeai SDK.
+Thin wrapper around the google-genai SDK (v1.x).
 
 WHY A WRAPPER?
 --------------
 Centralising Gemini calls here means:
-- One place to swap models (gemini-2.0-flash → gemini-pro, etc.)
+- One place to swap models (gemini-2.5-flash → gemini-pro, etc.)
 - One place to add retry logic, logging, and error normalisation
 - Tests can mock `call_gemini` without touching the real SDK
 
@@ -28,6 +28,12 @@ JSON EXTRACTION
 ---------------
 Gemini sometimes wraps JSON in markdown code fences (```json ... ```).
 `extract_json()` strips these fences before `json.loads()`.
+
+THINKING
+--------
+gemini-2.5-flash enables thinking by default (adds 2000-4000 hidden
+tokens per call, increasing latency by 10-30s). We disable it via
+ThinkingConfig(thinking_budget=0) — requires the new google-genai SDK.
 """
 
 import json
@@ -39,18 +45,31 @@ from src.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Gemini finish_reason → human-readable name for logs
+_FINISH_REASON_NAMES: dict[str, str] = {
+    "FINISH_REASON_UNSPECIFIED": "UNSPECIFIED",
+    "STOP":        "STOP",        # normal completion
+    "MAX_TOKENS":  "MAX_TOKENS",  # hit output token limit — JSON will be truncated
+    "SAFETY":      "SAFETY",      # blocked by safety filter
+    "RECITATION":  "RECITATION",  # blocked for recitation
+    "OTHER":       "OTHER",
+    "LANGUAGE":    "LANGUAGE",
+    "BLOCKLIST":   "BLOCKLIST",
+}
 
-def _get_model():
+# Normal finish reasons — anything else means early termination
+_OK_FINISH_REASONS = {"FINISH_REASON_UNSPECIFIED", "STOP"}
+
+
+def _get_client_and_model() -> tuple:
     """
-    Build and return a configured GenerativeModel.
+    Build and return a (Client, model_name) tuple.
 
     Model name is resolved at call time from the registry:
-        Redis override  →  settings.GEMINI_MODEL  →  "gemini-2.0-flash"
+        Redis override  →  settings.GEMINI_MODEL  →  "gemini-2.5-flash"
 
-    This means the admin panel can change the model without a restart.
     Raises AIProviderException if GEMINI_API_KEY is not set.
     """
-    # Import here to avoid circular imports at module load time
     from src.ai.model_registry import get_gemini_model
     model_name = get_gemini_model()
 
@@ -59,12 +78,12 @@ def _get_model():
             message="GEMINI_API_KEY is not configured. Set it in .env to enable AI analysis."
         )
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        return genai.GenerativeModel(model_name), model_name
+        from google import genai
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        return client, model_name
     except ImportError:
         raise AIProviderException(
-            message="google-generativeai package not installed. Run: pip install google-generativeai"
+            message="google-genai package not installed. Run: pip install google-genai"
         )
     except Exception as exc:
         logger.error("gemini_client_init_failed", error=str(exc))
@@ -90,42 +109,91 @@ def call_gemini(prompt: str, images: list[bytes] | None = None, json_mode: bool 
     ------
     AIProviderException — API key missing, SDK not installed, or call failed
     """
-    model, model_name = _get_model()
+    client, model_name = _get_client_and_model()
 
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
 
-        parts: list = []
+        contents: list = []
 
         # Attach images first so Gemini processes visual context before the prompt
         if images:
             for img_bytes in images:
-                parts.append(
-                    genai.protos.Part(
-                        inline_data=genai.protos.Blob(
+                contents.append(
+                    types.Part(
+                        inline_data=types.Blob(
                             mime_type="image/jpeg",
                             data=img_bytes,
                         )
                     )
                 )
 
-        parts.append(prompt)
+        contents.append(prompt)
 
-        generation_config: dict = {"max_output_tokens": 4096}
-        if json_mode:
-            generation_config["response_mime_type"] = "application/json"
-
-        response = model.generate_content(
-            parts,
-            generation_config=generation_config,
-            request_options={"timeout": 45},
+        config = types.GenerateContentConfig(
+            max_output_tokens=8192,
+            # Disable thinking — saves 2000-4000 tokens and 10-30s per call.
+            # gemini-2.5-flash enables thinking by default; budget=0 turns it off.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            response_mime_type="application/json" if json_mode else None,
         )
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+        candidate = response.candidates[0] if response.candidates else None
+
+        # Token usage
+        usage = response.usage_metadata
+        prompt_tokens = usage.prompt_token_count     if usage else None
+        output_tokens = usage.candidates_token_count if usage else None
+        total_tokens  = usage.total_token_count      if usage else None
+
+        # finish_reason is a FinishReason enum — use .name for the string key
+        finish_reason_enum = candidate.finish_reason if candidate else None
+        finish_reason_name = finish_reason_enum.name if finish_reason_enum else "UNKNOWN"
+
+        logger.debug(
+            "gemini_debug",
+            model=model_name,
+            has_images=bool(images),
+            json_mode=json_mode,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            finish_reason=finish_reason_name,
+            finish_reason_label=_FINISH_REASON_NAMES.get(finish_reason_name, finish_reason_name),
+            max_output_tokens=8192,
+        )
+
+        if candidate and finish_reason_name not in _OK_FINISH_REASONS:
+            logger.warning(
+                "gemini_early_termination",
+                model=model_name,
+                finish_reason=finish_reason_name,
+                finish_reason_label=_FINISH_REASON_NAMES.get(finish_reason_name, finish_reason_name),
+                output_tokens=output_tokens,
+                max_output_tokens=8192,
+            )
+            raise AIProviderException(
+                message=f"Gemini terminated early: finish_reason={finish_reason_name}, "
+                        f"output_tokens={output_tokens}/8192"
+            )
+
         text = response.text
         logger.info(
             "gemini_call_ok",
             model=model_name,
             has_images=bool(images),
             image_count=len(images) if images else 0,
+            prompt_tokens=prompt_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            finish_reason=finish_reason_name,
             response_length=len(text),
         )
         return text
@@ -168,6 +236,21 @@ def extract_json(text: str) -> dict:
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
+        # "Extra data" means Gemini returned valid JSON followed by extra text
+        # (e.g. a second JSON block or prose commentary). raw_decode() parses
+        # only the first valid object and ignores everything after it.
+        if "Extra data" in str(exc):
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(cleaned)
+                logger.warning(
+                    "gemini_json_extra_data_recovered",
+                    extra_data_pos=exc.pos,
+                    raw_text=text[:200],
+                )
+                return obj
+            except json.JSONDecodeError:
+                pass
+
         logger.warning("gemini_json_parse_failed", raw_text=text[:200], error=str(exc))
         raise AIProviderException(
             message=f"Gemini returned invalid JSON: {exc}. Raw: {text[:200]!r}"

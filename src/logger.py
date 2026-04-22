@@ -130,10 +130,9 @@ def setup_logging() -> None:
     file_handler = _build_file_handler()
     root_logger.addHandler(file_handler)
 
-    # Silence noisy loggers
-    logging.getLogger("sqlalchemy.engine").setLevel(
-        logging.DEBUG if settings.DEBUG else logging.WARNING
-    )
+    # Silence noisy loggers — SQLAlchemy query logs are never useful at runtime
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 
