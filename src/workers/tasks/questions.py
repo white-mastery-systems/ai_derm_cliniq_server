@@ -704,8 +704,9 @@ async def _finalize_case(
 # ------------------------------------------------------------------ #
 
 async def _fail_task_on_timeout_q(case_id: str, task_name: str) -> None:
-    engine = _make_engine()
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        await _fail_case(session, case_id, f"{task_name} timed out")
-    await engine.dispose()
+    # Q&A tasks must NOT set ai_status=FAILED — that field represents the
+    # initial image analysis, which already completed. Overwriting it would
+    # block submit_answers and finish_conversation for the patient.
+    # Just log the failure and leave the case in its current state so the
+    # patient can still use "Finish Early" to exit the conversation.
+    logger.error("qa_task_timed_out", case_id=case_id, task=task_name)
