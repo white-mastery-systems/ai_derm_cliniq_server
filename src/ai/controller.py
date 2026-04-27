@@ -36,7 +36,7 @@ from src.ai.schemas import (
     CaseQueryRequest,
     CaseQueryResponse,
 )
-from src.auth.dependencies import get_current_user, require_patient
+from src.auth.dependencies import get_current_user
 from src.database.core import get_async_session
 from src.models.user import User
 
@@ -51,10 +51,10 @@ router = APIRouter()
 )
 async def trigger_analysis(
     case_id: str,
-    patient: User = Depends(require_patient),
+    user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
 ) -> AnalysisAcceptedResponse:
-    return await service.trigger_analysis(db, patient, case_id)
+    return await service.trigger_analysis(db, user, case_id)
 
 
 @router.get(

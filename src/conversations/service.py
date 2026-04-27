@@ -62,8 +62,13 @@ logger = get_logger(__name__)
 # Helpers
 # ------------------------------------------------------------------ #
 
-async def _get_case_with_access(db: AsyncSession, case_id: str, user: User) -> Case:
-    result = await db.execute(select(Case).where(Case.id == case_id))
+async def _get_case_with_access(
+    db: AsyncSession, case_id: str, user: User, for_update: bool = False
+) -> Case:
+    stmt = select(Case).where(Case.id == case_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     case = result.scalar_one_or_none()
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
@@ -206,7 +211,10 @@ async def submit_answers(
     if patient.role != UserRole.PATIENT:
         raise ForbiddenException(message="Only the patient can submit answers")
 
-    case = await _get_case_with_access(db, case_id, patient)
+    # Row-level lock — serialises concurrent submissions for the same case.
+    # The second request blocks here until the first commits, at which point
+    # the patient messages exist and the conflict check below catches it.
+    case = await _get_case_with_access(db, case_id, patient, for_update=True)
 
     if case.ai_status != AiStatus.COMPLETED:
         raise BadRequestException(

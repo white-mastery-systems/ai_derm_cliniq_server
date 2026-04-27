@@ -100,14 +100,14 @@ async def _count_images(db: AsyncSession, case_id: str) -> int:
 
 async def trigger_analysis(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
 ) -> AnalysisAcceptedResponse:
     """
     Validate the case and enqueue the Celery analysis chain.
 
     Guards:
-    1. Case exists + patient owns it
+    1. Case exists + user has access (patient owns it OR doctor is assigned)
     2. Consent given
     3. At least one image uploaded
     4. ai_status == PENDING (idempotency — no double-enqueue)
@@ -119,13 +119,9 @@ async def trigger_analysis(
 
     Returns 202 Accepted with task_id.
     """
-    # Only patients can trigger analysis
-    if patient.role != UserRole.PATIENT:
-        raise ForbiddenException(message="Only the patient can trigger AI analysis")
-
     # with_for_update acquires a row-level lock so concurrent POST /analyze
     # requests serialise here — the second request reads PROCESSING and hits 409.
-    case = await _get_case_with_access(db, case_id, patient, for_update=True)
+    case = await _get_case_with_access(db, case_id, user, for_update=True)
 
     # Consent gate
     if not case.consent_ai_analysis:

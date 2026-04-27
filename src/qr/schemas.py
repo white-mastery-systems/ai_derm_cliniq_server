@@ -57,9 +57,9 @@ class QRScanResponse(BaseModel):
 
 class PatientCodeAccessResponse(BaseModel):
     """
-    Returned when a doctor accesses a case via patient code.
+    Returned when a doctor accesses a case via its display ID (e.g. "AI-9135").
     Same shape as QRScanResponse so the Flutter app handles both identically.
     """
     case_id: str
     patient_name: str
-    message: str = "Access granted via patient code."
+    message: str = "Access granted via case ID."

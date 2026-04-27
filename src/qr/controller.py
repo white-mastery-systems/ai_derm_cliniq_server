@@ -84,23 +84,25 @@ async def scan_qr(
 
 
 @router.post(
-    "/by-code/{patient_code}",
+    "/by-display-id/{display_id}",
     response_model=PatientCodeAccessResponse,
     status_code=status.HTTP_200_OK,
-    summary="Access a patient's case via patient code (doctor only)",
+    summary="Access a specific case via its display ID (doctor only)",
 )
-async def access_by_patient_code(
-    patient_code: str,
+async def access_by_display_id(
+    display_id: str,
     doctor: User = Depends(require_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> PatientCodeAccessResponse:
     """
-    Alternative to QR scan — doctor types the patient's code instead of scanning.
+    Alternative to QR scan — doctor types the case ID shown on the patient's
+    QR screen (e.g. "AI-9135") instead of scanning.
 
-    Finds the patient's latest AI-completed case, auto-assigns the doctor,
-    and returns case_id so the Flutter app navigates to the case review screen.
+    Looks up that specific case, auto-assigns the doctor, and returns case_id
+    so the Flutter app navigates to the case review screen.
 
-    Returns 404 if the patient code doesn't exist.
-    Returns 400 if the patient has no completed case yet.
+    Returns 400 if the format is invalid (must be AI-XXXX).
+    Returns 404 if no case exists with that ID.
+    Returns 400 if the case's AI analysis is not yet complete.
     """
-    return await service.access_by_patient_code(db, doctor, patient_code)
+    return await service.access_by_display_id(db, doctor, display_id)

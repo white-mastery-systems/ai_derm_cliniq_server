@@ -49,7 +49,6 @@ from src.exceptions import (
 from src.logger import get_logger
 from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
-from src.models.patient_profile import PatientProfile
 from src.models.qr_token import QRToken
 from src.models.user import User, UserRole
 from src.qr.schemas import GenerateQRRequest, PatientCodeAccessResponse, QRScanResponse, QRTokenResponse
@@ -184,62 +183,61 @@ async def scan_qr(
     )
 
 
-async def access_by_patient_code(
+async def access_by_display_id(
     db: AsyncSession,
     doctor: User,
-    patient_code: str,
+    display_id: str,
 ) -> PatientCodeAccessResponse:
     """
-    Grant a doctor access to a patient's latest completed case via patient code.
+    Grant a doctor access to a specific case via its display ID (e.g. "AI-9135").
 
     Same outcome as scan_qr() — doctor is auto-assigned, case_id returned —
-    but the entry method is a human-readable code instead of a QR token.
+    but the entry method is the human-readable case ID shown on the patient's
+    QR screen instead of scanning the QR token.
     """
     if doctor.role != UserRole.DOCTOR:
-        raise ForbiddenException(message="Only doctors can access cases via patient code")
+        raise ForbiddenException(message="Only doctors can access cases via case ID")
 
-    # Find patient profile by code (case-insensitive)
-    result = await db.execute(
-        select(PatientProfile)
-        .where(PatientProfile.patient_code == patient_code.upper())
-        .options(selectinload(PatientProfile.user))
-    )
-    profile = result.scalar_one_or_none()
-    if profile is None:
-        raise CaseNotFoundException(message=f"No patient found with code: {patient_code}")
+    # Parse "AI-9135" → 9135
+    normalized = display_id.strip().upper()
+    if not normalized.startswith("AI-") or not normalized[3:].isdigit():
+        raise BadRequestException(
+            message="Invalid case ID format. Expected format: AI-XXXX (e.g. AI-9135)"
+        )
+    case_number = int(normalized[3:])
 
-    patient = profile.user
-
-    # Find their latest AI-completed case
+    # Look up the specific case by its sequential number
     result = await db.execute(
         select(Case)
-        .where(Case.patient_id == patient.id)
-        .where(Case.ai_status == AiStatus.COMPLETED)
-        .order_by(Case.created_at.desc())
-        .limit(1)
+        .where(Case.case_number == case_number)
+        .options(selectinload(Case.patient))
     )
     case = result.scalar_one_or_none()
     if case is None:
+        raise CaseNotFoundException(message=f"No case found with ID: {normalized}")
+
+    if case.ai_status != AiStatus.COMPLETED:
         raise BadRequestException(
-            message="This patient has no completed AI analysis yet. "
-                    "Ask the patient to complete their case first."
+            message="This case's AI analysis is not yet complete. "
+                    "Ask the patient to finish their consultation first."
         )
 
     # Auto-assign doctor (same logic as QR scan)
     if case.doctor_id is None:
         case.doctor_id = doctor.id
-        logger.info("doctor_auto_assigned_via_code", case_id=case.id, doctor_id=doctor.id)
+        logger.info("doctor_auto_assigned_via_display_id", case_id=case.id, doctor_id=doctor.id)
     elif case.doctor_id != doctor.id:
         logger.info(
-            "code_access_case_already_assigned",
+            "display_id_access_case_already_assigned",
             case_id=case.id,
             existing_doctor=case.doctor_id,
             scanning_doctor=doctor.id,
         )
 
-    logger.info("patient_code_access", case_id=case.id, doctor_id=doctor.id, patient_code=patient_code.upper())
+    logger.info("display_id_access", case_id=case.id, doctor_id=doctor.id, display_id=normalized)
 
     return PatientCodeAccessResponse(
         case_id=case.id,
-        patient_name=patient.full_name,
+        patient_name=case.patient.full_name,
+        message="Access granted via case ID.",
     )
