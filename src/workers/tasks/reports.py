@@ -46,7 +46,7 @@ from sqlalchemy.pool import NullPool
 from src.ai.llm_router import call_llm, extract_json
 from src.ai.prompts.doctor_review_prompts import DoctorReviewPrompts
 from src.config import settings
-from src.exceptions import AIProviderException
+from src.exceptions import AIProviderException, StorageException
 from src.logger import get_logger
 from src.models.base import new_uuid
 from src.models.case import Case
@@ -498,6 +498,9 @@ def generate_report_task(self, case_id: str) -> None:
         _run_async(_run())
     except SoftTimeLimitExceeded:
         logger.error("generate_report_task_timeout", case_id=case_id)
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("generate_report_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("generate_report_task_unexpected_error", case_id=case_id)
+        raise

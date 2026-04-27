@@ -11,8 +11,17 @@ TRIGGER GUARDS
 - Doctor must be assigned to the case (case.doctor_id == doctor.id)
 - DoctorReview must exist and have review_status=COMPLETED
   (no point generating a report before the doctor is done)
-- CaseReport must not already exist — 409 if it does
-  (prevents duplicate PDFs; delete + retry is a future feature)
+- If a CaseReport already exists:
+    - review.updated_at > report.generated_at  → stale report, regenerate
+      (doctor revised their diagnosis after the last PDF was generated)
+    - review.updated_at <= report.generated_at → report is current → 409
+
+REGENERATION FLOW (stale report)
+---------------------------------
+When the review was revised after the last PDF:
+  1. Best-effort delete of the old GCS file (logged, non-fatal)
+  2. Hard delete of the old CaseReport DB row
+  3. Enqueue a new generate_report_task — returns 202 as normal
 
 GET ACCESS
 ----------
@@ -70,7 +79,10 @@ async def trigger_report(
     - Doctor only
     - Doctor must be assigned to the case
     - Doctor review must be COMPLETED
-    - Report must not already exist (409)
+    - If a report already exists and the review has NOT been revised since
+      the last PDF was built → 409 (report is still current)
+    - If a report already exists but the review WAS revised after the PDF
+      was built → delete the stale report and regenerate
 
     Returns 202 Accepted with task_id immediately.
     """
@@ -103,19 +115,41 @@ async def trigger_report(
         )
 
     if case.report is not None:
-        raise ConflictException(
-            message="A report already exists for this case. "
-                    "Fetch it via GET /cases/{id}/report."
+        review_updated = case.doctor_review.updated_at
+        report_generated = case.report.generated_at
+
+        # Both timestamps are timezone-aware; strip tz for comparison if needed
+        if review_updated <= report_generated:
+            raise ConflictException(
+                message="A report already exists and the diagnosis has not changed. "
+                        "Fetch it via GET /cases/{id}/report."
+            )
+
+        # Review was revised after the last PDF — delete stale report and regenerate
+        logger.info(
+            "report_stale_regenerating",
+            case_id=case_id,
+            report_generated_at=str(report_generated),
+            review_updated_at=str(review_updated),
         )
+        old_gcs_path = case.report.gcs_path
+        await db.delete(case.report)
+        await db.flush()
+
+        # Best-effort GCS cleanup — don't block regeneration if delete fails
+        try:
+            gcs.delete_file(old_gcs_path)
+        except Exception as exc:
+            logger.warning("stale_report_gcs_delete_failed", path=old_gcs_path, error=str(exc))
 
     # Enqueue the Celery task
-    result = generate_report_task.delay(case_id)
+    task = generate_report_task.delay(case_id)
 
-    logger.info("report_generation_triggered", case_id=case_id, task_id=result.id)
+    logger.info("report_generation_triggered", case_id=case_id, task_id=task.id)
 
     return ReportTriggerResponse(
         case_id=case_id,
-        task_id=result.id,
+        task_id=task.id,
     )
 
 

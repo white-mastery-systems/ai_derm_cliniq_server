@@ -248,7 +248,7 @@ async def update_review(
     if request.selected_differentials is not None:
         review.selected_differentials = json.dumps(request.selected_differentials)
         # Auto-sync confirmed_diagnosis unless explicitly overridden in this request
-        if request.confirmed_diagnosis is None:
+        if request.confirmed_diagnosis is None and request.selected_differentials:
             review.confirmed_diagnosis = json.dumps(request.selected_differentials)
             case.case_title = request.selected_differentials[0]
     if request.confidence_level is not None:
@@ -270,7 +270,8 @@ async def update_review(
 
     if request.review_status is not None:
         review.review_status = request.review_status
-        if request.review_status == ReviewStatus.COMPLETED and review.reviewed_at is None:
+        if request.review_status == ReviewStatus.COMPLETED:
+            # Always refresh reviewed_at so revisions show the latest completion time.
             review.reviewed_at = datetime.now(tz=timezone.utc)
 
     # Update case clinical_status when doctor completes review

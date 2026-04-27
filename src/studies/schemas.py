@@ -23,3 +23,4 @@ class SubmitStudyResponse(BaseModel):
     submission_id: str
     specimen_code: str | None
     report_url: str | None
+    pdf_generated: bool

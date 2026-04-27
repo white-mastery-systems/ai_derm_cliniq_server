@@ -230,7 +230,7 @@ async def forgot_password(
         "The OTP expires in 15 minutes and is single-use."
     ),
 )
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 async def reset_password(
     request: Request,  # noqa: ARG001
     body: ResetPasswordRequest,
@@ -266,7 +266,9 @@ async def resend_email_verification(
         "The OTP expires in 30 minutes and is single-use."
     ),
 )
+@limiter.limit("5/minute")
 async def verify_email(
+    request: Request,  # noqa: ARG001
     body: VerifyEmailOTPRequest,
     db: AsyncSession = Depends(get_async_session),
     current_user: User = Depends(get_current_user),

@@ -338,4 +338,5 @@ async def submit_labelling(
         submission_id=submission_id,
         specimen_code=specimen_code,
         report_url=report_url,
+        pdf_generated=report_url is not None,
     )

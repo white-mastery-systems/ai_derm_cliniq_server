@@ -37,6 +37,7 @@ from src.cases.schemas import (
     AdjacentVisitsResponse,
     AssessmentDepthRequest,
     AssessmentDepthResponse,
+    BookmarkResponse,
     CaseCreateRequest,
     CaseResponse,
     CaseSearchItem,
@@ -146,6 +147,7 @@ def _to_case_response(
         body_location=case.body_location,
         symptom_progression=case.symptom_progression,
         symptom_tags=_parse_symptom_tags(case.symptom_tags),
+        is_bookmarked=case.is_bookmarked,
         presenting_complaint=case.presenting_complaint,
         case_summary=case.case_summary,
         celery_task_id=case.celery_task_id,
@@ -195,6 +197,7 @@ def _to_summary_response(
         symptom_progression=case.symptom_progression,
         symptom_tags=_parse_symptom_tags(case.symptom_tags),
         case_summary=case.case_summary,
+        is_bookmarked=case.is_bookmarked,
         image_count=image_count,
         patient_name=patient_name,
         patient_avatar_url=patient_avatar_url,
@@ -363,6 +366,7 @@ async def list_cases(
     page_size: int = 20,
     clinical_status: str | None = None,
     is_for_self: bool | None = None,
+    bookmarked: bool | None = None,
 ) -> PaginatedCasesResponse:
     """
     Paginated list of cases filtered by the user's role.
@@ -370,6 +374,8 @@ async def list_cases(
     Patient → own cases only.
     Doctor  → assigned cases only.
     Admin   → all cases.
+
+    bookmarked=true  → only bookmarked cases (Important Cases list, doctor-facing).
     """
     offset = (page - 1) * page_size
 
@@ -381,7 +387,9 @@ async def list_cases(
     else:
         base_filter = None  # Admin: no filter
 
-    filters = [base_filter] if base_filter is not None else []
+    filters = [Case.is_deleted == False]  # noqa: E712  # always exclude soft-deleted cases
+    if base_filter is not None:
+        filters.append(base_filter)
     if clinical_status:
         try:
             filters.append(Case.clinical_status == ClinicalStatus(clinical_status))
@@ -391,6 +399,8 @@ async def list_cases(
             )
     if is_for_self is not None:
         filters.append(Case.is_for_self == is_for_self)
+    if bookmarked is not None:
+        filters.append(Case.is_bookmarked == bookmarked)  # noqa: E712
 
     where_clause = and_(*filters) if filters else True
 
@@ -672,9 +682,8 @@ async def soft_delete_case(
         raise CaseNotFoundException()
 
     _assert_access(user, case)
-    case.ai_status = AiStatus.FAILED
-    case.clinical_status = ClinicalStatus.RESOLVED
-    logger.info("case_cancelled", case_id=case_id, user_id=user.id)
+    case.is_deleted = True
+    logger.info("case_soft_deleted", case_id=case_id, user_id=user.id)
 
 
 # ------------------------------------------------------------------ #
@@ -1482,3 +1491,38 @@ async def save_clinical_features(
         additional_observations=request.additional_observations,
         message=f"Saved {len(request.features)} clinical features.",
     )
+
+
+# ------------------------------------------------------------------ #
+# Bookmark
+# ------------------------------------------------------------------ #
+
+async def toggle_bookmark(
+    db: AsyncSession,
+    doctor: User,
+    case_id: str,
+) -> BookmarkResponse:
+    """
+    Toggle the bookmark flag on a case.
+
+    Only the doctor assigned to the case can bookmark it.
+    Calling this endpoint twice returns the case to its previous state (toggle).
+
+    Returns the new is_bookmarked state.
+    """
+    result = await db.execute(select(Case).where(Case.id == case_id))
+    case = result.scalar_one_or_none()
+
+    if case is None or case.doctor_id != doctor.id:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    case.is_bookmarked = not case.is_bookmarked
+    await db.flush()
+
+    logger.info(
+        "case_bookmark_toggled",
+        case_id=case_id,
+        doctor_id=doctor.id,
+        is_bookmarked=case.is_bookmarked,
+    )
+    return BookmarkResponse(case_id=case_id, is_bookmarked=case.is_bookmarked)

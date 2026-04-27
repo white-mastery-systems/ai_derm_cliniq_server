@@ -431,12 +431,15 @@ def generate_questions_task(self, case_id: str) -> None:
     except SoftTimeLimitExceeded:
         _run_async(_fail_task_on_timeout_q(case_id, "generate_questions"))
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("generate_questions_task_error", case_id=case_id, error=str(exc))
         if self.request.retries >= self.max_retries:
             _run_async(_fail_task_on_timeout_q(case_id, "generate_questions"))
             raise Ignore()
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("generate_questions_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #
@@ -630,12 +633,15 @@ def refine_analysis_task(self, case_id: str) -> None:
     except SoftTimeLimitExceeded:
         _run_async(_fail_task_on_timeout_q(case_id, "refine_analysis"))
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("refine_analysis_task_error", case_id=case_id, error=str(exc))
         if self.request.retries >= self.max_retries:
             _run_async(_fail_task_on_timeout_q(case_id, "refine_analysis"))
             raise Ignore()
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("refine_analysis_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #

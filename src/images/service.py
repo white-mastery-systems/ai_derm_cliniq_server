@@ -194,7 +194,8 @@ async def upload_image(
     gcs_path = gcs.build_image_path(case_id, image_id, extension)
     gcs.upload_file(gcs_path, BytesIO(raw_bytes), content_type)
 
-    # Persist metadata only after successful upload
+    # Persist metadata only after successful upload.
+    # If the DB write fails, roll back the GCS upload so no orphan is left.
     image = CaseImage(
         id=image_id,
         case_id=case_id,
@@ -205,8 +206,15 @@ async def upload_image(
         size_bytes=len(raw_bytes),
         upload_order=current_count,
     )
-    db.add(image)
-    await db.flush()
+    try:
+        db.add(image)
+        await db.flush()
+    except Exception:
+        try:
+            gcs.delete_file(gcs_path)
+        except Exception as cleanup_exc:
+            logger.warning("gcs_cleanup_failed", path=gcs_path, error=str(cleanup_exc))
+        raise
 
     logger.info(
         "image_uploaded",

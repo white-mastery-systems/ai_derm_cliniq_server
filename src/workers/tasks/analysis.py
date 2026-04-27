@@ -292,9 +292,12 @@ def inspect_images_task(self, case_id: str) -> str:
     except SoftTimeLimitExceeded:
         _run_async(_fail_task_on_timeout(case_id, "inspect_images"))
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("inspect_images_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("inspect_images_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #
@@ -425,9 +428,12 @@ def analyse_images_task(self, case_id: str) -> dict:
     except SoftTimeLimitExceeded:
         _run_async(_fail_task_on_timeout(case_id, "analyse_images"))
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("analyse_images_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("analyse_images_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #
@@ -586,9 +592,12 @@ def save_results_task(self, analysis_result: dict) -> None:
     except SoftTimeLimitExceeded:
         _run_async(_fail_task_on_timeout(case_id, "save_results"))
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("save_results_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("save_results_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #
@@ -688,9 +697,12 @@ def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None 
     except SoftTimeLimitExceeded:
         logger.error("red_flag_check_timeout", case_id=case_id)
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("red_flag_check_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("red_flag_check_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #
@@ -783,9 +795,12 @@ def analyse_complaint_task(self, case_id: str) -> dict:
     except SoftTimeLimitExceeded:
         _run_async(_fail_task_on_timeout(case_id, "analyse_complaint"))
         raise Ignore()
-    except Exception as exc:
+    except (AIProviderException, StorageException) as exc:
         logger.error("analyse_complaint_task_error", case_id=case_id, error=str(exc))
         raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("analyse_complaint_task_unexpected_error", case_id=case_id)
+        raise
 
 
 # ------------------------------------------------------------------ #

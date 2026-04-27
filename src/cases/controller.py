@@ -26,6 +26,7 @@ from src.cases.schemas import (
     AdjacentVisitsResponse,
     AssessmentDepthRequest,
     AssessmentDepthResponse,
+    BookmarkResponse,
     CaseCreateRequest,
     CaseResponse,
     CaseUpdateRequest,
@@ -67,6 +68,10 @@ async def create_case(
     response_model=PaginatedCasesResponse,
     status_code=status.HTTP_200_OK,
     summary="List cases (role-filtered)",
+    description=(
+        "Returns paginated cases scoped to the caller's role. "
+        "Pass `bookmarked=true` to fetch only the doctor's Important Cases list."
+    ),
 )
 async def list_cases(
     page: int = Query(default=1, ge=1),
@@ -76,10 +81,14 @@ async def list_cases(
         default=None,
         description="true = My History tab, false = Someone Else tab",
     ),
+    bookmarked: bool | None = Query(
+        default=None,
+        description="true = Important Cases list (bookmarked by doctor)",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
 ) -> PaginatedCasesResponse:
-    return await service.list_cases(db, user, page, page_size, clinical_status, is_for_self)
+    return await service.list_cases(db, user, page, page_size, clinical_status, is_for_self, bookmarked)
 
 
 @router.post(
@@ -218,6 +227,26 @@ async def delete_case(
     db: AsyncSession = Depends(get_async_session),
 ) -> None:
     await service.soft_delete_case(db, user, case_id)
+
+
+@router.post(
+    "/{case_id}/bookmark",
+    response_model=BookmarkResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Toggle bookmark (Important Case flag)",
+    description=(
+        "Doctor taps the bookmark icon on a case. "
+        "Each call flips the flag: false → true → false. "
+        "Only the assigned doctor can bookmark a case. "
+        "Use `GET /cases?bookmarked=true` to retrieve all bookmarked cases."
+    ),
+)
+async def toggle_bookmark(
+    case_id: str,
+    doctor: User = Depends(require_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> BookmarkResponse:
+    return await service.toggle_bookmark(db, doctor, case_id)
 
 
 @router.post(

@@ -73,6 +73,9 @@ if TYPE_CHECKING:
 _PASSWORD_RESET_EXPIRY_MINUTES = 15
 _EMAIL_VERIFY_EXPIRY_MINUTES = 30
 
+# Roles permitted via OAuth sign-in — admin can never be created this way
+_ALLOWED_OAUTH_ROLES: frozenset[str] = frozenset({UserRole.PATIENT.value, UserRole.DOCTOR.value})
+
 logger = get_logger(__name__)
 
 # ------------------------------------------------------------------ #
@@ -443,9 +446,7 @@ async def google_auth(
         else:
             # 3b. Brand new user — create account
             # Only patient and doctor are allowed via OAuth — never admin.
-            # Explicitly whitelist to prevent role escalation attacks.
-            _allowed_oauth_roles = {UserRole.PATIENT.value, UserRole.DOCTOR.value}
-            resolved_role = UserRole(role) if role in _allowed_oauth_roles else UserRole.PATIENT
+            resolved_role = UserRole(role) if role in _ALLOWED_OAUTH_ROLES else UserRole.PATIENT
             user = User(
                 email=google_info.email,
                 full_name=google_info.full_name,

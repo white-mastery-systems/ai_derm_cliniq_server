@@ -150,6 +150,7 @@ class CaseSummaryResponse(BaseModel):
     symptom_progression: str | None = None # For follow-up cases: better | same | worse
     symptom_tags: list[str] = []           # Short symptom keywords for case card chips
     case_summary: str | None = None        # AI-generated summary — used as description text on history cards
+    is_bookmarked: bool = False            # Doctor-set flag — True = shown in Important Cases list
     image_count: int = 0
     patient_name: str | None = None        # Populated for doctor/admin list views
     patient_avatar_url: str | None = None  # Populated for doctor/admin list views
@@ -189,6 +190,7 @@ class CaseResponse(BaseModel):
     body_location: str | None = None
     symptom_progression: str | None = None  # For follow-up cases: better | same | worse
     symptom_tags: list[str] = []
+    is_bookmarked: bool = False            # Doctor-set flag — True = shown in Important Cases list
     presenting_complaint: str | None = None
     case_summary: str | None = None
     celery_task_id: str | None = None
@@ -219,6 +221,12 @@ class PaginatedCasesResponse(BaseModel):
     page: int
     page_size: int
     has_next: bool
+
+
+class BookmarkResponse(BaseModel):
+    """Response for POST /cases/{case_id}/bookmark."""
+    case_id: str
+    is_bookmarked: bool
 
 
 class RedFlagsCheckRequest(BaseModel):

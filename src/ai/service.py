@@ -61,11 +61,20 @@ logger = get_logger(__name__)
 # Helpers
 # ------------------------------------------------------------------ #
 
-async def _get_case_with_access(db: AsyncSession, case_id: str, user: User) -> Case:
+async def _get_case_with_access(
+    db: AsyncSession,
+    case_id: str,
+    user: User,
+    for_update: bool = False,
+) -> Case:
     """Load case and verify user has access. Returns CaseNotFoundException for both
     'not found' and 'not accessible' to prevent case enumeration.
-    ADMIN always passes — they can read any case."""
-    result = await db.execute(select(Case).where(Case.id == case_id))
+    ADMIN always passes — they can read any case.
+    Pass for_update=True to acquire a row-level lock (prevents concurrent status transitions)."""
+    stmt = select(Case).where(Case.id == case_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     case = result.scalar_one_or_none()
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
@@ -114,7 +123,9 @@ async def trigger_analysis(
     if patient.role != UserRole.PATIENT:
         raise ForbiddenException(message="Only the patient can trigger AI analysis")
 
-    case = await _get_case_with_access(db, case_id, patient)
+    # with_for_update acquires a row-level lock so concurrent POST /analyze
+    # requests serialise here — the second request reads PROCESSING and hits 409.
+    case = await _get_case_with_access(db, case_id, patient, for_update=True)
 
     # Consent gate
     if not case.consent_ai_analysis:

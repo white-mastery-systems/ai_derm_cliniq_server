@@ -327,6 +327,28 @@ class Case(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Bookmark — doctor marks case as important for quick retrieval
+    # ------------------------------------------------------------------ #
+    is_bookmarked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+        comment="Doctor-set flag. True = appears in the Important Cases list.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Soft Delete — set True instead of issuing DELETE (preserves audit trail)
+    # ------------------------------------------------------------------ #
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+        comment="Soft-delete flag. Deleted cases are hidden from all queries but never removed from the DB.",
+    )
+
+    # ------------------------------------------------------------------ #
     # AI Pipeline Tracking
     # ------------------------------------------------------------------ #
     celery_task_id: Mapped[str | None] = mapped_column(
