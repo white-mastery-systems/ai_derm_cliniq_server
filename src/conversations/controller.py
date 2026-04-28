@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.auth.dependencies import get_current_user, require_patient
+from src.auth.dependencies import get_current_user, require_patient, require_patient_or_assigned_doctor
 from src.conversations import service
 from src.conversations.schemas import (
     AnswersAcceptedResponse,
@@ -48,10 +48,10 @@ router = APIRouter()
 )
 async def trigger_questions(
     case_id: str,
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> QuestionsGeneratedResponse:
-    return await service.trigger_questions(db, patient, case_id)
+    return await service.trigger_questions(db, user, case_id)
 
 
 @router.post(
@@ -63,10 +63,10 @@ async def trigger_questions(
 async def submit_answers(
     case_id: str,
     body: SubmitAnswersRequest,
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> AnswersAcceptedResponse:
-    return await service.submit_answers(db, patient, case_id, body)
+    return await service.submit_answers(db, user, case_id, body)
 
 
 @router.post(
@@ -77,14 +77,14 @@ async def submit_answers(
 )
 async def finish_conversation(
     case_id: str,
-    patient: User = Depends(require_patient),
+    user: User = Depends(require_patient_or_assigned_doctor),
     db: AsyncSession = Depends(get_async_session),
 ) -> FinishChatResponse:
     """
     Skip remaining question rounds and proceed to case summary.
     Idempotent — safe to call if already complete.
     """
-    return await service.finish_conversation(db, patient, case_id)
+    return await service.finish_conversation(db, user, case_id)
 
 
 @router.get(

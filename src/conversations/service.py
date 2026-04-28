@@ -122,7 +122,7 @@ def _parse_question(msg: Message) -> QuestionItem | None:
 
 async def trigger_questions(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
 ) -> QuestionsGeneratedResponse:
     """
@@ -131,10 +131,7 @@ async def trigger_questions(
     Only valid at round 0 (initial questions). Subsequent rounds are
     triggered automatically by refine_analysis_task after patient answers.
     """
-    if patient.role != UserRole.PATIENT:
-        raise ForbiddenException(message="Only the patient can trigger question generation")
-
-    case = await _get_case_with_access(db, case_id, patient)
+    case = await _get_case_with_access(db, case_id, user)
 
     # Require completed AI analysis
     if case.ai_status != AiStatus.COMPLETED:
@@ -196,25 +193,22 @@ async def trigger_questions(
 
 async def submit_answers(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
     request: SubmitAnswersRequest,
 ) -> AnswersAcceptedResponse:
     """
-    Save patient answers for the current round and enqueue re-analysis.
+    Save answers for the current round and enqueue re-analysis.
 
     Validates:
     - Questions exist for current round
     - Answers haven't already been submitted (idempotency)
     - Answer count matches question count
     """
-    if patient.role != UserRole.PATIENT:
-        raise ForbiddenException(message="Only the patient can submit answers")
-
     # Row-level lock — serialises concurrent submissions for the same case.
     # The second request blocks here until the first commits, at which point
     # the patient messages exist and the conflict check below catches it.
-    case = await _get_case_with_access(db, case_id, patient, for_update=True)
+    case = await _get_case_with_access(db, case_id, user, for_update=True)
 
     if case.ai_status != AiStatus.COMPLETED:
         raise BadRequestException(
@@ -287,7 +281,7 @@ async def submit_answers(
 
 async def finish_conversation(
     db: AsyncSession,
-    patient: User,
+    user: User,
     case_id: str,
 ) -> FinishChatResponse:
     """
@@ -296,13 +290,9 @@ async def finish_conversation(
     Sets question_round = max_question_rounds so that is_complete becomes True.
     Idempotent — safe to call if conversation is already complete.
 
-    Only the patient who owns the case can finish early.
     AI analysis must have completed before finish can be called.
     """
-    if patient.role != UserRole.PATIENT:
-        raise ForbiddenException(message="Only the patient can finish the conversation")
-
-    case = await _get_case_with_access(db, case_id, patient)
+    case = await _get_case_with_access(db, case_id, user)
 
     if case.ai_status != AiStatus.COMPLETED:
         raise BadRequestException(
@@ -314,7 +304,7 @@ async def finish_conversation(
     if not already_complete:
         case.question_round = case.max_question_rounds
         await db.flush()
-        logger.info("conversation_finished_early", case_id=case_id, patient_id=patient.id)
+        logger.info("conversation_finished_early", case_id=case_id, user_id=user.id)
     else:
         logger.info("conversation_already_complete", case_id=case_id)
 
