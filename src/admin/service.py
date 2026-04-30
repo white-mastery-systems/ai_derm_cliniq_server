@@ -39,18 +39,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.admin.schemas import (
+    AdminCaseDetail,
     AdminCaseItem,
+    AdminDoctorItem,
     AdminDoctorProfileOut,
     AdminPatientProfileOut,
+    AdminStatsResponse,
     AdminUserDetail,
     AdminUserItem,
-    AdminStatsResponse,
     AiSettingsResponse,
     PaginatedAdminCasesResponse,
+    PaginatedAdminDoctorsResponse,
     PaginatedAdminUsersResponse,
+    PromptItem,
+    PromptsListResponse,
     UpdateAiSettingsRequest,
 )
-from src.exceptions import BadRequestException, UserNotFoundException
+from src.exceptions import BadRequestException, CaseNotFoundException, UserNotFoundException
 from src.logger import get_logger
 from src.models.case import AiStatus, Case
 from src.models.case_report import CaseReport
@@ -425,4 +430,269 @@ async def get_stats(db: AsyncSession) -> AdminStatsResponse:
         cases_ai_completed=cases_ai_completed,
         cases_ai_failed=cases_ai_failed,
         total_reports=total_reports,
+    )
+
+
+# ================================================================== #
+# Doctor Approval Workflow
+# ================================================================== #
+
+async def list_doctors(
+    db: AsyncSession,
+    page: int,
+    page_size: int,
+    pending_only: bool = False,
+) -> PaginatedAdminDoctorsResponse:
+    """
+    List all doctors with their profile data.
+
+    If pending_only=True, returns only doctors with is_verified=False
+    (awaiting admin approval).
+    """
+    query = (
+        select(User)
+        .where(User.role == UserRole.DOCTOR)
+        .options(selectinload(User.doctor_profile))
+    )
+    if pending_only:
+        query = query.where(User.is_verified == False)  # noqa: E712
+
+    count_result = await db.execute(select(func.count()).select_from(query.subquery()))
+    total = count_result.scalar_one()
+
+    offset = (page - 1) * page_size
+    result = await db.execute(
+        query.order_by(User.created_at.desc()).offset(offset).limit(page_size)
+    )
+    doctors = list(result.scalars().all())
+
+    items = []
+    for u in doctors:
+        dp = u.doctor_profile
+        items.append(AdminDoctorItem(
+            id=u.id,
+            email=u.email,
+            full_name=u.full_name,
+            is_active=u.is_active,
+            is_verified=u.is_verified,
+            created_at=u.created_at,
+            specialization=dp.specialization if dp else None,
+            license_number=dp.license_number if dp else None,
+            clinic_name=dp.clinic_name if dp else None,
+        ))
+
+    return PaginatedAdminDoctorsResponse(
+        items=items,
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+async def approve_doctor(db: AsyncSession, user_id: str) -> AdminUserDetail:
+    """
+    Approve a pending doctor.
+
+    Sets is_active=True and is_verified=True so the doctor can log in.
+    Sends an approval confirmation email.
+    Raises 404 if user not found, 400 if user is not a doctor.
+    """
+    result = await db.execute(
+        select(User)
+        .where(User.id == user_id)
+        .options(
+            selectinload(User.patient_profile),
+            selectinload(User.doctor_profile),
+        )
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException(message=f"No user found with id: {user_id}")
+    if user.role != UserRole.DOCTOR:
+        raise BadRequestException(message="User is not a doctor")
+
+    user.is_active = True
+    user.is_verified = True
+    await db.flush()
+
+    from src.core.email import render_doctor_approved_email, send_email_async
+    html = render_doctor_approved_email(name=user.full_name)
+    await send_email_async(
+        to_email=user.email,
+        subject="AiDerm Cliniq — Your Account Has Been Approved",
+        html_body=html,
+    )
+    logger.info("admin_doctor_approved", user_id=user_id)
+
+    return await get_user(db, user_id)
+
+
+async def reject_doctor(db: AsyncSession, user_id: str, reason: str | None) -> None:
+    """
+    Reject a pending doctor and permanently delete their account.
+
+    Sends a rejection email before deletion so the doctor knows their
+    application was unsuccessful. Raises 404 if user not found,
+    400 if user is not a doctor.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException(message=f"No user found with id: {user_id}")
+    if user.role != UserRole.DOCTOR:
+        raise BadRequestException(message="User is not a doctor")
+
+    from src.core.email import render_doctor_rejected_email, send_email_async
+    html = render_doctor_rejected_email(name=user.full_name, reason=reason)
+    await send_email_async(
+        to_email=user.email,
+        subject="AiDerm Cliniq — Account Application Update",
+        html_body=html,
+    )
+
+    await db.delete(user)
+    logger.info("admin_doctor_rejected_and_deleted", user_id=user_id)
+
+
+# ================================================================== #
+# Case Detail
+# ================================================================== #
+
+async def get_case_detail(db: AsyncSession, case_id: str) -> AdminCaseDetail:
+    """
+    Fetch full case detail for admin view.
+
+    Raises 404 if case not found.
+    """
+    result = await db.execute(
+        select(Case)
+        .where(Case.id == case_id)
+        .options(
+            selectinload(Case.patient),
+            selectinload(Case.doctor),
+        )
+    )
+    case = result.scalar_one_or_none()
+    if case is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    return AdminCaseDetail(
+        id=case.id,
+        case_number=case.case_number,
+        patient_id=case.patient_id,
+        patient_name=case.patient.full_name,
+        doctor_id=case.doctor_id,
+        doctor_name=case.doctor.full_name if case.doctor else None,
+        consultation_type=case.consultation_type.value,
+        has_visible_lesion=case.has_visible_lesion,
+        is_for_self=case.is_for_self,
+        dependent_name=case.dependent_name,
+        dependent_relationship=case.dependent_relationship,
+        body_location=case.body_location,
+        presenting_complaint=case.presenting_complaint,
+        case_summary=case.case_summary,
+        case_title=case.case_title,
+        symptom_tags=case.symptom_tags,
+        ai_status=case.ai_status.value,
+        clinical_status=case.clinical_status.value,
+        red_flag_status=case.red_flag_status.value,
+        red_flags=case.red_flags,
+        red_flag_advice=case.red_flag_advice,
+        question_round=case.question_round,
+        consent_ai_analysis=case.consent_ai_analysis,
+        consent_research=case.consent_research,
+        created_at=case.created_at,
+    )
+
+
+# ================================================================== #
+# User Deletion & Verification Resend
+# ================================================================== #
+
+async def delete_user(db: AsyncSession, user_id: str) -> None:
+    """
+    Permanently delete a user account and all cascaded data.
+
+    Raises 404 if user not found.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException(message=f"No user found with id: {user_id}")
+
+    await db.delete(user)
+    logger.info("admin_user_deleted", user_id=user_id, role=user.role.value)
+
+
+async def resend_verification(db: AsyncSession, user_id: str) -> None:
+    """
+    Resend the email verification OTP to an unverified user.
+
+    Raises 404 if user not found. Raises 400 if already verified.
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException(message=f"No user found with id: {user_id}")
+    if user.is_verified:
+        raise BadRequestException(message="User email is already verified")
+
+    from src.auth.service import request_email_verification
+    await request_email_verification(db, user)
+    logger.info("admin_resend_verification", user_id=user_id)
+
+
+# ================================================================== #
+# AI Prompt Management
+# ================================================================== #
+
+def get_all_prompts() -> PromptsListResponse:
+    """Return all prompt keys with their current Redis overrides and labels."""
+    from src.ai.prompt_registry import get_all
+    data = get_all()
+    prompts = [
+        PromptItem(
+            key=v["key"],
+            label=v["label"],
+            value=v["value"],
+            has_override=v["has_override"],
+        )
+        for v in data.values()
+    ]
+    return PromptsListResponse(prompts=prompts)
+
+
+async def update_prompt(key: str, value: str) -> PromptItem:
+    """
+    Set a Redis override for a prompt key.
+
+    Raises ValueError (→ 400) if key is not a valid prompt key.
+    """
+    from src.ai import prompt_registry
+    await prompt_registry.async_set_prompt(key, value)
+    logger.info("admin_prompt_updated", key=key)
+    entry = prompt_registry.get_all()[key]
+    return PromptItem(
+        key=entry["key"],
+        label=entry["label"],
+        value=entry["value"],
+        has_override=entry["has_override"],
+    )
+
+
+async def reset_prompt(key: str) -> PromptItem:
+    """
+    Delete the Redis override for a prompt key, restoring the hardcoded default.
+
+    Raises ValueError (→ 400) if key is not a valid prompt key.
+    """
+    from src.ai import prompt_registry
+    await prompt_registry.async_reset_prompt(key)
+    logger.info("admin_prompt_reset", key=key)
+    entry = prompt_registry.get_all()[key]
+    return PromptItem(
+        key=entry["key"],
+        label=entry["label"],
+        value=entry["value"],
+        has_override=entry["has_override"],
     )

@@ -12,6 +12,15 @@ as opposed to the patient-consultation prompts which use layman's terms.
 from __future__ import annotations
 
 
+def _p(key: str, default: str) -> str:
+    try:
+        from src.ai.prompt_registry import get_prompt
+        v = get_prompt(key)
+        return v if v else default
+    except Exception:
+        return default
+
+
 class DoctorReviewPrompts:
     """Factory for doctor-facing clinical review prompts."""
 
@@ -30,7 +39,7 @@ class DoctorReviewPrompts:
         Returns: {{"Complaint": ["<clinical term 1>", ...]}}
         Used in: doctor review screen — complaint-confirmation checkbox.
         """
-        return """You are an AI assistant for a dermatologist. Your primary goal is to generate a list of potential clinical findings using precise, technical dermatological terminology. These terms will be presented to the doctor as checkboxes to confirm the findings.
+        return _p("doctor_complaints", """You are an AI assistant for a dermatologist. Your primary goal is to generate a list of potential clinical findings using precise, technical dermatological terminology. These terms will be presented to the doctor as checkboxes to confirm the findings.
 
 You will be given the following information:
 1. **Conversation History:** A transcript of the conversation between the patient and another AI assistant. This is the most important source of information.
@@ -57,7 +66,7 @@ Sex: {sex}
 {{
     "Complaint": ["<technical term 1>", "<technical term 2>", "<technical term 3>", ...]
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 2. Doctor-facing diagnosis generation
@@ -77,7 +86,7 @@ Sex: {sex}
         NOTE: This prompt supports optional image input. Pass image bytes
         alongside this prompt when calling the multimodal LLM endpoint.
         """
-        return """You are an AI diagnostic assistant for a dermatologist. Based on the provided patient information (conversation, visual description, prescription history, and clinical images), generate a comprehensive differential diagnosis.
+        return _p("doctor_diagnosis", """You are an AI diagnostic assistant for a dermatologist. Based on the provided patient information (conversation, visual description, prescription history, and clinical images), generate a comprehensive differential diagnosis.
 
 The output must be a JSON object that includes:
 - Most Probable Diagnosis: The most likely diagnosis with its likelihood and key supporting features.
@@ -108,7 +117,7 @@ The JSON format must be strictly as follows:
 }}
 
 IMPORTANT: "likelihood" must be an integer between 0 and 100 (no % sign, no quotes).
-"""
+""")
 
     # ------------------------------------------------------------------
     # 3. Doctor-agent doubts (doctor-side)
@@ -215,7 +224,7 @@ The response must be in the following JSON format:
                                "answer_options": [...], "reason": "..."}
             No question     : {"has_question": false}
         """
-        return """You are a dermatologist AI assistant helping a doctor review a patient case.
+        return _p("doctor_question", """You are a dermatologist AI assistant helping a doctor review a patient case.
 
 Based on the clinical context below, decide if you need ONE more clarifying question from the doctor to better refine the diagnosis. If yes, generate that single most important question. If no more clarification is needed, say so.
 
@@ -242,7 +251,7 @@ If a question is needed:
 
 If no question is needed:
 {{"has_question": false}}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 5. Final clinical summary (doctor-ready)
@@ -259,7 +268,7 @@ If no question is needed:
         Returns: structured summary JSON.
         Used in: case finalisation, before report generation.
         """
-        return """You are an AI assistant tasked with creating a final, comprehensive clinical summary for a dermatologist. Based on the entire interaction (initial visual analysis, conversation with the doctor, the confirmed clinical indicators, and the final confirmed diagnosis), generate a structured summary. This summary should be clear, concise, and ready for inclusion in a medical record.
+        return _p("doctor_final_summary", """You are an AI assistant tasked with creating a final, comprehensive clinical summary for a dermatologist. Based on the entire interaction (initial visual analysis, conversation with the doctor, the confirmed clinical indicators, and the final confirmed diagnosis), generate a structured summary. This summary should be clear, concise, and ready for inclusion in a medical record.
 
 Conversation: {conversation}
 Visual Description: {visual_description}
@@ -283,7 +292,7 @@ The output must be a JSON object in the following format:
     "conclusion": "<1-2 sentence conclusion with management recommendations>"
   }}
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 6. Treatment plan (doctor-facing, detailed prescription)
@@ -298,7 +307,7 @@ The output must be a JSON object in the following format:
         Returns: treatment plan + prescription JSON.
         Used in: doctor review — treatment plan section.
         """
-        return """You are an AI assistant providing treatment recommendations to a dermatologist. Based on the final diagnosis, patient demographics, and conversation history, generate a comprehensive treatment plan.
+        return _p("doctor_treatment_plan", """You are an AI assistant providing treatment recommendations to a dermatologist. Based on the final diagnosis, patient demographics, and conversation history, generate a comprehensive treatment plan.
 
 The plan should be structured and include sections for:
 1. **Medications:** Suggest specific medications, dosages, and frequencies.
@@ -327,7 +336,7 @@ The output must be a JSON object in the following format:
     }}
   ]
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 7. Reconcile visual description fields with doctor's override

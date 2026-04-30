@@ -6,11 +6,23 @@ All routes prefixed /api/v1/admin (set in src/api.py).
 
 ROUTES
 ------
-GET   /users              → Paginated user list (filter by role/is_active)
-GET   /users/{user_id}    → Full user detail with profile
-PATCH /users/{user_id}    → Update account state (activate/suspend/verify/role)
-GET   /cases              → Paginated case list (filter by ai_status/clinical_status)
-GET   /stats              → Platform-wide usage statistics
+GET    /users                             → Paginated user list (filter by role/is_active)
+GET    /users/{user_id}                   → Full user detail with profile
+PATCH  /users/{user_id}                   → Update account state (activate/suspend/verify/role)
+DELETE /users/{user_id}                   → Permanently delete a user
+POST   /users/{user_id}/resend-verification → Resend email verification OTP
+GET    /cases                             → Paginated case list (filter by ai_status/clinical_status)
+GET    /cases/{case_id}                   → Full case detail
+GET    /stats                             → Platform-wide usage statistics
+GET    /doctors                           → List all doctors (paginated)
+GET    /doctors/pending                   → List pending approval doctors
+POST   /doctors/{user_id}/approve         → Approve doctor (activate account + email)
+POST   /doctors/{user_id}/reject          → Reject doctor (delete account + email)
+GET    /prompts                           → List all AI prompt overrides
+PATCH  /prompts/{key}                     → Set a prompt override in Redis
+DELETE /prompts/{key}                     → Reset a prompt to its hardcoded default
+GET    /ai-settings                       → Get current AI model configuration
+PATCH  /ai-settings                       → Update AI model configuration at runtime
 
 ALL ROUTES: ADMIN ONLY
 -----------------------
@@ -23,13 +35,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.admin import service
 from src.admin.schemas import (
+    AdminCaseDetail,
     AdminStatsResponse,
     AdminUpdateUserRequest,
     AdminUserDetail,
     AiSettingsResponse,
     PaginatedAdminCasesResponse,
+    PaginatedAdminDoctorsResponse,
     PaginatedAdminUsersResponse,
+    PromptsListResponse,
+    PromptItem,
+    RejectDoctorRequest,
     UpdateAiSettingsRequest,
+    UpdatePromptRequest,
 )
 from src.auth.dependencies import require_admin
 from src.database.core import get_async_session
@@ -200,3 +218,233 @@ async def update_ai_settings(
     _admin: User = Depends(require_admin),
 ) -> AiSettingsResponse:
     return await service.update_ai_settings(request)
+
+
+# ------------------------------------------------------------------ #
+# Doctor Approval Workflow
+# ------------------------------------------------------------------ #
+
+@router.get(
+    "/doctors",
+    response_model=PaginatedAdminDoctorsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List all doctors (admin only)",
+)
+async def list_doctors(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> PaginatedAdminDoctorsResponse:
+    """
+    List all registered doctors with their profile details (specialization,
+    license number, clinic name). Ordered newest first.
+    """
+    return await service.list_doctors(db, page, page_size, pending_only=False)
+
+
+@router.get(
+    "/doctors/pending",
+    response_model=PaginatedAdminDoctorsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List doctors pending approval (admin only)",
+)
+async def list_pending_doctors(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> PaginatedAdminDoctorsResponse:
+    """
+    List doctors who have registered but not yet been approved
+    (is_verified=False). These accounts cannot log in until approved.
+    """
+    return await service.list_doctors(db, page, page_size, pending_only=True)
+
+
+@router.post(
+    "/doctors/{user_id}/approve",
+    response_model=AdminUserDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Approve a doctor account (admin only)",
+)
+async def approve_doctor(
+    user_id: str,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> AdminUserDetail:
+    """
+    Approve a pending doctor registration.
+
+    - Sets `is_active=True` and `is_verified=True` so the doctor can log in.
+    - Sends an approval confirmation email to the doctor.
+
+    Returns 404 if user not found. Returns 400 if the user is not a doctor.
+    """
+    return await service.approve_doctor(db, user_id)
+
+
+@router.post(
+    "/doctors/{user_id}/reject",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Reject and delete a doctor account (admin only)",
+)
+async def reject_doctor(
+    user_id: str,
+    request: RejectDoctorRequest,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> None:
+    """
+    Reject a pending doctor registration and permanently delete their account.
+
+    - Sends a rejection email (with optional reason) before deletion.
+    - The account is permanently removed — no soft delete.
+
+    Returns 404 if user not found. Returns 400 if the user is not a doctor.
+    """
+    await service.reject_doctor(db, user_id, reason=request.reason)
+
+
+# ------------------------------------------------------------------ #
+# Case Detail
+# ------------------------------------------------------------------ #
+
+@router.get(
+    "/cases/{case_id}",
+    response_model=AdminCaseDetail,
+    status_code=status.HTTP_200_OK,
+    summary="Get full case detail (admin only)",
+)
+async def get_case_detail(
+    case_id: str,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> AdminCaseDetail:
+    """
+    Fetch full detail for a single case including patient/doctor info,
+    AI status, clinical status, red flag results, and Q&A progress.
+
+    Returns 404 if the case does not exist.
+    """
+    return await service.get_case_detail(db, case_id)
+
+
+# ------------------------------------------------------------------ #
+# User Deletion & Verification Resend
+# ------------------------------------------------------------------ #
+
+@router.delete(
+    "/users/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete a user (admin only)",
+)
+async def delete_user(
+    user_id: str,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> None:
+    """
+    Permanently delete a user account and all cascaded data (cases, images,
+    reports, reviews). This action is irreversible.
+
+    Returns 404 if the user does not exist.
+    """
+    await service.delete_user(db, user_id)
+
+
+@router.post(
+    "/users/{user_id}/resend-verification",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Resend email verification OTP (admin only)",
+)
+async def resend_verification(
+    user_id: str,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> None:
+    """
+    Resend the 6-digit email verification OTP to an unverified user.
+
+    Returns 404 if the user does not exist.
+    Returns 400 if the user is already verified.
+    """
+    await service.resend_verification(db, user_id)
+
+
+# ------------------------------------------------------------------ #
+# AI Prompt Management
+# ------------------------------------------------------------------ #
+
+@router.get(
+    "/prompts",
+    response_model=PromptsListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List all AI prompt overrides (admin only)",
+)
+async def get_prompts(
+    _admin: User = Depends(require_admin),
+) -> PromptsListResponse:
+    """
+    Return all AI prompt keys with their current values.
+
+    Each entry shows:
+    - `key`: the prompt identifier used in code
+    - `label`: human-readable name for the admin panel
+    - `value`: the current Redis override (null if using the hardcoded default)
+    - `has_override`: true if a Redis override is active
+
+    Prompts not overridden fall back to the hardcoded defaults in the codebase.
+    """
+    return service.get_all_prompts()
+
+
+@router.patch(
+    "/prompts/{key}",
+    response_model=PromptItem,
+    status_code=status.HTTP_200_OK,
+    summary="Set an AI prompt override (admin only)",
+)
+async def update_prompt(
+    key: str,
+    request: UpdatePromptRequest,
+    _admin: User = Depends(require_admin),
+) -> PromptItem:
+    """
+    Set a Redis override for an AI prompt.
+
+    The new prompt takes effect immediately for all running processes
+    (API server + Celery workers) without a restart.
+
+    Returns 400 if `key` is not a valid prompt key.
+    """
+    try:
+        return await service.update_prompt(key, request.value)
+    except ValueError as exc:
+        from src.exceptions import BadRequestException
+        raise BadRequestException(message=str(exc))
+
+
+@router.delete(
+    "/prompts/{key}",
+    response_model=PromptItem,
+    status_code=status.HTTP_200_OK,
+    summary="Reset an AI prompt to its hardcoded default (admin only)",
+)
+async def reset_prompt(
+    key: str,
+    _admin: User = Depends(require_admin),
+) -> PromptItem:
+    """
+    Delete the Redis override for a prompt key.
+
+    After this call the prompt method will use its hardcoded default value.
+    Returns the prompt entry with `has_override=false` and `value=null`.
+
+    Returns 400 if `key` is not a valid prompt key.
+    """
+    try:
+        return await service.reset_prompt(key)
+    except ValueError as exc:
+        from src.exceptions import BadRequestException
+        raise BadRequestException(message=str(exc))

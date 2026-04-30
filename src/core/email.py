@@ -103,8 +103,8 @@ _VISIT_EMAIL_TEMPLATE = """
       </p>
 
       <div class="case-box">
-        <div class="label">Your Case Number</div>
-        <div class="value">{{ case_id[:8].upper() }}</div>
+        <div class="label">Your Case ID</div>
+        <div class="value">{{ display_id }}</div>
       </div>
 
       <hr class="divider">
@@ -215,6 +215,72 @@ _EMAIL_VERIFY_OTP_TEMPLATE = """
 """
 
 
+_DOCTOR_APPROVED_EMAIL_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .badge{display:inline-block;background:#1a6b5a;color:#fff;padding:8px 20px;
+         border-radius:20px;font-weight:700;font-size:15px;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Account Approved</h1></div>
+  <div class="body">
+    <p>Dear <strong>Dr. {{ name }}</strong>,</p>
+    <p>Great news! Your doctor account on <strong>AiDerm Cliniq</strong> has been reviewed and approved by our admin team.</p>
+    <div><span class="badge">Account Approved</span></div>
+    <p>You can now log in to the app and start reviewing patient cases.</p>
+    <p>If you have any questions, contact us at
+      <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+_DOCTOR_REJECTED_EMAIL_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#7b1d1d;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .reason-box{background:#fff8e1;border-left:4px solid #e07b00;padding:12px 16px;
+              border-radius:4px;font-size:13px;color:#78350f;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Application Update</h1></div>
+  <div class="body">
+    <p>Dear <strong>Dr. {{ name }}</strong>,</p>
+    <p>After reviewing your doctor account application on <strong>AiDerm Cliniq</strong>, we are unable to approve your registration at this time.</p>
+    {% if reason %}<div class="reason-box"><strong>Reason:</strong> {{ reason }}</div>{% endif %}
+    <p>If you believe this is an error or would like to reapply, please contact us at
+      <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+
+def render_doctor_approved_email(name: str) -> str:
+    """Render the doctor account approved HTML email."""
+    return Template(_DOCTOR_APPROVED_EMAIL_TEMPLATE).render(name=name)
+
+
+def render_doctor_rejected_email(name: str, reason: str | None = None) -> str:
+    """Render the doctor account rejected HTML email."""
+    return Template(_DOCTOR_REJECTED_EMAIL_TEMPLATE).render(name=name, reason=reason)
+
+
 def render_password_reset_otp_email(name: str, otp: str) -> str:
     """Render the password reset OTP HTML email."""
     return Template(_PASSWORD_RESET_OTP_TEMPLATE).render(name=name, otp=otp)
@@ -225,11 +291,11 @@ def render_email_verify_otp_email(name: str, otp: str) -> str:
     return Template(_EMAIL_VERIFY_OTP_TEMPLATE).render(name=name, otp=otp)
 
 
-def render_visit_email(patient_name: str, case_id: str, patient_url: str) -> str:
+def render_visit_email(patient_name: str, display_id: str, patient_url: str) -> str:
     """Render the visit summary HTML email body."""
     return Template(_VISIT_EMAIL_TEMPLATE).render(
         patient_name=patient_name,
-        case_id=case_id,
+        display_id=display_id,
         patient_url=patient_url,
     )
 

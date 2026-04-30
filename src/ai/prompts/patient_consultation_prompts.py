@@ -12,6 +12,15 @@ complaints, visual description text, and differential diagnosis JSON.
 from __future__ import annotations
 
 
+def _p(key: str, default: str) -> str:
+    try:
+        from src.ai.prompt_registry import get_prompt
+        v = get_prompt(key)
+        return v if v else default
+    except Exception:
+        return default
+
+
 class PatientConsultationPrompts:
     """Factory for patient-facing consultation prompts."""
 
@@ -57,7 +66,7 @@ Return the output in the following JSON format:
         Returns: Questions JSON schema.
         Used in: no-image consultation Q&A rounds.
         """
-        return """You are a dermatology AI assistant. The patient has reported specific complaints but no visible lesions (or no image provided).
+        return _p("patient_questions_no_image", """You are a dermatology AI assistant. The patient has reported specific complaints but no visible lesions (or no image provided).
 Based on the complaints, age, and sex, generate 1 relevant question to ask the patient to narrow down the diagnosis. Choose the single most important question that will provide the most diagnostic value.
 Provide answer options for the question.
 
@@ -75,7 +84,7 @@ Return the output in the following JSON format:
     }}
   ]
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 3. Differential from complaints (no image)
@@ -139,7 +148,7 @@ Be sure not to include '/' in the diagnosis.
         Returns: differential-diagnosis JSON schema.
         Used in: after every patient answer round.
         """
-        return """Create a revised json from the current json of Disease and differentials based on any new findings that might have appeared in the last message of the conversation. You can choose to keep the most probable diagnosis and the order of differential diagnosis and their likelihood as it is or can choose to change.
+        return _p("patient_diagnosis_refinement", """Create a revised json from the current json of Disease and differentials based on any new findings that might have appeared in the last message of the conversation. You can choose to keep the most probable diagnosis and the order of differential diagnosis and their likelihood as it is or can choose to change.
 You are also being provided with the patient particulars and the visual description of the lesion for additional context.
 
 Conversation history:
@@ -178,7 +187,7 @@ The JSON format should be strictly as follows:
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 5. Doctor-agent doubts (patient-side)
@@ -203,7 +212,7 @@ The JSON format should be strictly as follows:
           If nothing more: {{"doubt_present":"no"}}
         Used in: Celery `generate_questions_task` round 1+.
         """
-        return """You are an intelligent dermatologist AI assistant conducting a patient consultation.
+        return _p("patient_follow_up_question", """You are an intelligent dermatologist AI assistant conducting a patient consultation.
 
 You have access to the conversation history, visual description, differential diagnosis, and previous prescription.
 
@@ -244,7 +253,7 @@ If you have a question to ask:
 
 If nothing more to ask:
 {{"doubt_present": "no"}}
-"""
+""")
 
     @staticmethod
     def generate_doctor_doubts_patient() -> str:
@@ -393,7 +402,7 @@ Respond only in the following JSON format:
         Returns: {{"case_summary": "...", "display_statements": [...]}}
         Used in: final step of patient consultation before doctor review.
         """
-        return """Based on the user's age, sex, medical history, answers given by user in the chat, and the visual language model's analysis of the uploaded photograph, create a structured case summary in less than 150 words.
+        return _p("patient_case_summary", """Based on the user's age, sex, medical history, answers given by user in the chat, and the visual language model's analysis of the uploaded photograph, create a structured case summary in less than 150 words.
 At the end give the most probable diagnosis with its likelihood taken from 'Possible Diagnoses' to you and place all other diagnoses in differential diagnoses with their likelihood.
 Your output should follow this exact structure for easy parsing:
 
@@ -433,7 +442,7 @@ Return JSON in the following format:
 
 The display_statements should be concise, non-repetitive, and avoid medical advice.
 Keep them grounded in the provided context (age/sex/complaint/visual findings).
-"""
+""")
 
     # ------------------------------------------------------------------
     # 9. Patient chatbot (post-summary)

@@ -2,13 +2,23 @@
 admin/schemas.py — Admin Dashboard Request & Response Models
 =============================================================
 
-FIVE ENDPOINTS
---------------
-GET   /api/v1/admin/users              → List all users (paginated, filterable)
-GET   /api/v1/admin/users/{user_id}    → Get full user detail with profile
-PATCH /api/v1/admin/users/{user_id}    → Update account state (activate/suspend/verify)
-GET   /api/v1/admin/cases              → List all cases (paginated, filterable)
-GET   /api/v1/admin/stats              → Platform-wide usage statistics
+ENDPOINTS
+---------
+GET    /api/v1/admin/users                          → List all users (paginated, filterable)
+GET    /api/v1/admin/users/{user_id}                → Get full user detail with profile
+PATCH  /api/v1/admin/users/{user_id}                → Update account state (activate/suspend/verify)
+DELETE /api/v1/admin/users/{user_id}                → Permanently delete a user
+POST   /api/v1/admin/users/{user_id}/resend-verification → Resend email verification OTP
+GET    /api/v1/admin/cases                          → List all cases (paginated, filterable)
+GET    /api/v1/admin/cases/{case_id}                → Full case detail
+GET    /api/v1/admin/stats                          → Platform-wide usage statistics
+GET    /api/v1/admin/doctors                        → List all doctors (paginated)
+GET    /api/v1/admin/doctors/pending                → List pending approval doctors
+POST   /api/v1/admin/doctors/{user_id}/approve      → Approve doctor (activate + email)
+POST   /api/v1/admin/doctors/{user_id}/reject       → Reject doctor (delete + email)
+GET    /api/v1/admin/prompts                        → List all AI prompt overrides
+PATCH  /api/v1/admin/prompts/{key}                  → Set a prompt override in Redis
+DELETE /api/v1/admin/prompts/{key}                  → Reset prompt to hardcoded default
 
 DESIGN
 ------
@@ -158,6 +168,93 @@ class UpdateAiSettingsRequest(BaseModel):
     openai_model: str | None = None
     deepseek_model: str | None = None
     default_provider: str | None = None
+
+
+# ================================================================== #
+# Doctors
+# ================================================================== #
+
+class AdminDoctorItem(BaseModel):
+    """Doctor list item for GET /admin/doctors."""
+    id: str
+    email: str
+    full_name: str
+    is_active: bool
+    is_verified: bool
+    created_at: datetime
+    specialization: str | None = None
+    license_number: str | None = None
+    clinic_name: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedAdminDoctorsResponse(BaseModel):
+    items: list[AdminDoctorItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class RejectDoctorRequest(BaseModel):
+    """POST /admin/doctors/{user_id}/reject — optional rejection reason."""
+    reason: str | None = None
+
+
+# ================================================================== #
+# Case Detail
+# ================================================================== #
+
+class AdminCaseDetail(BaseModel):
+    """Full case detail for GET /admin/cases/{case_id}."""
+    id: str
+    case_number: int | None
+    patient_id: str
+    patient_name: str
+    doctor_id: str | None
+    doctor_name: str | None
+    consultation_type: str
+    has_visible_lesion: bool
+    is_for_self: bool
+    dependent_name: str | None
+    dependent_relationship: str | None
+    body_location: str | None
+    presenting_complaint: str | None
+    case_summary: str | None
+    case_title: str | None
+    symptom_tags: str | None
+    ai_status: str
+    clinical_status: str
+    red_flag_status: str
+    red_flags: str | None
+    red_flag_advice: str | None
+    question_round: int
+    consent_ai_analysis: bool
+    consent_research: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ================================================================== #
+# AI Prompt Management
+# ================================================================== #
+
+class PromptItem(BaseModel):
+    """One prompt entry returned by GET /admin/prompts."""
+    key: str
+    label: str
+    value: str | None
+    has_override: bool
+
+
+class PromptsListResponse(BaseModel):
+    prompts: list[PromptItem]
+
+
+class UpdatePromptRequest(BaseModel):
+    """PATCH /admin/prompts/{key} — new prompt body."""
+    value: str
 
 
 # ================================================================== #

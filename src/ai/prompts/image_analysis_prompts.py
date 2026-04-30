@@ -15,6 +15,15 @@ use an f-string to fill them before sending.
 from __future__ import annotations
 
 
+def _p(key: str, default: str) -> str:
+    try:
+        from src.ai.prompt_registry import get_prompt
+        v = get_prompt(key)
+        return v if v else default
+    except Exception:
+        return default
+
+
 class ImageAnalysisPrompts:
     """Factory for image-based dermatology prompts."""
 
@@ -383,7 +392,7 @@ IMPORTANT: "likelihood" must be an integer between 0 and 100 (no % sign, no quot
         Returns: Questions JSON schema.
         Used in: Celery `generate_questions_task` (first pass).
         """
-        return """You are an intelligent dermatological assistant who is generating a question to ask to a patient based on the photograph they have uploaded.
+        return _p("patient_first_question", """You are an intelligent dermatological assistant who is generating a question to ask to a patient based on the photograph they have uploaded.
 Generate 1 distinct question to ask to the patient. Choose the single most important question that will best help narrow down the diagnosis. Also provide as many descriptive answer choices for the question as possible that encompasses all likely patient responses.
 Ask any other question other than "What brings you here" because that has already been asked before.
 {follow_up_context}
@@ -400,7 +409,7 @@ Give your response in json format as:
 }}
 
 Remember to reply strictly in the above json format. Do not provide any other string other than the json.
-"""
+""")
 
     # ------------------------------------------------------------------
     # 8. Prescription OCR extraction

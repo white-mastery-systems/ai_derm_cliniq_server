@@ -309,7 +309,7 @@ async def get_first_question(
         qa_history="None yet.",
         age=ctx["age"],
         sex=ctx["sex"],
-        questions_left=5,
+        questions_left=_MAX_DOCTOR_QA_ROUNDS,
     )
 
     raw = await asyncio.to_thread(call_gemini, prompt)
@@ -343,6 +343,9 @@ async def get_first_question(
 # 4. Next Question (Q&A loop)
 # ------------------------------------------------------------------ #
 
+_MAX_DOCTOR_QA_ROUNDS = 4
+
+
 async def get_next_question(
     db: AsyncSession,
     doctor: User,
@@ -354,7 +357,11 @@ async def get_next_question(
     Replaces the previous 2-call chain (doubts → questions) to avoid Flutter timeout.
     Returns has_more=False when the AI is satisfied or questions_left hits 0.
     """
-    if request.questions_left <= 0:
+    # Derive budget from history length — don't trust the client-sent value,
+    # which Flutter may not decrement correctly.
+    questions_left = max(0, _MAX_DOCTOR_QA_ROUNDS - len(request.qa_history))
+
+    if questions_left <= 0:
         return AiQuestionResponse(
             case_id=case_id,
             question="No further clarification needed.",
@@ -379,7 +386,7 @@ async def get_next_question(
         qa_history=qa_history_str,
         age=ctx["age"],
         sex=ctx["sex"],
-        questions_left=request.questions_left,
+        questions_left=questions_left,
     )
 
     raw = await asyncio.to_thread(call_gemini, prompt)
@@ -399,7 +406,7 @@ async def get_next_question(
             has_more=False,
         )
 
-    logger.info("ai_next_question_generated", case_id=case_id, questions_left=request.questions_left)
+    logger.info("ai_next_question_generated", case_id=case_id, questions_left=questions_left)
     return AiQuestionResponse(
         case_id=case_id,
         question=data.get("question", ""),

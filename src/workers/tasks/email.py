@@ -86,10 +86,10 @@ def _generate_qr_png(scan_url: str) -> bytes:
     return buf.getvalue()
 
 
-async def _load_case_and_patient(case_id: str) -> tuple[str, str] | None:
+async def _load_case_and_patient(case_id: str) -> tuple[str, str, str] | None:
     """
-    Load patient email and full_name for a case.
-    Returns (email, full_name) or None if case/patient not found.
+    Load patient email, full_name, and case display_id for a case.
+    Returns (email, full_name, display_id) or None if case/patient not found.
     """
     engine = _make_engine()
     try:
@@ -103,7 +103,8 @@ async def _load_case_and_patient(case_id: str) -> tuple[str, str] | None:
             case = result.scalar_one_or_none()
             if case is None or case.patient is None:
                 return None
-            return case.patient.email, case.patient.full_name
+            display_id = f"AI-{case.case_number}" if case.case_number else case_id[:8].upper()
+            return case.patient.email, case.patient.full_name, display_id
     finally:
         await engine.dispose()
 
@@ -135,7 +136,7 @@ def send_visit_email_task(self, case_id: str, token: str) -> dict:
         logger.error("email_task_case_not_found", case_id=case_id)
         return {"status": "failed", "reason": "case_not_found", "case_id": case_id}
 
-    patient_email, patient_name = result
+    patient_email, patient_name, display_id = result
 
     # 2. Build URLs
     scan_url = f"{settings.FRONTEND_URL}/api/v1/qr/scan/{token}"
@@ -151,7 +152,7 @@ def send_visit_email_task(self, case_id: str, token: str) -> dict:
     # 4. Render HTML body
     html_body = render_visit_email(
         patient_name=patient_name,
-        case_id=case_id,
+        display_id=display_id,
         patient_url=patient_url,
     )
 
@@ -161,7 +162,7 @@ def send_visit_email_task(self, case_id: str, token: str) -> dict:
         attachments.append(("visit_qr.png", qr_png, "image/png"))
 
     # 6. Send
-    subject = f"Your AiDerm Cliniq Visit Summary — Case #{case_id[:8].upper()}"
+    subject = f"Your AiDerm Cliniq Visit Summary — Case {display_id}"
     success = send_email(
         to_email=patient_email,
         subject=subject,

@@ -16,11 +16,16 @@ case goes through the full generate → scan flow.
 ai_status is set directly via test_engine (same approach as QR tests).
 """
 
+from unittest.mock import patch
+
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.auth.security import hash_password
+from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
@@ -46,8 +51,41 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    await client.post("/api/v1/auth/register/doctor", json={
+async def _create_admin_and_approve_doctor(client: AsyncClient, test_engine, doctor_id: str) -> None:
+    """Insert a temporary admin and use it to approve the pending doctor."""
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@revtest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+
+    login_resp = await client.post("/api/v1/auth/login", json={
+        "email": admin_email,
+        "password": "AdminPass9",
+    })
+    admin_token = login_resp.json()["access_token"]
+
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(
+            f"/api/v1/admin/doctors/{doctor_id}/approve",
+            headers=auth_header(admin_token),
+        )
+
+
+async def register_and_login_doctor(
+    client: AsyncClient, suffix: str, test_engine=None
+) -> tuple[str, str]:
+    """Register a doctor, approve it (requires test_engine), then log in."""
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Rev Doctor {suffix}",
         "email": f"rev_doctor_{suffix}@revtest.com",
         "password": "DocPass9",
@@ -55,16 +93,26 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-REV-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
+
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"rev_doctor_{suffix}@revtest.com",
         "password": "DocPass9",
     })
     token = resp.json()["access_token"]
-    profile = await client.get("/api/v1/users/me", headers=auth_header(token))
-    return token, profile.json()["id"]
+    return token, doctor_id
 
 
 async def create_case(client: AsyncClient, token: str) -> str:
+    # Ensure patient profile is complete before creating a case
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-06-15", "gender": "male"},
+    )
     resp = await client.post(
         "/api/v1/cases",
         headers=auth_header(token),
@@ -73,6 +121,7 @@ async def create_case(client: AsyncClient, token: str) -> str:
             "has_visible_lesion": True,
             "is_for_self": True,
             "presenting_complaint": "Skin rash review",
+            "consent_ai_analysis": True,
         },
     )
     return resp.json()["id"]
@@ -97,7 +146,7 @@ async def setup_with_doctor_assigned(
     Returns: (patient_token, doctor_token, doctor_id, case_id, qr_token)
     """
     patient_token, _ = await register_and_login_patient(client, suffix)
-    doctor_token, doctor_id = await register_and_login_doctor(client, suffix)
+    doctor_token, doctor_id = await register_and_login_doctor(client, suffix, test_engine)
 
     case_id = await create_case(client, patient_token)
     await set_ai_completed(test_engine, case_id)
@@ -169,7 +218,7 @@ async def test_create_review_not_assigned_doctor(db_app_client: AsyncClient, tes
         db_app_client, test_engine, "cr3"
     )
     # Register a second doctor — not assigned to the case
-    other_doctor_token, _ = await register_and_login_doctor(db_app_client, "cr3_other")
+    other_doctor_token, _ = await register_and_login_doctor(db_app_client, "cr3_other", test_engine)
 
     resp = await db_app_client.post(
         f"/api/v1/cases/{case_id}/review",
@@ -246,7 +295,7 @@ async def test_update_review_complete_sets_reviewed_at(db_app_client: AsyncClien
     await db_app_client.post(
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
-        json={"confirmed_diagnosis": "Rosacea", "review_status": "in_progress"},
+        json={"confirmed_diagnosis": ["Rosacea"], "review_status": "in_progress"},
     )
 
     resp = await db_app_client.patch(
@@ -303,7 +352,7 @@ async def test_update_review_no_review_returns_404(db_app_client: AsyncClient, t
     resp = await db_app_client.patch(
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
-        json={"confirmed_diagnosis": "Acne"},
+        json={"confirmed_diagnosis": ["Acne"]},
     )
     assert resp.status_code == 404
 

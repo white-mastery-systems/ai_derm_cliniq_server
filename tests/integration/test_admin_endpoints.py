@@ -3,11 +3,21 @@ tests/integration/test_admin_endpoints.py — Admin Endpoint Integration Tests
 =============================================================================
 
 Tests for:
-    GET   /api/v1/admin/users              — list users (filtered)
-    GET   /api/v1/admin/users/{user_id}    — get user detail
-    PATCH /api/v1/admin/users/{user_id}    — update account state
-    GET   /api/v1/admin/cases              — list all cases
-    GET   /api/v1/admin/stats              — platform statistics
+    GET    /api/v1/admin/users                       — list users (filtered)
+    GET    /api/v1/admin/users/{user_id}             — get user detail
+    PATCH  /api/v1/admin/users/{user_id}             — update account state
+    DELETE /api/v1/admin/users/{user_id}             — permanently delete user
+    POST   /api/v1/admin/users/{user_id}/resend-verification — resend OTP
+    GET    /api/v1/admin/cases                       — list all cases
+    GET    /api/v1/admin/cases/{case_id}             — case detail
+    GET    /api/v1/admin/stats                       — platform statistics
+    GET    /api/v1/admin/doctors                     — list all doctors
+    GET    /api/v1/admin/doctors/pending             — pending approval doctors
+    POST   /api/v1/admin/doctors/{user_id}/approve   — approve doctor
+    POST   /api/v1/admin/doctors/{user_id}/reject    — reject and delete doctor
+    GET    /api/v1/admin/prompts                     — list all prompt overrides
+    PATCH  /api/v1/admin/prompts/{key}               — set prompt override
+    DELETE /api/v1/admin/prompts/{key}               — reset prompt to default
 
 ADMIN USER SETUP
 ----------------
@@ -16,6 +26,8 @@ via direct DB insertion. Each test module has a `create_admin` helper
 that inserts a User row (role=admin) directly using test_engine,
 then logs in via POST /auth/login to obtain a JWT.
 """
+
+from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
@@ -74,8 +86,13 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    await client.post("/api/v1/auth/register/doctor", json={
+async def register_doctor(client: AsyncClient, suffix: str) -> str:
+    """Register a doctor (pending approval). Returns the user_id.
+
+    Doctors cannot log in until an admin approves them, so no token is returned.
+    Use the admin approve endpoint to unblock login if a test needs a doctor token.
+    """
+    resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Admin Doctor {suffix}",
         "email": f"adm_doctor_{suffix}@admtest.com",
         "password": "DocPass9",
@@ -83,13 +100,14 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-ADM-{suffix}",
         "clinic_name": "Admin Clinic",
     })
-    resp = await client.post("/api/v1/auth/login", json={
-        "email": f"adm_doctor_{suffix}@admtest.com",
-        "password": "DocPass9",
-    })
-    token = resp.json()["access_token"]
-    profile = await client.get("/api/v1/users/me", headers=auth_header(token))
-    return token, profile.json()["id"]
+    return resp.json()["user"]["id"]
+
+
+async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[None, str]:
+    """Compatibility shim — returns (None, doctor_id). Token is None because
+    doctors must wait for admin approval before they can log in."""
+    doctor_id = await register_doctor(client, suffix)
+    return None, doctor_id
 
 
 # ================================================================== #
@@ -322,11 +340,22 @@ async def test_list_all_cases(db_app_client: AsyncClient, test_engine):
     admin_token = await login(db_app_client, email, password)
 
     patient_token, _ = await register_and_login_patient(db_app_client, "lc1")
+    # Profile must be complete (DOB + gender) before creating a case
+    await db_app_client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(patient_token),
+        json={"date_of_birth": "1990-01-01", "gender": "male"},
+    )
     await db_app_client.post(
         "/api/v1/cases",
         headers=auth_header(patient_token),
-        json={"consultation_type": "new_complaint", "has_visible_lesion": True,
-              "is_for_self": True, "presenting_complaint": "Test"},
+        json={
+            "consultation_type": "new_complaint",
+            "has_visible_lesion": True,
+            "is_for_self": True,
+            "presenting_complaint": "Test rash",
+            "consent_ai_analysis": True,
+        },
     )
 
     resp = await db_app_client.get(
@@ -440,3 +469,478 @@ async def test_get_stats_requires_admin(db_app_client: AsyncClient, test_engine)
 async def test_get_stats_requires_auth(db_app_client: AsyncClient):
     resp = await db_app_client.get("/api/v1/admin/stats")
     assert resp.status_code == 401
+
+
+# ================================================================== #
+# GET /api/v1/admin/doctors
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_list_doctors_returns_doctors(db_app_client: AsyncClient, test_engine):
+    """Admin sees all doctors including newly registered ones."""
+    email, password = await create_admin_user(test_engine, "ld1")
+    admin_token = await login(db_app_client, email, password)
+
+    await register_doctor(db_app_client, "ld1")
+
+    resp = await db_app_client.get(
+        "/api/v1/admin/doctors",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "items" in body
+    assert body["total"] >= 1
+    for item in body["items"]:
+        assert "full_name" in item
+        assert "is_verified" in item
+
+
+@pytest.mark.asyncio
+async def test_list_doctors_requires_admin(db_app_client: AsyncClient, test_engine):
+    patient_token, _ = await register_and_login_patient(db_app_client, "ld2")
+    resp = await db_app_client.get(
+        "/api/v1/admin/doctors",
+        headers=auth_header(patient_token),
+    )
+    assert resp.status_code == 403
+
+
+# ================================================================== #
+# GET /api/v1/admin/doctors/pending
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_list_pending_doctors_only_unapproved(db_app_client: AsyncClient, test_engine):
+    """Pending list only returns doctors with is_verified=False."""
+    email, password = await create_admin_user(test_engine, "lpd1")
+    admin_token = await login(db_app_client, email, password)
+
+    await register_doctor(db_app_client, "lpd1")
+
+    resp = await db_app_client.get(
+        "/api/v1/admin/doctors/pending",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] >= 1
+    # All returned doctors should be unverified
+    for item in body["items"]:
+        assert item["is_verified"] is False
+
+
+# ================================================================== #
+# POST /api/v1/admin/doctors/{user_id}/approve
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_approve_doctor_activates_account(db_app_client: AsyncClient, test_engine):
+    """Approving a doctor sets is_active=True and is_verified=True."""
+    email, password = await create_admin_user(test_engine, "apd1")
+    admin_token = await login(db_app_client, email, password)
+
+    doctor_id = await register_doctor(db_app_client, "apd1")
+
+    with patch("src.core.email.send_email", return_value=True):
+        resp = await db_app_client.post(
+            f"/api/v1/admin/doctors/{doctor_id}/approve",
+            headers=auth_header(admin_token),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_active"] is True
+    assert body["is_verified"] is True
+    assert body["role"] == "doctor"
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_allows_login(db_app_client: AsyncClient, test_engine):
+    """After approval the doctor can log in and get a token."""
+    email, password = await create_admin_user(test_engine, "apd2")
+    admin_token = await login(db_app_client, email, password)
+
+    doctor_id = await register_doctor(db_app_client, "apd2")
+
+    with patch("src.core.email.send_email", return_value=True):
+        await db_app_client.post(
+            f"/api/v1/admin/doctors/{doctor_id}/approve",
+            headers=auth_header(admin_token),
+        )
+
+    login_resp = await db_app_client.post("/api/v1/auth/login", json={
+        "email": "adm_doctor_apd2@admtest.com",
+        "password": "DocPass9",
+    })
+    assert login_resp.status_code == 200
+    assert "access_token" in login_resp.json()
+
+
+@pytest.mark.asyncio
+async def test_approve_doctor_not_found(db_app_client: AsyncClient, test_engine):
+    email, password = await create_admin_user(test_engine, "apd3")
+    admin_token = await login(db_app_client, email, password)
+
+    resp = await db_app_client.post(
+        "/api/v1/admin/doctors/nonexistent-id/approve",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_approve_non_doctor_returns_400(db_app_client: AsyncClient, test_engine):
+    """Approving a patient account returns 400."""
+    email, password = await create_admin_user(test_engine, "apd4")
+    admin_token = await login(db_app_client, email, password)
+
+    _, patient_id = await register_and_login_patient(db_app_client, "apd4")
+
+    resp = await db_app_client.post(
+        f"/api/v1/admin/doctors/{patient_id}/approve",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 400
+
+
+# ================================================================== #
+# POST /api/v1/admin/doctors/{user_id}/reject
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_reject_doctor_deletes_account(db_app_client: AsyncClient, test_engine):
+    """Rejecting a doctor permanently deletes their account."""
+    email, password = await create_admin_user(test_engine, "rjd1")
+    admin_token = await login(db_app_client, email, password)
+
+    doctor_id = await register_doctor(db_app_client, "rjd1")
+
+    with patch("src.core.email.send_email", return_value=True):
+        resp = await db_app_client.post(
+            f"/api/v1/admin/doctors/{doctor_id}/reject",
+            headers=auth_header(admin_token),
+            json={"reason": "License could not be verified"},
+        )
+
+    assert resp.status_code == 204
+
+    # Confirm account is gone
+    detail_resp = await db_app_client.get(
+        f"/api/v1/admin/users/{doctor_id}",
+        headers=auth_header(admin_token),
+    )
+    assert detail_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_reject_doctor_no_reason(db_app_client: AsyncClient, test_engine):
+    """Rejection without a reason still works (reason is optional)."""
+    email, password = await create_admin_user(test_engine, "rjd2")
+    admin_token = await login(db_app_client, email, password)
+
+    doctor_id = await register_doctor(db_app_client, "rjd2")
+
+    with patch("src.core.email.send_email", return_value=True):
+        resp = await db_app_client.post(
+            f"/api/v1/admin/doctors/{doctor_id}/reject",
+            headers=auth_header(admin_token),
+            json={},
+        )
+
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_reject_non_doctor_returns_400(db_app_client: AsyncClient, test_engine):
+    """Rejecting a patient returns 400."""
+    email, password = await create_admin_user(test_engine, "rjd3")
+    admin_token = await login(db_app_client, email, password)
+
+    _, patient_id = await register_and_login_patient(db_app_client, "rjd3")
+
+    resp = await db_app_client.post(
+        f"/api/v1/admin/doctors/{patient_id}/reject",
+        headers=auth_header(admin_token),
+        json={},
+    )
+    assert resp.status_code == 400
+
+
+# ================================================================== #
+# GET /api/v1/admin/cases/{case_id}
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_get_case_detail_returns_full_info(db_app_client: AsyncClient, test_engine):
+    """Admin can fetch full case detail including patient name and AI status."""
+    email, password = await create_admin_user(test_engine, "gcd1")
+    admin_token = await login(db_app_client, email, password)
+
+    patient_token, _ = await register_and_login_patient(db_app_client, "gcd1")
+    await db_app_client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(patient_token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
+    case_resp = await db_app_client.post(
+        "/api/v1/cases",
+        headers=auth_header(patient_token),
+        json={
+            "consultation_type": "new_complaint",
+            "has_visible_lesion": True,
+            "is_for_self": True,
+            "presenting_complaint": "Itchy rash on arm",
+            "consent_ai_analysis": True,
+        },
+    )
+    assert case_resp.status_code == 201
+    case_id = case_resp.json()["id"]
+
+    resp = await db_app_client.get(
+        f"/api/v1/admin/cases/{case_id}",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == case_id
+    assert body["patient_name"] == "Admin Patient gcd1"
+    assert body["ai_status"] == "pending"
+    assert body["consultation_type"] == "new_complaint"
+    assert body["presenting_complaint"] == "Itchy rash on arm"
+    assert body["consent_ai_analysis"] is True
+    assert "red_flag_status" in body
+
+
+@pytest.mark.asyncio
+async def test_get_case_detail_not_found(db_app_client: AsyncClient, test_engine):
+    email, password = await create_admin_user(test_engine, "gcd2")
+    admin_token = await login(db_app_client, email, password)
+
+    resp = await db_app_client.get(
+        "/api/v1/admin/cases/nonexistent-case-id",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+# ================================================================== #
+# DELETE /api/v1/admin/users/{user_id}
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_delete_user_removes_account(db_app_client: AsyncClient, test_engine):
+    """Admin can permanently delete a user account."""
+    email, password = await create_admin_user(test_engine, "du1")
+    admin_token = await login(db_app_client, email, password)
+
+    _, patient_id = await register_and_login_patient(db_app_client, "du1")
+
+    resp = await db_app_client.delete(
+        f"/api/v1/admin/users/{patient_id}",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 204
+
+    # Confirm gone
+    detail_resp = await db_app_client.get(
+        f"/api/v1/admin/users/{patient_id}",
+        headers=auth_header(admin_token),
+    )
+    assert detail_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_user_not_found(db_app_client: AsyncClient, test_engine):
+    email, password = await create_admin_user(test_engine, "du2")
+    admin_token = await login(db_app_client, email, password)
+
+    resp = await db_app_client.delete(
+        "/api/v1/admin/users/no-such-user",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_user_requires_admin(db_app_client: AsyncClient, test_engine):
+    patient_token, patient_id = await register_and_login_patient(db_app_client, "du3")
+
+    resp = await db_app_client.delete(
+        f"/api/v1/admin/users/{patient_id}",
+        headers=auth_header(patient_token),
+    )
+    assert resp.status_code == 403
+
+
+# ================================================================== #
+# POST /api/v1/admin/users/{user_id}/resend-verification
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_resend_verification_for_unverified_user(db_app_client: AsyncClient, test_engine):
+    """Admin can resend verification OTP to an unverified user."""
+    email, password = await create_admin_user(test_engine, "rv1")
+    admin_token = await login(db_app_client, email, password)
+
+    _, patient_id = await register_and_login_patient(db_app_client, "rv1")
+    # Newly registered patients are not yet verified
+
+    with patch("src.core.email.send_email", return_value=True):
+        resp = await db_app_client.post(
+            f"/api/v1/admin/users/{patient_id}/resend-verification",
+            headers=auth_header(admin_token),
+        )
+    assert resp.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_already_verified_returns_400(
+    db_app_client: AsyncClient, test_engine
+):
+    """Resending to an already verified user returns 400."""
+    email, password = await create_admin_user(test_engine, "rv2")
+    admin_token = await login(db_app_client, email, password)
+
+    _, patient_id = await register_and_login_patient(db_app_client, "rv2")
+
+    # Verify the user first via admin PATCH
+    await db_app_client.patch(
+        f"/api/v1/admin/users/{patient_id}",
+        headers=auth_header(admin_token),
+        json={"is_verified": True},
+    )
+
+    resp = await db_app_client.post(
+        f"/api/v1/admin/users/{patient_id}/resend-verification",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_resend_verification_not_found(db_app_client: AsyncClient, test_engine):
+    email, password = await create_admin_user(test_engine, "rv3")
+    admin_token = await login(db_app_client, email, password)
+
+    resp = await db_app_client.post(
+        "/api/v1/admin/users/no-such-id/resend-verification",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 404
+
+
+# ================================================================== #
+# GET /api/v1/admin/prompts
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_get_prompts_returns_all_keys(db_app_client: AsyncClient, test_engine):
+    """Admin can retrieve the full prompt list — always 10 keys."""
+    email, password = await create_admin_user(test_engine, "gp1")
+    admin_token = await login(db_app_client, email, password)
+
+    with patch("src.ai.prompt_registry._redis_get", return_value=None):
+        resp = await db_app_client.get(
+            "/api/v1/admin/prompts",
+            headers=auth_header(admin_token),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "prompts" in body
+    assert len(body["prompts"]) == 10
+    for item in body["prompts"]:
+        assert "key" in item
+        assert "label" in item
+        assert "has_override" in item
+
+
+@pytest.mark.asyncio
+async def test_get_prompts_requires_admin(db_app_client: AsyncClient, test_engine):
+    patient_token, _ = await register_and_login_patient(db_app_client, "gp2")
+    resp = await db_app_client.get(
+        "/api/v1/admin/prompts",
+        headers=auth_header(patient_token),
+    )
+    assert resp.status_code == 403
+
+
+# ================================================================== #
+# PATCH /api/v1/admin/prompts/{key}
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_update_prompt_sets_override(db_app_client: AsyncClient, test_engine):
+    """Setting a prompt override stores the value and has_override becomes True."""
+    email, password = await create_admin_user(test_engine, "up1")
+    admin_token = await login(db_app_client, email, password)
+
+    custom_prompt = "You are a custom dermatology assistant. {follow_up_context}"
+
+    with patch("src.ai.prompt_registry._redis_set") as mock_set, \
+         patch("src.ai.prompt_registry._redis_get", return_value=custom_prompt):
+        resp = await db_app_client.patch(
+            "/api/v1/admin/prompts/patient_first_question",
+            headers=auth_header(admin_token),
+            json={"value": custom_prompt},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"] == "patient_first_question"
+    assert body["has_override"] is True
+    assert body["value"] == custom_prompt
+    mock_set.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_update_prompt_invalid_key_returns_400(db_app_client: AsyncClient, test_engine):
+    """Updating a non-existent prompt key returns 400."""
+    email, password = await create_admin_user(test_engine, "up2")
+    admin_token = await login(db_app_client, email, password)
+
+    resp = await db_app_client.patch(
+        "/api/v1/admin/prompts/nonexistent_key",
+        headers=auth_header(admin_token),
+        json={"value": "some value"},
+    )
+    assert resp.status_code == 400
+
+
+# ================================================================== #
+# DELETE /api/v1/admin/prompts/{key}
+# ================================================================== #
+
+@pytest.mark.asyncio
+async def test_reset_prompt_removes_override(db_app_client: AsyncClient, test_engine):
+    """Resetting a prompt removes the Redis override (has_override becomes False)."""
+    email, password = await create_admin_user(test_engine, "rp1")
+    admin_token = await login(db_app_client, email, password)
+
+    with patch("src.ai.prompt_registry._redis_delete") as mock_del, \
+         patch("src.ai.prompt_registry._redis_get", return_value=None):
+        resp = await db_app_client.delete(
+            "/api/v1/admin/prompts/doctor_diagnosis",
+            headers=auth_header(admin_token),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["key"] == "doctor_diagnosis"
+    assert body["has_override"] is False
+    assert body["value"] is None
+    mock_del.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reset_prompt_invalid_key_returns_400(db_app_client: AsyncClient, test_engine):
+    """Resetting a non-existent prompt key returns 400."""
+    email, password = await create_admin_user(test_engine, "rp2")
+    admin_token = await login(db_app_client, email, password)
+
+    resp = await db_app_client.delete(
+        "/api/v1/admin/prompts/bad_key",
+        headers=auth_header(admin_token),
+    )
+    assert resp.status_code == 400
