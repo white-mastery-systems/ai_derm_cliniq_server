@@ -38,17 +38,34 @@ NOTE: The `request: Request` parameter is required by slowapi even if
 the route handler does not use it directly.
 """
 
+from starlette.requests import Request
+
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from src.config import settings
 
-# The limiter uses the client's IP address as the key.
-# In production behind a reverse proxy (nginx, GCP Load Balancer),
-# you should use the X-Forwarded-For header instead:
-#   key_func=lambda request: request.headers.get("X-Forwarded-For", get_remote_address(request))
+
+def _get_client_ip(request: Request) -> str:
+    """
+    Return the real client IP, honouring X-Forwarded-For from a reverse proxy.
+
+    Behind nginx / GCP Load Balancer, the direct peer is the proxy — not the
+    browser. X-Forwarded-For is a comma-separated list; the leftmost entry is
+    the original client (added by the first trusted proxy). We take that first
+    value so the rate-limit key is the actual client, not the proxy IP.
+
+    Falls back to the direct peer address when the header is absent (i.e. in
+    development without a proxy in front).
+    """
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return get_remote_address(request)
+
+
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=_get_client_ip,
     default_limits=[f"{settings.RATE_LIMIT_PER_MINUTE}/minute"],
     storage_uri=settings.REDIS_URL,   # Use Redis so limits persist across workers
     swallow_errors=True,              # Prevent Redis errors from crashing requests

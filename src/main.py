@@ -73,39 +73,62 @@ async def _bootstrap_admin() -> None:
     Create the first admin account on startup if ADMIN_EMAIL + ADMIN_PASSWORD
     are set in .env and no user with that email exists yet.
 
-    Idempotent — safe to run on every restart.
+    Admins are also doctors — a DoctorProfile row is created alongside the
+    User so the admin can scan QR codes and review cases like any doctor.
+
+    Idempotent — safe to run on every restart. If the User already exists
+    but has no DoctorProfile (e.g. created by an older version), the profile
+    is created on this run.
     """
     if not settings.ADMIN_EMAIL or not settings.ADMIN_PASSWORD:
         logger.info("admin_bootstrap_skipped", reason="ADMIN_EMAIL or ADMIN_PASSWORD not set")
         return
 
     from src.auth.security import hash_password
+    from src.models.doctor_profile import DoctorProfile
     from src.models.user import User, UserRole
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as db:
         result = await db.execute(select(User).where(User.email == settings.ADMIN_EMAIL))
         existing = result.scalar_one_or_none()
-        if existing is not None:
-            logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="already exists")
+
+        if existing is None:
+            # First run — create User + DoctorProfile together
+            hashed = await asyncio.to_thread(hash_password, settings.ADMIN_PASSWORD)
+            admin = User(
+                email=settings.ADMIN_EMAIL,
+                full_name="Admin",
+                role=UserRole.ADMIN,
+                password_hash=hashed,
+                is_active=True,
+                is_verified=True,
+            )
+            db.add(admin)
+            try:
+                await db.flush()  # get admin.id before creating profile
+                profile = DoctorProfile(user_id=admin.id)
+                db.add(profile)
+                await db.commit()
+                logger.info("admin_account_created", email=settings.ADMIN_EMAIL)
+            except IntegrityError:
+                await db.rollback()
+                logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="created by another worker")
             return
 
-        hashed = await asyncio.to_thread(hash_password, settings.ADMIN_PASSWORD)
-        admin = User(
-            email=settings.ADMIN_EMAIL,
-            full_name="Admin",
-            role=UserRole.ADMIN,
-            password_hash=hashed,
-            is_active=True,
-            is_verified=True,
+        # User already exists — ensure DoctorProfile exists (migration safety)
+        prof_result = await db.execute(
+            select(DoctorProfile).where(DoctorProfile.user_id == existing.id)
         )
-        db.add(admin)
-        try:
-            await db.commit()
-            logger.info("admin_account_created", email=settings.ADMIN_EMAIL)
-        except IntegrityError:
-            await db.rollback()
-            logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="created by another worker")
+        if prof_result.scalar_one_or_none() is None:
+            try:
+                db.add(DoctorProfile(user_id=existing.id))
+                await db.commit()
+                logger.info("admin_doctor_profile_created", email=settings.ADMIN_EMAIL)
+            except IntegrityError:
+                await db.rollback()
+        else:
+            logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="already exists")
 
 
 # ------------------------------------------------------------------ #

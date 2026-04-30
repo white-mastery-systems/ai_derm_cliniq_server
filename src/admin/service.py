@@ -208,6 +208,12 @@ async def update_user(
     if user is None:
         raise UserNotFoundException(message=f"No user found with id: {user_id}")
 
+    from src.config import settings
+    if user.email == settings.ADMIN_EMAIL:
+        raise BadRequestException(
+            message="The bootstrap admin account cannot be modified"
+        )
+
     if is_active is not None:
         action = "activated" if is_active else "suspended"
         user.is_active = is_active
@@ -223,6 +229,10 @@ async def update_user(
         except ValueError:
             raise BadRequestException(
                 message=f"Invalid role '{role}'. Must be: patient, doctor, admin"
+            )
+        if role_enum == UserRole.ADMIN and user.role != UserRole.DOCTOR:
+            raise BadRequestException(
+                message="Only doctors can be promoted to admin"
             )
         logger.warning(
             "admin_user_role_changed",
@@ -614,11 +624,18 @@ async def delete_user(db: AsyncSession, user_id: str) -> None:
     Permanently delete a user account and all cascaded data.
 
     Raises 404 if user not found.
+    Raises 400 if attempting to delete the bootstrap admin.
     """
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if user is None:
         raise UserNotFoundException(message=f"No user found with id: {user_id}")
+
+    from src.config import settings
+    if user.email == settings.ADMIN_EMAIL:
+        raise BadRequestException(
+            message="The bootstrap admin account cannot be deleted"
+        )
 
     await db.delete(user)
     logger.info("admin_user_deleted", user_id=user_id, role=user.role.value)

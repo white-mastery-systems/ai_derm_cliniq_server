@@ -140,8 +140,8 @@ class Settings(BaseSettings):
     # Set these in .env to auto-create the first admin account on startup.
     # If ADMIN_EMAIL already exists in the DB, bootstrap is skipped (idempotent).
     # Leave empty to disable bootstrap.
-    ADMIN_EMAIL: str = "dev@bdcode.in"
-    ADMIN_PASSWORD: str = "@Dev_bdcode.in"
+    ADMIN_EMAIL: str = ""
+    ADMIN_PASSWORD: str = ""
 
     # ------------------------------------------------------------------ #
     # QR Token

@@ -154,18 +154,21 @@ async def require_patient(user: User = Depends(get_current_user)) -> User:
 
 async def require_doctor(user: User = Depends(get_current_user)) -> User:
     """
-    Dependency: route is only accessible to DOCTOR-role users who have been
-    approved by an admin (is_verified=True).
+    Dependency: route is accessible to DOCTOR-role users and ADMIN-role users.
 
-    Unverified doctors receive 403 DOCTOR_PENDING_APPROVAL — not a role error.
-    This tells the Flutter app to show a "pending approval" screen instead of
-    a generic "insufficient role" error.
+    Admins are promoted from doctors and retain full doctor privileges —
+    they can review cases, scan QR codes, and use all doctor endpoints.
+
+    Unverified doctors receive 403 DOCTOR_PENDING_APPROVAL.
+    Patients and other roles receive 403 INSUFFICIENT_ROLE.
 
     Usage:
         @router.post("/cases/{case_id}/review")
         async def submit_review(doctor: User = Depends(require_doctor)):
             ...
     """
+    if user.role == UserRole.ADMIN:
+        return user  # admins always pass doctor checks
     if user.role != UserRole.DOCTOR:
         raise InsufficientRoleException(
             message="This endpoint requires the 'doctor' role"
@@ -207,8 +210,8 @@ async def require_patient_or_assigned_doctor(
     """
     if user.role == UserRole.PATIENT:
         return user
-    if user.role == UserRole.DOCTOR:
-        if not user.is_verified:
+    if user.role in (UserRole.DOCTOR, UserRole.ADMIN):
+        if user.role == UserRole.DOCTOR and not user.is_verified:
             raise DoctorPendingApprovalException()
         from src.models.case import Case
         result = await db.execute(select(Case).where(Case.id == case_id))
