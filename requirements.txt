@@ -13,7 +13,7 @@ psycopg2-binary==2.9.10          # Sync driver (Alembic migrations only)
 alembic==1.14.0                  # Database migrations
 
 # --- Auth ---
-python-jose[cryptography]==3.3.0 # JWT encoding/decoding
+python-jose[cryptography]==3.4.0 # JWT encoding/decoding
 passlib[bcrypt]==1.7.4           # Password hashing
 bcrypt==4.0.1                    # Pinned: bcrypt 4.x+ breaks passlib 1.7.4 (ValueError >72 bytes)
 httpx==0.28.1                    # HTTP client (Google OAuth token exchange)
