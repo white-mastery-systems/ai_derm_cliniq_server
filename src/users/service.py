@@ -36,7 +36,7 @@ from src.models.doctor_profile import DoctorProfile
 from src.models.patient_profile import PatientProfile
 from src.models.user import User, UserRole
 from src.storage import gcs
-from src.users.schemas import AvatarUploadResponse, PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
+from src.users.schemas import AvatarUploadResponse, DeviceTokenResponse, PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
 
 logger = get_logger(__name__)
 
@@ -196,6 +196,29 @@ async def get_patient_by_code(
         gender=profile.gender,
         avatar_url=profile.avatar_url,
     )
+
+
+# ------------------------------------------------------------------ #
+# update_device_token
+# ------------------------------------------------------------------ #
+
+async def update_device_token(db: AsyncSession, user_id: str, fcm_token: str) -> DeviceTokenResponse:
+    """
+    Store or replace the FCM device token for push notifications.
+
+    Called when the Flutter app detects its FCM token has changed (e.g.
+    after reinstall) without the user needing to log out and back in.
+
+    Used by: POST /api/v1/users/me/device-token
+    """
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise UserNotFoundException()
+
+    user.fcm_token = fcm_token
+    logger.info("device_token_updated", user_id=user_id)
+    return DeviceTokenResponse()
 
 
 # ------------------------------------------------------------------ #

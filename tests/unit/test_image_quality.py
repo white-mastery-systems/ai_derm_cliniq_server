@@ -145,16 +145,21 @@ def test_validate_quality_accepts_mid_tone():
 # Blur
 # ------------------------------------------------------------------ #
 
-def test_validate_quality_rejects_blurry_solid_color():
-    """A solid-colour PNG image (zero edges) scores very low on sharpness."""
+def test_validate_quality_blurry_solid_color_is_accepted():
+    """Solid-colour images are currently accepted — blur rejection is disabled.
+
+    The Laplacian variance check exists in the code but is commented out to
+    avoid false positives on valid low-texture skin images (e.g. mild erythema
+    on a uniform skin tone). When the blur threshold is re-enabled, this test
+    should be updated to expect ImageQualityException.
+    """
     from src.images.quality import validate_image_quality
-    from src.exceptions import ImageQualityException
 
     # Use PNG — JPEG compression introduces DCT artefacts that fake edges.
     # PNG is lossless so a solid-colour image has truly zero internal edges.
     raw = _make_image_bytes(color=(120, 80, 60), fmt="PNG")
-    with pytest.raises(ImageQualityException, match="blurry"):
-        validate_image_quality(raw, filename="solid.png")
+    # Should NOT raise — blur check is disabled
+    validate_image_quality(raw, filename="solid.png")
 
 
 def test_validate_quality_accepts_sharp_image():

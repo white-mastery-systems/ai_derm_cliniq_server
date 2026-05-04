@@ -55,6 +55,11 @@ class PatientRegisterRequest(BaseModel):
         max_length=50,
         description="Male | Female | Other | Prefer not to say",
     )
+    fcm_token: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Firebase Cloud Messaging device token for push notifications",
+    )
 
     @field_validator("password")
     @classmethod
@@ -80,6 +85,11 @@ class DoctorRegisterRequest(BaseModel):
     specialization: str | None = Field(default=None, max_length=255)
     license_number: str | None = Field(default=None, max_length=100)
     clinic_name: str | None = Field(default=None, max_length=255)
+    fcm_token: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Firebase Cloud Messaging device token for push notifications",
+    )
 
     @field_validator("password")
     @classmethod
@@ -104,6 +114,11 @@ class LoginRequest(BaseModel):
     """
     email: EmailStr
     password: str
+    fcm_token: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Firebase Cloud Messaging device token — updated on every login",
+    )
 
 
 # ================================================================== #
@@ -163,6 +178,11 @@ class GoogleAuthRequest(BaseModel):
         default="patient",
         pattern="^(patient|doctor)$",
         description="patient or doctor — used only on first login",
+    )
+    fcm_token: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Firebase Cloud Messaging device token for push notifications",
     )
 
 

@@ -532,6 +532,13 @@ async def approve_doctor(db: AsyncSession, user_id: str) -> AdminUserDetail:
         subject="AiDerm Cliniq — Your Account Has Been Approved",
         html_body=html,
     )
+
+    try:
+        from src.workers.tasks.notifications import notify_doctor_approved
+        notify_doctor_approved.delay(doctor_id=user_id)
+    except Exception as exc:
+        logger.warning("notify_doctor_approved_enqueue_failed", error=str(exc))
+
     logger.info("admin_doctor_approved", user_id=user_id)
 
     return await get_user(db, user_id)
@@ -559,6 +566,12 @@ async def reject_doctor(db: AsyncSession, user_id: str, reason: str | None) -> N
         subject="AiDerm Cliniq — Account Application Update",
         html_body=html,
     )
+
+    try:
+        from src.workers.tasks.notifications import notify_doctor_rejected
+        notify_doctor_rejected.delay(doctor_id=user_id)
+    except Exception as exc:
+        logger.warning("notify_doctor_rejected_enqueue_failed", error=str(exc))
 
     await db.delete(user)
     logger.info("admin_doctor_rejected_and_deleted", user_id=user_id)

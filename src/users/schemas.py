@@ -148,3 +148,19 @@ class AvatarUploadResponse(BaseModel):
     """Returned after a successful avatar upload."""
     avatar_url: str
     message: str = "Avatar uploaded successfully"
+
+
+# ================================================================== #
+# Device Token — POST /users/me/device-token
+# ================================================================== #
+
+class DeviceTokenRequest(BaseModel):
+    """Body for POST /api/v1/users/me/device-token."""
+    fcm_token: str = Field(
+        max_length=512,
+        description="Firebase Cloud Messaging device token from the Flutter app",
+    )
+
+
+class DeviceTokenResponse(BaseModel):
+    message: str = "Device token updated"

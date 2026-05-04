@@ -47,6 +47,10 @@ def auth_header(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+from src.auth.security import hash_password
+from src.models.user import User, UserRole
+
+
 async def register_and_login_patient(client, suffix):
     await client.post("/api/v1/auth/register/patient", json={
         "full_name": f"Rep Patient {suffix}",
@@ -58,12 +62,38 @@ async def register_and_login_patient(client, suffix):
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client, suffix):
-    await client.post("/api/v1/auth/register/doctor", json={
+async def _create_admin_and_approve_doctor(client, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@reptest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers=auth_header(admin_token))
+
+
+async def register_and_login_doctor(client, suffix, test_engine=None):
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Rep Doctor {suffix}",
         "email": f"rep_doctor_{suffix}@reptest.com",
         "password": "DocPass9",
@@ -71,6 +101,9 @@ async def register_and_login_doctor(client, suffix):
         "license_number": f"LIC-REP-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"rep_doctor_{suffix}@reptest.com",
         "password": "DocPass9",
@@ -95,7 +128,7 @@ async def setup_with_completed_review(client, test_engine, suffix):
     Returns: (patient_token, doctor_token, case_id)
     """
     patient_token, _ = await register_and_login_patient(client, suffix)
-    doctor_token, _ = await register_and_login_doctor(client, suffix)
+    doctor_token, _ = await register_and_login_doctor(client, suffix, test_engine)
 
     # Patient creates case
     case_resp = await client.post(
@@ -106,6 +139,7 @@ async def setup_with_completed_review(client, test_engine, suffix):
             "has_visible_lesion": True,
             "is_for_self": True,
             "presenting_complaint": "Persistent rash",
+            "consent_ai_analysis": True,
         },
     )
     case_id = case_resp.json()["id"]
@@ -126,7 +160,7 @@ async def setup_with_completed_review(client, test_engine, suffix):
     await client.post(
         f"/api/v1/cases/{case_id}/review",
         headers=auth_header(doctor_token),
-        json={"confirmed_diagnosis": "Eczema", "review_status": "in_progress"},
+        json={"confirmed_diagnosis": ["Eczema"], "review_status": "in_progress"},
     )
     await client.patch(
         f"/api/v1/cases/{case_id}/review",
@@ -206,13 +240,14 @@ async def test_trigger_report_requires_doctor(db_app_client: AsyncClient, test_e
 async def test_trigger_report_review_not_completed(db_app_client: AsyncClient, test_engine):
     """Cannot trigger report if review is not yet completed."""
     patient_token, _ = await register_and_login_patient(db_app_client, "tr3a")
-    doctor_token, _ = await register_and_login_doctor(db_app_client, "tr3a")
+    doctor_token, _ = await register_and_login_doctor(db_app_client, "tr3a", test_engine)
 
     case_resp = await db_app_client.post(
         "/api/v1/cases",
         headers=auth_header(patient_token),
         json={"consultation_type": "new_complaint", "has_visible_lesion": True,
-              "is_for_self": True, "presenting_complaint": "Test"},
+              "is_for_self": True, "presenting_complaint": "Test",
+              "consent_ai_analysis": True},
     )
     case_id = case_resp.json()["id"]
     await set_ai_completed(test_engine, case_id)
@@ -250,7 +285,7 @@ async def test_trigger_report_not_assigned_doctor(db_app_client: AsyncClient, te
     _, _, case_id = await setup_with_completed_review(
         db_app_client, test_engine, "tr4"
     )
-    other_doctor_token, _ = await register_and_login_doctor(db_app_client, "tr4_other")
+    other_doctor_token, _ = await register_and_login_doctor(db_app_client, "tr4_other", test_engine)
 
     with mock_report_task():
         resp = await db_app_client.post(

@@ -22,6 +22,12 @@ then pass that token in the Authorization header for subsequent calls.
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker
+from unittest.mock import patch
+
+from src.auth.security import hash_password
+from src.models.base import new_uuid
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
@@ -42,9 +48,30 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> str:
     return resp.json()["access_token"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> str:
-    """Register a doctor and return the access token."""
-    await client.post("/api/v1/auth/register/doctor", json={
+async def _create_admin_and_approve_doctor(client: AsyncClient, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@userstest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers={"Authorization": f"Bearer {admin_token}"})
+
+
+async def register_and_login_doctor(client: AsyncClient, suffix: str, test_engine=None) -> str:
+    """Register a doctor, approve them, and return the access token."""
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Test Doctor {suffix}",
         "email": f"doctor_{suffix}@userstest.com",
         "password": "DocPass9",
@@ -52,6 +79,9 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> str:
         "license_number": f"LIC-{suffix}",
         "clinic_name": "Skin Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"doctor_{suffix}@userstest.com",
         "password": "DocPass9",
@@ -82,8 +112,8 @@ class TestGetMyProfile:
         assert "patient_code" in body["patient_profile"]
         assert body["doctor_profile"] is None
 
-    async def test_doctor_gets_own_profile(self, db_app_client: AsyncClient):
-        token = await register_and_login_doctor(db_app_client, "get02")
+    async def test_doctor_gets_own_profile(self, db_app_client: AsyncClient, test_engine):
+        token = await register_and_login_doctor(db_app_client, "get02", test_engine)
         resp = await db_app_client.get("/api/v1/users/me", headers=auth_header(token))
 
         assert resp.status_code == 200
@@ -145,8 +175,8 @@ class TestUpdateMyProfile:
         assert resp.status_code == 200
         assert resp.json()["patient_profile"] is not None
 
-    async def test_doctor_can_update_clinic_name(self, db_app_client: AsyncClient):
-        token = await register_and_login_doctor(db_app_client, "upd04")
+    async def test_doctor_can_update_clinic_name(self, db_app_client: AsyncClient, test_engine):
+        token = await register_and_login_doctor(db_app_client, "upd04", test_engine)
         resp = await db_app_client.patch(
             "/api/v1/users/me",
             headers=auth_header(token),
@@ -155,8 +185,8 @@ class TestUpdateMyProfile:
         assert resp.status_code == 200
         assert resp.json()["doctor_profile"]["clinic_name"] == "New Clinic"
 
-    async def test_doctor_can_toggle_notifications(self, db_app_client: AsyncClient):
-        token = await register_and_login_doctor(db_app_client, "upd05")
+    async def test_doctor_can_toggle_notifications(self, db_app_client: AsyncClient, test_engine):
+        token = await register_and_login_doctor(db_app_client, "upd05", test_engine)
         resp = await db_app_client.patch(
             "/api/v1/users/me",
             headers=auth_header(token),

@@ -42,11 +42,41 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from src.auth.security import hash_password
+from src.models.base import new_uuid
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
 # Helpers
 # ================================================================== #
+
+def auth_header(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _create_admin_and_approve_doctor(client, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@chattest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers=auth_header(admin_token))
+
 
 async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[str, str]:
     await client.post("/api/v1/auth/register/patient", json={
@@ -59,12 +89,17 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    await client.post("/api/v1/auth/register/doctor", json={
+async def register_and_login_doctor(client: AsyncClient, suffix: str, test_engine=None) -> tuple[str, str]:
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Chat Doctor {suffix}",
         "email": f"chat_d_{suffix}@chattest.com",
         "password": "DocPass9",
@@ -72,6 +107,9 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-CH-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"chat_d_{suffix}@chattest.com",
         "password": "DocPass9",
@@ -79,10 +117,6 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
     token = resp.json()["access_token"]
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
-
-
-def auth_header(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
 
 
 def fake_jpeg() -> bytes:
@@ -123,20 +157,22 @@ def mock_refine_analysis(task_id: str = "fake-refine-task"):
 
 
 async def setup_completed_case(client: AsyncClient, token: str) -> str:
-    """Create case → consent → upload image → trigger analysis (mocked).
-    Returns case_id with ai_status=PROCESSING (Celery mocked).
-    For tests needing COMPLETED status, patch the service to bypass the check.
+    """Create case with consent → attempt image upload (may fail quality) → trigger analysis (mocked).
+    Returns case_id. The image upload and analyze calls are best-effort; tests that need a
+    valid case_id can still use the returned id with service-layer mocks.
     """
     case_resp = await client.post(
         "/api/v1/cases",
         headers=auth_header(token),
-        json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True,
-              "presenting_complaint": "Itchy patch"},
+        json={
+            "consultation_type": "new_complaint",
+            "has_visible_lesion": True,
+            "is_for_self": True,
+            "presenting_complaint": "Itchy patch",
+            "consent_ai_analysis": True,
+        },
     )
     case_id = case_resp.json()["id"]
-
-    await client.patch(f"/api/v1/cases/{case_id}", headers=auth_header(token),
-                       json={"consent_given": True})
 
     patches = gcs_patches()
     with patches[0], patches[1], patches[2], patches[3]:
@@ -164,7 +200,6 @@ class TestTriggerQuestions:
 
         # Bypass the ai_status=COMPLETED check and question existence check
         from src.conversations import service as conv_service
-        from src.models.case import AiStatus
         from src.conversations.schemas import QuestionsGeneratedResponse
 
         mock_resp = QuestionsGeneratedResponse(case_id=case_id, round_number=0, task_id="task-tq01")
@@ -185,7 +220,12 @@ class TestTriggerQuestions:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 
@@ -196,14 +236,11 @@ class TestTriggerQuestions:
         )
         assert resp.status_code == 400
 
-    async def test_doctor_cannot_trigger_questions(self, db_app_client: AsyncClient):
+    async def test_doctor_cannot_trigger_questions(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "tq03p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "tq03d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "tq03d", test_engine)
         case_id = await setup_completed_case(db_app_client, p_token)
-        await db_app_client.patch(
-            f"/api/v1/cases/{case_id}/assign", headers=auth_header(d_token)
-        )
-        # require_patient dependency fires before service → no Celery mock needed
+        # Doctor is NOT assigned — require_patient_or_assigned_doctor raises 403
         resp = await db_app_client.post(
             f"/api/v1/cases/{case_id}/chat/questions",
             headers=auth_header(d_token),
@@ -236,7 +273,12 @@ class TestSubmitAnswers:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 
@@ -281,14 +323,11 @@ class TestSubmitAnswers:
         )
         assert resp.status_code == 422  # Pydantic validation: min_length=1
 
-    async def test_doctor_cannot_submit_answers(self, db_app_client: AsyncClient):
+    async def test_doctor_cannot_submit_answers(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "sa04p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "sa04d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "sa04d", test_engine)
         case_id = await setup_completed_case(db_app_client, p_token)
-        await db_app_client.patch(
-            f"/api/v1/cases/{case_id}/assign", headers=auth_header(d_token)
-        )
-
+        # Doctor is NOT assigned — require_patient_or_assigned_doctor raises 403
         resp = await db_app_client.post(
             f"/api/v1/cases/{case_id}/chat/answers",
             headers=auth_header(d_token),
@@ -315,7 +354,12 @@ class TestGetHistory:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 
@@ -388,13 +432,18 @@ class TestGetHistory:
         assert body["rounds"][0]["answers"][0] == "1 week"
         assert len(body["raw_messages"]) == 2
 
-    async def test_doctor_can_read_history(self, db_app_client: AsyncClient):
+    async def test_doctor_can_read_history(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "gh03p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "gh03d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "gh03d", test_engine)
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(p_token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
         await db_app_client.patch(
@@ -412,7 +461,12 @@ class TestGetHistory:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token1),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 

@@ -20,8 +20,12 @@ are in the same in-memory SQLite instance.
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from unittest.mock import patch
 
+from src.auth.security import hash_password
+from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
@@ -30,6 +34,27 @@ from src.models.case import AiStatus, Case
 
 def auth_header(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _create_admin_and_approve_doctor(client, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@qrtest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers=auth_header(admin_token))
 
 
 async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[str, str]:
@@ -43,12 +68,17 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    await client.post("/api/v1/auth/register/doctor", json={
+async def register_and_login_doctor(client: AsyncClient, suffix: str, test_engine=None) -> tuple[str, str]:
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"QR Doctor {suffix}",
         "email": f"qr_doctor_{suffix}@qrtest.com",
         "password": "DocPass9",
@@ -56,6 +86,9 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-QR-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"qr_doctor_{suffix}@qrtest.com",
         "password": "DocPass9",
@@ -74,6 +107,7 @@ async def create_case(client: AsyncClient, token: str) -> str:
             "has_visible_lesion": True,
             "is_for_self": True,
             "presenting_complaint": "Red itchy patch",
+            "consent_ai_analysis": True,
         },
     )
     return resp.json()["id"]
@@ -128,7 +162,7 @@ async def test_generate_qr_success(db_app_client: AsyncClient, test_engine):
 async def test_generate_qr_requires_patient(db_app_client: AsyncClient, test_engine):
     """Doctors cannot generate QR codes."""
     _, _, case_id = await setup_completed_case(db_app_client, test_engine, "gen2")
-    doctor_token, _ = await register_and_login_doctor(db_app_client, "gen2")
+    doctor_token, _ = await register_and_login_doctor(db_app_client, "gen2", test_engine)
 
     resp = await db_app_client.post(
         "/api/v1/qr/generate",
@@ -190,7 +224,7 @@ async def test_scan_qr_success(db_app_client: AsyncClient, test_engine):
     patient_token, _, case_id = await setup_completed_case(
         db_app_client, test_engine, "scan1"
     )
-    doctor_token, _ = await register_and_login_doctor(db_app_client, "scan1")
+    doctor_token, _ = await register_and_login_doctor(db_app_client, "scan1", test_engine)
 
     # Generate the QR token
     gen_resp = await db_app_client.post(
@@ -218,7 +252,7 @@ async def test_scan_qr_auto_assigns_doctor(db_app_client: AsyncClient, test_engi
     patient_token, _, case_id = await setup_completed_case(
         db_app_client, test_engine, "scan2"
     )
-    doctor_token, doctor_id = await register_and_login_doctor(db_app_client, "scan2")
+    doctor_token, doctor_id = await register_and_login_doctor(db_app_client, "scan2", test_engine)
 
     gen_resp = await db_app_client.post(
         "/api/v1/qr/generate",
@@ -261,9 +295,9 @@ async def test_scan_qr_requires_doctor(db_app_client: AsyncClient, test_engine):
 
 
 @pytest.mark.asyncio
-async def test_scan_qr_invalid_token(db_app_client: AsyncClient):
+async def test_scan_qr_invalid_token(db_app_client: AsyncClient, test_engine):
     """Scanning a token that doesn't exist returns 410 Gone."""
-    doctor_token, _ = await register_and_login_doctor(db_app_client, "scan4")
+    doctor_token, _ = await register_and_login_doctor(db_app_client, "scan4", test_engine)
 
     resp = await db_app_client.post(
         "/api/v1/qr/scan/this-token-does-not-exist",
@@ -278,7 +312,7 @@ async def test_scan_qr_token_used_once(db_app_client: AsyncClient, test_engine):
     patient_token, _, case_id = await setup_completed_case(
         db_app_client, test_engine, "scan5"
     )
-    doctor_token, _ = await register_and_login_doctor(db_app_client, "scan5")
+    doctor_token, _ = await register_and_login_doctor(db_app_client, "scan5", test_engine)
 
     gen_resp = await db_app_client.post(
         "/api/v1/qr/generate",

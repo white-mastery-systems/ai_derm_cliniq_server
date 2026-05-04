@@ -207,6 +207,20 @@ async def create_review(
     await db.flush()
     await db.refresh(review)
     logger.info("doctor_review_created", case_id=case_id, doctor_id=doctor.id)
+
+    if request.review_status == ReviewStatus.COMPLETED:
+        display_id = f"AI-{case.case_number}" if case.case_number else case_id[:8].upper()
+        try:
+            from src.workers.tasks.notifications import notify_patient_review_complete
+            notify_patient_review_complete.delay(
+                patient_id=case.patient_id,
+                case_id=case_id,
+                display_id=display_id,
+                doctor_name=doctor.full_name,
+            )
+        except Exception as exc:
+            logger.warning("notify_patient_review_complete_enqueue_failed", error=str(exc))
+
     return _to_response(review)
 
 
@@ -268,15 +282,19 @@ async def update_review(
     if request.diagnosis_type is not None:
         review.diagnosis_type = request.diagnosis_type
 
+    review_just_completed = False
     if request.review_status is not None:
         review.review_status = request.review_status
         if request.review_status == ReviewStatus.COMPLETED:
             # Always refresh reviewed_at so revisions show the latest completion time.
             review.reviewed_at = datetime.now(tz=timezone.utc)
+            review_just_completed = True
 
     # Update case clinical_status when doctor completes review
+    clinical_status_changed = False
     if request.clinical_status is not None:
         case.clinical_status = request.clinical_status
+        clinical_status_changed = True
         logger.info(
             "clinical_status_updated",
             case_id=case_id,
@@ -289,6 +307,33 @@ async def update_review(
         doctor_id=doctor.id,
         review_status=review.review_status.value,
     )
+
+    display_id = f"AI-{case.case_number}" if case.case_number else case_id[:8].upper()
+
+    if review_just_completed:
+        try:
+            from src.workers.tasks.notifications import notify_patient_review_complete
+            notify_patient_review_complete.delay(
+                patient_id=case.patient_id,
+                case_id=case_id,
+                display_id=display_id,
+                doctor_name=doctor.full_name,
+            )
+        except Exception as exc:
+            logger.warning("notify_patient_review_complete_enqueue_failed", error=str(exc))
+
+    if clinical_status_changed:
+        try:
+            from src.workers.tasks.notifications import notify_patient_status_update
+            notify_patient_status_update.delay(
+                patient_id=case.patient_id,
+                case_id=case_id,
+                display_id=display_id,
+                new_status=request.clinical_status.value,
+            )
+        except Exception as exc:
+            logger.warning("notify_patient_status_update_enqueue_failed", error=str(exc))
+
     return _to_response(review)
 
 

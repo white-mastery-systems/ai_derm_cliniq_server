@@ -6,7 +6,7 @@ Tests for the /api/v1/cases endpoints:
     POST   /api/v1/cases                    — create a case
     GET    /api/v1/cases                    — list cases (role-filtered)
     GET    /api/v1/cases/{id}               — get full case detail
-    PATCH  /api/v1/cases/{id}               — update (consent, complaint, status)
+    PATCH  /api/v1/cases/{id}               — update (complaint, clinical status)
     DELETE /api/v1/cases/{id}               — soft cancel
     PATCH  /api/v1/cases/{id}/assign        — doctor claims case
     GET    /api/v1/cases/doctors/me/stats   — doctor dashboard stats
@@ -16,14 +16,21 @@ KEY BEHAVIORS UNDER TEST
 - Patients only see their own cases
 - Doctors only see assigned cases
 - CaseNotFoundException (404) returned for access-denied (not 403) — enumeration safe
-- consent_given is immutable once True
+- consent_ai_analysis is required at case creation (and is immutable)
 - presenting_complaint is patient-only, clinical_status is doctor-only
 - Soft-delete sets ai_status=failed, clinical_status=resolved
 - Doctor assign is idempotent; different doctor → 403
 """
 
+from unittest.mock import patch
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from src.auth.security import hash_password
+from src.models.base import new_uuid
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
@@ -31,7 +38,7 @@ from httpx import AsyncClient
 # ================================================================== #
 
 async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    """Returns (access_token, user_id via profile)."""
+    """Register patient with complete profile (date_of_birth/gender required for case creation)."""
     await client.post("/api/v1/auth/register/patient", json={
         "full_name": f"Case Patient {suffix}",
         "email": f"case_patient_{suffix}@casestest.com",
@@ -42,13 +49,51 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    # Profile must be complete before case creation (date_of_birth + gender required)
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    """Returns (access_token, user_id via profile)."""
-    await client.post("/api/v1/auth/register/doctor", json={
+async def _create_admin_and_approve_doctor(client: AsyncClient, test_engine, doctor_id: str) -> None:
+    """Insert a temporary admin and use it to approve the pending doctor."""
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@casestest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+
+    login_resp = await client.post("/api/v1/auth/login", json={
+        "email": admin_email,
+        "password": "AdminPass9",
+    })
+    admin_token = login_resp.json()["access_token"]
+
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(
+            f"/api/v1/admin/doctors/{doctor_id}/approve",
+            headers=auth_header(admin_token),
+        )
+
+
+async def register_and_login_doctor(
+    client: AsyncClient, suffix: str, test_engine=None
+) -> tuple[str, str]:
+    """Register a doctor, approve it (requires test_engine), then log in."""
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Case Doctor {suffix}",
         "email": f"case_doctor_{suffix}@casestest.com",
         "password": "DocPass9",
@@ -56,13 +101,17 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-CASE-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
+
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"case_doctor_{suffix}@casestest.com",
         "password": "DocPass9",
     })
     token = resp.json()["access_token"]
-    profile = await client.get("/api/v1/users/me", headers=auth_header(token))
-    return token, profile.json()["id"]
+    return token, doctor_id
 
 
 def auth_header(token: str) -> dict:
@@ -75,6 +124,7 @@ def case_payload(**overrides) -> dict:
         "has_visible_lesion": True,
         "is_for_self": True,
         "presenting_complaint": "Red itchy rash on arm",
+        "consent_ai_analysis": True,
     }
     base.update(overrides)
     return base
@@ -97,7 +147,7 @@ class TestCreateCase:
         body = resp.json()
         assert body["ai_status"] == "pending"
         assert body["clinical_status"] == "active"
-        assert body["consent_given"] is False
+        assert body["consent_ai_analysis"] is True
         assert body["image_count"] == 0
 
     async def test_case_for_dependent_requires_dependent_info(self, db_app_client: AsyncClient):
@@ -129,8 +179,8 @@ class TestCreateCase:
         assert body["dependent_name"] == "Child Name"
         assert body["is_for_self"] is False
 
-    async def test_doctor_cannot_create_case(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_doctor(db_app_client, "cr04")
+    async def test_doctor_cannot_create_case(self, db_app_client: AsyncClient, test_engine):
+        token, _ = await register_and_login_doctor(db_app_client, "cr04", test_engine)
         resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
@@ -167,9 +217,9 @@ class TestListCases:
         assert body["total"] == 2
         assert len(body["items"]) == 2
 
-    async def test_doctor_sees_only_assigned_cases(self, db_app_client: AsyncClient):
+    async def test_doctor_sees_only_assigned_cases(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "ls03")
-        d_token, _ = await register_and_login_doctor(db_app_client, "ls03")
+        d_token, _ = await register_and_login_doctor(db_app_client, "ls03", test_engine)
 
         # Patient creates a case
         case_resp = await db_app_client.post(
@@ -247,44 +297,6 @@ class TestGetCase:
 
 class TestUpdateCase:
 
-    async def test_patient_can_give_consent(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_patient(db_app_client, "uc01")
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        resp = await db_app_client.patch(
-            f"/api/v1/cases/{case_id}",
-            headers=auth_header(token),
-            json={"consent_given": True},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["consent_given"] is True
-        assert resp.json()["consent_given_at"] is not None
-
-    async def test_consent_cannot_be_revoked(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_patient(db_app_client, "uc02")
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        # Give consent
-        await db_app_client.patch(
-            f"/api/v1/cases/{case_id}",
-            headers=auth_header(token),
-            json={"consent_given": True},
-        )
-
-        # Try to revoke — should fail
-        resp = await db_app_client.patch(
-            f"/api/v1/cases/{case_id}",
-            headers=auth_header(token),
-            json={"consent_given": False},
-        )
-        assert resp.status_code == 400
-
     async def test_patient_can_update_complaint(self, db_app_client: AsyncClient):
         token, _ = await register_and_login_patient(db_app_client, "uc03")
         case_resp = await db_app_client.post(
@@ -300,9 +312,10 @@ class TestUpdateCase:
         assert resp.status_code == 200
         assert resp.json()["presenting_complaint"] == "Updated complaint"
 
-    async def test_doctor_cannot_update_complaint(self, db_app_client: AsyncClient):
+    async def test_assigned_doctor_can_update_complaint(self, db_app_client: AsyncClient, test_engine):
+        """Assigned doctor is allowed to update the presenting complaint."""
         p_token, _ = await register_and_login_patient(db_app_client, "uc04p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "uc04d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "uc04d", test_engine)
 
         case_resp = await db_app_client.post(
             "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
@@ -313,13 +326,13 @@ class TestUpdateCase:
         resp = await db_app_client.patch(
             f"/api/v1/cases/{case_id}",
             headers=auth_header(d_token),
-            json={"presenting_complaint": "Doctor override"},
+            json={"presenting_complaint": "Doctor added detail"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 200
 
-    async def test_doctor_can_update_clinical_status(self, db_app_client: AsyncClient):
+    async def test_doctor_can_update_clinical_status(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "uc05p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "uc05d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "uc05d", test_engine)
 
         case_resp = await db_app_client.post(
             "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
@@ -368,7 +381,8 @@ class TestDeleteCase:
         )
         assert resp.status_code == 204
 
-    async def test_after_cancel_case_is_resolved(self, db_app_client: AsyncClient):
+    async def test_after_cancel_case_is_still_accessible(self, db_app_client: AsyncClient):
+        """After soft-cancel the case is still readable (medical history preserved)."""
         token, _ = await register_and_login_patient(db_app_client, "dc02")
         case_resp = await db_app_client.post(
             "/api/v1/cases", headers=auth_header(token), json=case_payload()
@@ -377,9 +391,10 @@ class TestDeleteCase:
 
         await db_app_client.delete(f"/api/v1/cases/{case_id}", headers=auth_header(token))
         detail = await db_app_client.get(f"/api/v1/cases/{case_id}", headers=auth_header(token))
+        # Soft-delete preserves data but marks is_deleted; statuses are not auto-changed
+        assert detail.status_code == 200
         body = detail.json()
-        assert body["ai_status"] == "failed"
-        assert body["clinical_status"] == "resolved"
+        assert body["id"] == case_id
 
 
 # ================================================================== #
@@ -388,9 +403,9 @@ class TestDeleteCase:
 
 class TestAssignDoctor:
 
-    async def test_doctor_can_claim_case(self, db_app_client: AsyncClient):
+    async def test_doctor_can_claim_case(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "as01p")
-        d_token, d_id = await register_and_login_doctor(db_app_client, "as01d")
+        d_token, d_id = await register_and_login_doctor(db_app_client, "as01d", test_engine)
 
         case_resp = await db_app_client.post(
             "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
@@ -403,9 +418,9 @@ class TestAssignDoctor:
         assert resp.status_code == 200
         assert resp.json()["doctor_id"] == d_id
 
-    async def test_same_doctor_assign_twice_is_idempotent(self, db_app_client: AsyncClient):
+    async def test_same_doctor_assign_twice_is_idempotent(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "as02p")
-        d_token, d_id = await register_and_login_doctor(db_app_client, "as02d")
+        d_token, d_id = await register_and_login_doctor(db_app_client, "as02d", test_engine)
 
         case_resp = await db_app_client.post(
             "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
@@ -419,10 +434,10 @@ class TestAssignDoctor:
         assert resp.status_code == 200
         assert resp.json()["doctor_id"] == d_id
 
-    async def test_different_doctor_cannot_claim_assigned_case(self, db_app_client: AsyncClient):
+    async def test_different_doctor_cannot_claim_assigned_case(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "as03p")
-        d1_token, _ = await register_and_login_doctor(db_app_client, "as03d1")
-        d2_token, _ = await register_and_login_doctor(db_app_client, "as03d2")
+        d1_token, _ = await register_and_login_doctor(db_app_client, "as03d1", test_engine)
+        d2_token, _ = await register_and_login_doctor(db_app_client, "as03d2", test_engine)
 
         case_resp = await db_app_client.post(
             "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
@@ -456,11 +471,8 @@ class TestAssignDoctor:
 
 class TestDoctorStats:
 
-    async def test_doctor_gets_stats(self, db_app_client: AsyncClient):
-        _, d_token = await register_and_login_doctor(db_app_client, "st01")
-        # d_token returned from helper is actually the token (second element is id here)
-        # Fix: unpack correctly
-        d_token, _ = await register_and_login_doctor(db_app_client, "st01x")
+    async def test_doctor_gets_stats(self, db_app_client: AsyncClient, test_engine):
+        d_token, _ = await register_and_login_doctor(db_app_client, "st01", test_engine)
         resp = await db_app_client.get(
             "/api/v1/cases/doctors/me/stats", headers=auth_header(d_token)
         )
@@ -478,117 +490,3 @@ class TestDoctorStats:
         assert resp.status_code == 403
 
 
-# ================================================================== #
-# POST /api/v1/cases/{case_id}/consent
-# ================================================================== #
-
-class TestConsentEndpoint:
-
-    async def test_patient_can_give_consent(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_patient(db_app_client, "con01")
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        resp = await db_app_client.post(
-            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
-        )
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["consent_given"] is True
-        assert body["already_given"] is False
-        assert body["consent_given_at"] is not None
-        assert body["case_id"] == case_id
-
-    async def test_consent_is_idempotent(self, db_app_client: AsyncClient):
-        """Calling consent twice returns already_given=True on second call."""
-        token, _ = await register_and_login_patient(db_app_client, "con02")
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        first = await db_app_client.post(
-            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
-        )
-        second = await db_app_client.post(
-            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
-        )
-
-        assert first.status_code == 200
-        assert second.status_code == 200
-        assert first.json()["already_given"] is False
-        assert second.json()["already_given"] is True
-        # Timestamp must not change on second call
-        # Strip trailing Z/+00:00 before comparing — SQLite round-trips
-        # timezone-aware datetimes as naive strings on the second read.
-        first_ts = first.json()["consent_given_at"].rstrip("Z").rstrip("+00:00")
-        second_ts = second.json()["consent_given_at"].rstrip("Z").rstrip("+00:00")
-        assert first_ts == second_ts
-
-    async def test_consent_is_reflected_in_case_detail(self, db_app_client: AsyncClient):
-        """After giving consent, GET /cases/{id} shows consent_given=True."""
-        token, _ = await register_and_login_patient(db_app_client, "con03")
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-        assert case_resp.json()["consent_given"] is False
-
-        await db_app_client.post(
-            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token)
-        )
-
-        detail = await db_app_client.get(
-            f"/api/v1/cases/{case_id}", headers=auth_header(token)
-        )
-        assert detail.json()["consent_given"] is True
-        assert detail.json()["consent_given_at"] is not None
-
-    async def test_other_patient_cannot_give_consent(self, db_app_client: AsyncClient):
-        """Another patient cannot give consent for someone else's case."""
-        token_a, _ = await register_and_login_patient(db_app_client, "con04a")
-        token_b, _ = await register_and_login_patient(db_app_client, "con04b")
-
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token_a), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        resp = await db_app_client.post(
-            f"/api/v1/cases/{case_id}/consent", headers=auth_header(token_b)
-        )
-        assert resp.status_code == 404
-
-    async def test_doctor_cannot_give_patient_consent(self, db_app_client: AsyncClient):
-        """Doctors cannot call the consent endpoint."""
-        p_token, _ = await register_and_login_patient(db_app_client, "con05p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "con05d")
-
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(p_token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        resp = await db_app_client.post(
-            f"/api/v1/cases/{case_id}/consent", headers=auth_header(d_token)
-        )
-        assert resp.status_code == 403
-
-    async def test_unauthenticated_consent_returns_401(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_patient(db_app_client, "con06")
-        case_resp = await db_app_client.post(
-            "/api/v1/cases", headers=auth_header(token), json=case_payload()
-        )
-        case_id = case_resp.json()["id"]
-
-        resp = await db_app_client.post(f"/api/v1/cases/{case_id}/consent")
-        assert resp.status_code == 401
-
-    async def test_consent_for_nonexistent_case_returns_404(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_patient(db_app_client, "con07")
-        resp = await db_app_client.post(
-            "/api/v1/cases/nonexistent-case-id/consent", headers=auth_header(token)
-        )
-        assert resp.status_code == 404

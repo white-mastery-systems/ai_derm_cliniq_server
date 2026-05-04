@@ -203,7 +203,7 @@ class TestCaseCRUD:
         fetched = result.scalar_one()
         assert fetched.ai_status == AiStatus.PENDING
         assert fetched.clinical_status == ClinicalStatus.ACTIVE
-        assert fetched.consent_given is False
+        assert fetched.consent_ai_analysis is False
 
     async def test_dual_status_are_independent(self, db_session: AsyncSession):
         """
@@ -270,17 +270,17 @@ class TestCaseCRUD:
         db_session.add(case)
         await db_session.flush()
 
-        assert not case.consent_given
+        assert not case.consent_ai_analysis
 
         now = datetime.now(tz=timezone.utc)
-        case.consent_given = True
-        case.consent_given_at = now
+        case.consent_ai_analysis = True
+        case.consent_ai_analysis_at = now
         await db_session.flush()
 
         result = await db_session.execute(select(Case).where(Case.id == case.id))
         fetched = result.scalar_one()
-        assert fetched.consent_given is True
-        assert fetched.consent_given_at is not None
+        assert fetched.consent_ai_analysis is True
+        assert fetched.consent_ai_analysis_at is not None
 
 
 # ================================================================== #

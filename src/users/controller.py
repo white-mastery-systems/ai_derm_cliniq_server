@@ -6,9 +6,10 @@ All routes prefixed /api/v1/users (set in src/api.py).
 
 ROUTES
 ------
-GET    /me   → return own profile (User + role-specific sub-profile)
-PATCH  /me   → update own profile fields
-DELETE /me   → soft-delete own account
+GET    /me                  → return own profile (User + role-specific sub-profile)
+PATCH  /me                  → update own profile fields
+DELETE /me                  → soft-delete own account
+POST   /me/device-token     → register or refresh FCM push notification token
 
 AUTH
 ----
@@ -24,7 +25,7 @@ from src.auth.dependencies import get_current_user, require_doctor
 from src.database.core import get_async_session
 from src.models.user import User
 from src.users import service
-from src.users.schemas import AvatarUploadResponse, PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
+from src.users.schemas import AvatarUploadResponse, DeviceTokenRequest, DeviceTokenResponse, PatientByCodeResponse, ProfileUpdateRequest, UserProfileResponse
 
 router = APIRouter()
 
@@ -103,6 +104,26 @@ async def upload_avatar(
 ) -> AvatarUploadResponse:
     raw_bytes = await file.read()
     return await service.upload_avatar(db, current_user, raw_bytes, file.filename or "avatar.jpg", file.content_type or "image/jpeg")
+
+
+@router.post(
+    "/me/device-token",
+    response_model=DeviceTokenResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Register or refresh FCM device token",
+    description=(
+        "Call this whenever the Flutter app receives a new FCM token from Firebase "
+        "(on first install, after reinstall, or when Firebase rotates the token). "
+        "This keeps push notifications working without requiring a full re-login. "
+        "The token is also updated automatically on every login."
+    ),
+)
+async def update_device_token(
+    request: DeviceTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> DeviceTokenResponse:
+    return await service.update_device_token(db, current_user.id, request.fcm_token)
 
 
 @router.delete(

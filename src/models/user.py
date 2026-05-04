@@ -114,6 +114,16 @@ class User(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Device / Push Notifications
+    # ------------------------------------------------------------------ #
+    fcm_token: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="Firebase Cloud Messaging token — updated on every login. "
+                "NULL means the user has not granted notification permission.",
+    )
+
+    # ------------------------------------------------------------------ #
     # Account State
     # ------------------------------------------------------------------ #
     is_active: Mapped[bool] = mapped_column(

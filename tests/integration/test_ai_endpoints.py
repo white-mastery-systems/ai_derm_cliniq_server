@@ -40,6 +40,11 @@ from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from src.auth.security import hash_password
+from src.models.base import new_uuid
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
@@ -57,12 +62,40 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    await client.post("/api/v1/auth/register/doctor", json={
+async def _create_admin_and_approve_doctor(client: AsyncClient, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@aitest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers=auth_header(admin_token))
+
+
+async def register_and_login_doctor(
+    client: AsyncClient, suffix: str, test_engine=None
+) -> tuple[str, str]:
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"AI Doctor {suffix}",
         "email": f"ai_doctor_{suffix}@aitest.com",
         "password": "DocPass9",
@@ -70,13 +103,15 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-AI-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"ai_doctor_{suffix}@aitest.com",
         "password": "DocPass9",
     })
     token = resp.json()["access_token"]
-    profile = await client.get("/api/v1/users/me", headers=auth_header(token))
-    return token, profile.json()["id"]
+    return token, doctor_id
 
 
 def auth_header(token: str) -> dict:
@@ -128,16 +163,10 @@ async def setup_ready_case(client: AsyncClient, token: str) -> str:
             "has_visible_lesion": True,
             "is_for_self": True,
             "presenting_complaint": "Red itchy patch",
+            "consent_ai_analysis": True,
         },
     )
     case_id = case_resp.json()["id"]
-
-    # Give consent
-    await client.patch(
-        f"/api/v1/cases/{case_id}",
-        headers=auth_header(token),
-        json={"consent_given": True},
-    )
 
     # Upload one image (mocked GCS)
     patches = gcs_patches()
@@ -174,23 +203,22 @@ class TestTriggerAnalysis:
         assert body["task_id"] == "task-abc-123"
 
     async def test_analyze_requires_consent(self, db_app_client: AsyncClient):
-        """Case without consent → 403."""
+        """Creating a case with consent_ai_analysis=False is rejected at creation (400)."""
         token, _ = await register_and_login_patient(db_app_client, "tr02")
 
-        # Create case WITHOUT consent
+        # Consent is enforced at case creation — providing False returns 400
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": False,
+            },
         )
-        case_id = case_resp.json()["id"]
-
-        with mock_celery_chain():
-            resp = await db_app_client.post(
-                f"/api/v1/cases/{case_id}/ai/analyze",
-                headers=auth_header(token),
-            )
-        assert resp.status_code == 403
+        assert case_resp.status_code == 400
+        assert "CONSENT_REQUIRED" in case_resp.json()["error"]["message"]
 
     async def test_analyze_requires_at_least_one_image(self, db_app_client: AsyncClient):
         """Case with consent but no images → 400."""
@@ -199,17 +227,16 @@ class TestTriggerAnalysis:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 
-        # Give consent but don't upload images
-        await db_app_client.patch(
-            f"/api/v1/cases/{case_id}",
-            headers=auth_header(token),
-            json={"consent_given": True},
-        )
-
+        # Consent given at creation — no images uploaded
         with mock_celery_chain():
             resp = await db_app_client.post(
                 f"/api/v1/cases/{case_id}/ai/analyze",
@@ -217,11 +244,12 @@ class TestTriggerAnalysis:
             )
         assert resp.status_code == 400
 
-    async def test_doctor_cannot_trigger_analysis(self, db_app_client: AsyncClient):
+    async def test_assigned_doctor_can_trigger_analysis(self, db_app_client: AsyncClient, test_engine):
+        """An assigned doctor can also trigger analysis (service allows it)."""
         p_token, _ = await register_and_login_patient(db_app_client, "tr04p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "tr04d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "tr04d", test_engine)
         case_id = await setup_ready_case(db_app_client, p_token)
-        # Assign doctor so they can see the case
+        # Assign doctor so they have access to the case
         await db_app_client.patch(
             f"/api/v1/cases/{case_id}/assign", headers=auth_header(d_token)
         )
@@ -231,7 +259,7 @@ class TestTriggerAnalysis:
                 f"/api/v1/cases/{case_id}/ai/analyze",
                 headers=auth_header(d_token),
             )
-        assert resp.status_code == 403
+        assert resp.status_code == 202
 
     async def test_double_trigger_returns_409(self, db_app_client: AsyncClient):
         """Triggering analysis twice on the same case → 409 Conflict."""
@@ -277,7 +305,12 @@ class TestGetAnalysisStatus:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 
@@ -308,9 +341,9 @@ class TestGetAnalysisStatus:
         assert body["ai_status"] == "processing"
         assert body["task_id"] == "task-status-123"
 
-    async def test_doctor_can_read_status(self, db_app_client: AsyncClient):
+    async def test_doctor_can_read_status(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "st03p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "st03d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "st03d", test_engine)
         case_id = await setup_ready_case(db_app_client, p_token)
         await db_app_client.patch(
             f"/api/v1/cases/{case_id}/assign", headers=auth_header(d_token)
@@ -346,7 +379,12 @@ class TestGetAnalysisResults:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 
@@ -448,7 +486,12 @@ class TestGetAnalysisResults:
         case_resp = await db_app_client.post(
             "/api/v1/cases",
             headers=auth_header(token1),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
+            json={
+                "consultation_type": "new_complaint",
+                "has_visible_lesion": True,
+                "is_for_self": True,
+                "consent_ai_analysis": True,
+            },
         )
         case_id = case_resp.json()["id"]
 

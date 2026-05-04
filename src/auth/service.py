@@ -175,6 +175,7 @@ async def register_patient(
         password_hash=hashed_pw,
         is_active=True,
         is_verified=False,
+        fcm_token=request.fcm_token or None,
     )
     db.add(user)
     await db.flush()  # Assigns user.id without committing
@@ -231,6 +232,7 @@ async def register_doctor(
         password_hash=hashed_pw,
         is_active=False,      # Cannot log in until admin activates
         is_verified=False,    # Cannot access doctor endpoints until admin verifies
+        fcm_token=request.fcm_token or None,
     )
     db.add(user)
     await db.flush()
@@ -246,6 +248,16 @@ async def register_doctor(
     db.add(profile)
 
     logger.info("doctor_registered_pending_approval", user_id=user.id, email=user.email)
+
+    # Fire-and-forget: notify all admins a new doctor is pending approval
+    try:
+        from src.workers.tasks.notifications import notify_admins_doctor_registered
+        notify_admins_doctor_registered.delay(
+            doctor_name=request.full_name,
+            doctor_id=user.id,
+        )
+    except Exception as exc:
+        logger.warning("notify_admins_doctor_registered_enqueue_failed", error=str(exc))
 
     return user
 
@@ -285,6 +297,10 @@ async def login(db: AsyncSession, request: LoginRequest) -> TokenResponse:
 
     if not user.is_active:
         raise UnauthorizedException(message="Account is suspended")
+
+    # Always refresh fcm_token so the latest device is registered
+    if request.fcm_token:
+        user.fcm_token = request.fcm_token
 
     raw_refresh = generate_refresh_token()
     await _create_refresh_token_row(db, user.id, raw_refresh)
@@ -399,6 +415,7 @@ async def google_auth(
     db: AsyncSession,
     id_token: str,
     role: str,
+    fcm_token: str | None = None,
 ) -> TokenResponse:
     """
     Sign in or register via Google OAuth.
@@ -474,6 +491,10 @@ async def google_auth(
 
     if not user.is_active:
         raise UnauthorizedException(message="Account is suspended")
+
+    # Always refresh fcm_token on Google sign-in
+    if fcm_token:
+        user.fcm_token = fcm_token
 
     # 4. Issue tokens
     raw_refresh = generate_refresh_token()

@@ -577,7 +577,21 @@ def save_results_task(self, analysis_result: dict) -> None:
             case.symptom_tags = json.dumps(symptom_tags) if symptom_tags else None
             case.max_question_rounds = recommended_rounds  # AI recommendation
 
+            _patient_id = case.patient_id
+            _case_number = case.case_number
+
             await session.commit()
+
+        display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
+        try:
+            from src.workers.tasks.notifications import notify_patient_ai_complete
+            notify_patient_ai_complete.delay(
+                patient_id=_patient_id,
+                case_id=case_id,
+                display_id=display_id,
+            )
+        except Exception as exc:
+            logger.warning("notify_patient_ai_complete_enqueue_failed", case_id=case_id, error=str(exc))
 
         logger.info(
             "save_results_task_ok",
@@ -675,6 +689,7 @@ def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None 
         advice: str | None = result.get("advice")
         has_flags = bool(flags)
 
+        _case_number = None
         async with factory() as session:
             case = await _get_case(session, case_id)
             if case is None:
@@ -682,7 +697,16 @@ def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None 
             case.red_flag_status = RedFlagStatus.FLAGGED if has_flags else RedFlagStatus.CLEAR
             case.red_flags = json.dumps(flags)
             case.red_flag_advice = advice
+            _case_number = case.case_number
             await session.commit()
+
+        if has_flags:
+            display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
+            try:
+                from src.workers.tasks.notifications import notify_admins_red_flag
+                notify_admins_red_flag.delay(case_id=case_id, display_id=display_id)
+            except Exception as exc:
+                logger.warning("notify_admins_red_flag_enqueue_failed", case_id=case_id, error=str(exc))
 
         logger.info(
             "red_flag_check_complete",

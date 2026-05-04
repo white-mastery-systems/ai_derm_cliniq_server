@@ -312,4 +312,4 @@ async def google_auth(
     request: GoogleAuthRequest,
     db: AsyncSession = Depends(get_async_session),
 ) -> TokenResponse:
-    return await service.google_auth(db, request.id_token, request.role)
+    return await service.google_auth(db, request.id_token, request.role, request.fcm_token)

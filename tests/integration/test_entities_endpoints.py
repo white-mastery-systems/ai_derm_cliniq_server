@@ -25,14 +25,17 @@ to the HTTP request handler.
 """
 
 import json
+from unittest.mock import patch
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.auth.security import hash_password
 from src.models.base import new_uuid
 from src.models.case import AiStatus, Case
 from src.models.differential_diagnosis import DifferentialDiagnosis
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
@@ -41,6 +44,27 @@ from src.models.differential_diagnosis import DifferentialDiagnosis
 
 def auth_header(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _create_admin_and_approve_doctor(client, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@enttest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers=auth_header(admin_token))
 
 
 async def register_and_login_patient(client, suffix):
@@ -54,12 +78,17 @@ async def register_and_login_patient(client, suffix):
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client, suffix):
-    await client.post("/api/v1/auth/register/doctor", json={
+async def register_and_login_doctor(client, suffix, test_engine=None):
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Ent Doctor {suffix}",
         "email": f"ent_doctor_{suffix}@enttest.com",
         "password": "DocPass9",
@@ -67,6 +96,9 @@ async def register_and_login_doctor(client, suffix):
         "license_number": f"LIC-ENT-{suffix}",
         "clinic_name": "Entity Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"ent_doctor_{suffix}@enttest.com",
         "password": "DocPass9",
@@ -119,13 +151,14 @@ async def setup_case_with_entities(client, test_engine, suffix):
     - DifferentialDiagnosis row seeded (is_final=True)
     """
     patient_token, _ = await register_and_login_patient(client, suffix)
-    doctor_token, _ = await register_and_login_doctor(client, suffix)
+    doctor_token, _ = await register_and_login_doctor(client, suffix, test_engine)
 
     case_resp = await client.post(
         "/api/v1/cases",
         headers=auth_header(patient_token),
         json={"consultation_type": "new_complaint", "has_visible_lesion": True,
-              "is_for_self": True, "presenting_complaint": "Red scaly patches"},
+              "is_for_self": True, "presenting_complaint": "Red scaly patches",
+              "consent_ai_analysis": True},
     )
     case_id = case_resp.json()["id"]
     await set_ai_completed(test_engine, case_id)
@@ -221,13 +254,14 @@ async def test_get_entities_no_differential_returns_404(
 ):
     """404 when no DifferentialDiagnosis row exists for the case."""
     patient_token, _ = await register_and_login_patient(db_app_client, "ge5a")
-    _, doctor_token = await register_and_login_doctor(db_app_client, "ge5b")
+    _, doctor_token = await register_and_login_doctor(db_app_client, "ge5b", test_engine)
 
     case_resp = await db_app_client.post(
         "/api/v1/cases",
         headers=auth_header(patient_token),
         json={"consultation_type": "new_complaint", "has_visible_lesion": False,
-              "is_for_self": True, "presenting_complaint": "Test"},
+              "is_for_self": True, "presenting_complaint": "Test",
+              "consent_ai_analysis": True},
     )
     case_id = case_resp.json()["id"]
     await set_ai_completed(test_engine, case_id)
@@ -266,7 +300,7 @@ async def test_get_entities_unassigned_doctor_returns_403(
 ):
     """Doctor not assigned to the case gets 403."""
     _, _, case_id = await setup_case_with_entities(db_app_client, test_engine, "ge7")
-    other_token, _ = await register_and_login_doctor(db_app_client, "ge7_other")
+    other_token, _ = await register_and_login_doctor(db_app_client, "ge7_other", test_engine)
 
     resp = await db_app_client.get(
         f"/api/v1/cases/{case_id}/entities",
@@ -331,13 +365,14 @@ async def test_get_entities_uses_latest_round_when_no_final(
     If no is_final=True row exists, the service falls back to the highest round_number.
     """
     patient_token, _ = await register_and_login_patient(db_app_client, "ge11a")
-    _, doctor_token = await register_and_login_doctor(db_app_client, "ge11b")
+    _, doctor_token = await register_and_login_doctor(db_app_client, "ge11b", test_engine)
 
     case_resp = await db_app_client.post(
         "/api/v1/cases",
         headers=auth_header(patient_token),
         json={"consultation_type": "new_complaint", "has_visible_lesion": True,
-              "is_for_self": True, "presenting_complaint": "Itchy rash"},
+              "is_for_self": True, "presenting_complaint": "Itchy rash",
+              "consent_ai_analysis": True},
     )
     case_id = case_resp.json()["id"]
     await set_ai_completed(test_engine, case_id)

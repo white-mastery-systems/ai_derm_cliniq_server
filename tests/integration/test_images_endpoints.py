@@ -21,8 +21,15 @@ imported) so the patch takes effect for the duration of each test.
 
 CONSENT REQUIRED
 -----------------
-Uploading an image requires consent_given=True on the case.
-Each test that uploads images gives consent first via PATCH /cases/{id}.
+Case creation requires consent_ai_analysis=True (set in the POST body).
+test_upload_without_consent_returns_403 creates a case without consent
+directly via the DB, bypassing the API gate, to test the image-layer check.
+
+DOCTOR APPROVAL
+---------------
+Doctors are inactive until an admin approves them. Tests that need a
+doctor token use _create_admin_and_approve_doctor to activate the account
+before logging in.
 
 MIME TYPE NOTE
 --------------
@@ -33,12 +40,44 @@ so the service's MIME validation passes.
 from io import BytesIO
 from unittest.mock import patch
 
+import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from src.auth.security import hash_password
+from src.models.base import new_uuid
+from src.models.case import Case, ConsultationType
+from src.models.user import User, UserRole
 
 
 # ================================================================== #
 # Helpers
 # ================================================================== #
+
+def auth_header(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _create_admin_and_approve_doctor(client, test_engine, doctor_id: str) -> None:
+    admin_email = f"_tmp_admin_{doctor_id[:8]}@imagestest.com"
+    factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+    async with factory() as session:
+        admin = User(
+            id=new_uuid(),
+            email=admin_email,
+            full_name="Temp Admin",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass9"),
+            is_active=True,
+            is_verified=True,
+        )
+        session.add(admin)
+        await session.commit()
+    login_resp = await client.post("/api/v1/auth/login", json={"email": admin_email, "password": "AdminPass9"})
+    admin_token = login_resp.json()["access_token"]
+    with patch("src.core.email.send_email", return_value=True):
+        await client.post(f"/api/v1/admin/doctors/{doctor_id}/approve", headers=auth_header(admin_token))
+
 
 async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[str, str]:
     await client.post("/api/v1/auth/register/patient", json={
@@ -51,12 +90,17 @@ async def register_and_login_patient(client: AsyncClient, suffix: str) -> tuple[
         "password": "TestPass1",
     })
     token = resp.json()["access_token"]
+    await client.patch(
+        "/api/v1/users/me",
+        headers=auth_header(token),
+        json={"date_of_birth": "1990-01-01", "gender": "female"},
+    )
     profile = await client.get("/api/v1/users/me", headers=auth_header(token))
     return token, profile.json()["id"]
 
 
-async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[str, str]:
-    await client.post("/api/v1/auth/register/doctor", json={
+async def register_and_login_doctor(client: AsyncClient, suffix: str, test_engine=None) -> tuple[str, str]:
+    reg_resp = await client.post("/api/v1/auth/register/doctor", json={
         "full_name": f"Img Doctor {suffix}",
         "email": f"img_doctor_{suffix}@imagestest.com",
         "password": "DocPass9",
@@ -64,6 +108,9 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
         "license_number": f"LIC-IMG-{suffix}",
         "clinic_name": "Derm Clinic",
     })
+    doctor_id = reg_resp.json()["user"]["id"]
+    if test_engine is not None:
+        await _create_admin_and_approve_doctor(client, test_engine, doctor_id)
     resp = await client.post("/api/v1/auth/login", json={
         "email": f"img_doctor_{suffix}@imagestest.com",
         "password": "DocPass9",
@@ -73,12 +120,8 @@ async def register_and_login_doctor(client: AsyncClient, suffix: str) -> tuple[s
     return token, profile.json()["id"]
 
 
-def auth_header(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
-
-
 async def create_case_with_consent(client: AsyncClient, token: str) -> str:
-    """Create a case and give consent. Returns case_id."""
+    """Create a case with consent_ai_analysis=True. Returns case_id."""
     case_resp = await client.post(
         "/api/v1/cases",
         headers=auth_header(token),
@@ -87,15 +130,10 @@ async def create_case_with_consent(client: AsyncClient, token: str) -> str:
             "has_visible_lesion": True,
             "is_for_self": True,
             "presenting_complaint": "Itchy rash",
+            "consent_ai_analysis": True,
         },
     )
-    case_id = case_resp.json()["id"]
-    await client.patch(
-        f"/api/v1/cases/{case_id}",
-        headers=auth_header(token),
-        json={"consent_given": True},
-    )
-    return case_id
+    return case_resp.json()["id"]
 
 
 def fake_jpeg() -> bytes:
@@ -153,15 +191,27 @@ class TestUploadImage:
         assert body["mime_type"] == "image/jpeg"
         assert body["upload_order"] == 0
 
-    async def test_upload_without_consent_returns_403(self, db_app_client: AsyncClient):
-        token, _ = await register_and_login_patient(db_app_client, "up02")
-        # Create case WITHOUT giving consent
-        case_resp = await db_app_client.post(
-            "/api/v1/cases",
-            headers=auth_header(token),
-            json={"consultation_type": "new_complaint", "has_visible_lesion": True, "is_for_self": True},
-        )
-        case_id = case_resp.json()["id"]
+    async def test_upload_without_consent_returns_403(self, db_app_client: AsyncClient, test_engine):
+        """
+        Image upload to a case without consent is rejected.
+
+        The API requires consent_ai_analysis=True at case creation, so we
+        insert a case directly into the DB with consent_ai_analysis=False to
+        isolate the image-layer consent check.
+        """
+        token, patient_id = await register_and_login_patient(db_app_client, "up02")
+
+        factory = async_sessionmaker(bind=test_engine, expire_on_commit=False, autoflush=False)
+        async with factory() as session:
+            case = Case(
+                id=new_uuid(),
+                patient_id=patient_id,
+                consultation_type=ConsultationType.NEW_COMPLAINT,
+                consent_ai_analysis=False,
+            )
+            session.add(case)
+            await session.commit()
+            case_id = case.id
 
         patches = gcs_patches()
         with patches[0], patches[1], patches[2], patches[3]:
@@ -189,9 +239,9 @@ class TestUploadImage:
 
         assert resp.status_code == 400
 
-    async def test_doctor_cannot_upload_images(self, db_app_client: AsyncClient):
+    async def test_doctor_cannot_upload_images(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "up04p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "up04d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "up04d", test_engine)
         case_id = await create_case_with_consent(db_app_client, p_token)
 
         patches = gcs_patches()
@@ -267,9 +317,9 @@ class TestListImages:
         assert resp.json()["total"] == 2
         assert len(resp.json()["images"]) == 2
 
-    async def test_doctor_can_list_images_for_assigned_case(self, db_app_client: AsyncClient):
+    async def test_doctor_can_list_images_for_assigned_case(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "li02p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "li02d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "li02d", test_engine)
         case_id = await create_case_with_consent(db_app_client, p_token)
 
         patches = gcs_patches()
@@ -396,9 +446,9 @@ class TestDeleteImage:
         )
         assert resp.json()["total"] == 0
 
-    async def test_doctor_cannot_delete_image(self, db_app_client: AsyncClient):
+    async def test_doctor_cannot_delete_image(self, db_app_client: AsyncClient, test_engine):
         p_token, _ = await register_and_login_patient(db_app_client, "di03p")
-        d_token, _ = await register_and_login_doctor(db_app_client, "di03d")
+        d_token, _ = await register_and_login_doctor(db_app_client, "di03d", test_engine)
         case_id = await create_case_with_consent(db_app_client, p_token)
 
         patches = gcs_patches()

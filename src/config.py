@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = ""
 
     # ------------------------------------------------------------------ #
+    # Firebase / Push Notifications
+    # ------------------------------------------------------------------ #
+    FIREBASE_CREDENTIALS_PATH: str = "credentials/firebase_service_account.json"
+
+    # ------------------------------------------------------------------ #
     # QR Token
     # ------------------------------------------------------------------ #
     QR_TOKEN_EXPIRE_HOURS: int = 24

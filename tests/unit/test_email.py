@@ -25,7 +25,7 @@ def test_render_visit_email_contains_patient_name():
     from src.core.email import render_visit_email
     html = render_visit_email(
         patient_name="Jane Smith",
-        case_id="abc123def456",
+        display_id="AI-9001",
         patient_url="https://example.com/case/abc123",
     )
     assert "Jane Smith" in html
@@ -35,11 +35,10 @@ def test_render_visit_email_contains_case_id_prefix():
     from src.core.email import render_visit_email
     html = render_visit_email(
         patient_name="Patient X",
-        case_id="abcdef123456",
+        display_id="AI-9001",
         patient_url="https://example.com/case/abcdef123456",
     )
-    # First 8 chars uppercased are shown as case number
-    assert "ABCDEF12" in html
+    assert "AI-9001" in html
 
 
 def test_render_visit_email_contains_patient_url():
@@ -47,7 +46,7 @@ def test_render_visit_email_contains_patient_url():
     url = "https://example.com/case/test-id"
     html = render_visit_email(
         patient_name="Test Patient",
-        case_id="test-id-xxxx",
+        display_id="AI-9002",
         patient_url=url,
     )
     assert url in html
@@ -55,7 +54,7 @@ def test_render_visit_email_contains_patient_url():
 
 def test_render_visit_email_contains_qr_instruction():
     from src.core.email import render_visit_email
-    html = render_visit_email("P", "id", "http://x.com")
+    html = render_visit_email("P", "AI-9003", "http://x.com")
     assert "QR" in html or "qr" in html.lower()
 
 
@@ -190,7 +189,7 @@ def test_email_task_sends_on_success():
     """Task calls send_email and returns status=sent."""
     from src.workers.tasks.email import send_visit_email_task
 
-    with patch("src.workers.tasks.email._run_async", side_effect=_mock_run_async(("patient@example.com", "Jane Smith"))), \
+    with patch("src.workers.tasks.email._run_async", side_effect=_mock_run_async(("patient@example.com", "Jane Smith", "AI-9001"))), \
          patch("src.workers.tasks.email._generate_qr_png", return_value=b"\x89PNG..."), \
          patch("src.workers.tasks.email.send_email", return_value=True) as mock_send, \
          patch("src.workers.tasks.email.settings") as mock_settings:
@@ -218,7 +217,7 @@ def test_email_task_returns_failed_when_send_fails():
     """Task returns failed if SMTP send fails."""
     from src.workers.tasks.email import send_visit_email_task
 
-    with patch("src.workers.tasks.email._run_async", side_effect=_mock_run_async(("patient@example.com", "Jane Smith"))), \
+    with patch("src.workers.tasks.email._run_async", side_effect=_mock_run_async(("patient@example.com", "Jane Smith", "AI-9002"))), \
          patch("src.workers.tasks.email._generate_qr_png", return_value=b"\x89PNG..."), \
          patch("src.workers.tasks.email.send_email", return_value=False), \
          patch("src.workers.tasks.email.settings") as mock_settings:
@@ -234,7 +233,7 @@ def test_email_task_sends_without_qr_on_qr_failure():
     """If QR generation fails, email is still sent (without attachment)."""
     from src.workers.tasks.email import send_visit_email_task
 
-    with patch("src.workers.tasks.email._run_async", side_effect=_mock_run_async(("patient@example.com", "Jane Smith"))), \
+    with patch("src.workers.tasks.email._run_async", side_effect=_mock_run_async(("patient@example.com", "Jane Smith", "AI-9003"))), \
          patch("src.workers.tasks.email._generate_qr_png", side_effect=Exception("qr lib error")), \
          patch("src.workers.tasks.email.send_email", return_value=True) as mock_send, \
          patch("src.workers.tasks.email.settings") as mock_settings:
