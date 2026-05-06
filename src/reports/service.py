@@ -86,7 +86,7 @@ async def trigger_report(
 
     Returns 202 Accepted with task_id immediately.
     """
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can generate reports")
 
     result = await db.execute(

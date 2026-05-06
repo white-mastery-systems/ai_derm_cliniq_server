@@ -155,7 +155,7 @@ async def create_review(
     Raises 403 if the doctor is not assigned to the case.
     Raises 409 if a review already exists for this case.
     """
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can create reviews")
 
     case = await _load_case_for_doctor(db, doctor, case_id)
@@ -244,7 +244,7 @@ async def update_review(
     Raises 403 if doctor is not assigned to the case.
     Raises 404 if no review exists yet (create it first with POST).
     """
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can update reviews")
 
     case = await _load_case_for_doctor(db, doctor, case_id)

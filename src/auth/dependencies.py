@@ -210,8 +210,10 @@ async def require_patient_or_assigned_doctor(
     """
     if user.role == UserRole.PATIENT:
         return user
-    if user.role in (UserRole.DOCTOR, UserRole.ADMIN):
-        if user.role == UserRole.DOCTOR and not user.is_verified:
+    if user.role == UserRole.ADMIN:
+        return user  # admin has full access — no assignment check needed
+    if user.role == UserRole.DOCTOR:
+        if not user.is_verified:
             raise DoctorPendingApprovalException()
         from src.models.case import Case
         result = await db.execute(select(Case).where(Case.id == case_id))

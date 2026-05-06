@@ -642,7 +642,7 @@ async def update_case(
 
     if request.presenting_complaint is not None:
         is_assigned_doctor = (user.role == UserRole.DOCTOR and case.doctor_id == user.id)
-        if user.role != UserRole.PATIENT and not is_assigned_doctor:
+        if user.role not in (UserRole.PATIENT, UserRole.ADMIN) and not is_assigned_doctor:
             raise ForbiddenException(message="Only the patient or assigned doctor can update the complaint")
         if isinstance(request.presenting_complaint, list):
             case.presenting_complaint = ". ".join(
@@ -655,7 +655,7 @@ async def update_case(
         case.body_location = request.body_location
 
     if request.clinical_status is not None:
-        if user.role != UserRole.DOCTOR:
+        if user.role not in (UserRole.DOCTOR, UserRole.ADMIN):
             raise ForbiddenException(
                 message="Only a doctor can change the clinical status"
             )

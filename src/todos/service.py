@@ -83,7 +83,7 @@ async def create_todo(
     request: TodoCreateRequest,
 ) -> TodoResponse:
     """Doctor creates a new todo for an assigned case."""
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can create todos")
 
     await _get_case_for_doctor(db, doctor, case_id)
@@ -145,7 +145,7 @@ async def update_todo(
     request: TodoUpdateRequest,
 ) -> TodoResponse:
     """Doctor updates a todo — partial update, any combination of fields."""
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can update todos")
 
     await _get_case_for_doctor(db, doctor, case_id)
@@ -186,7 +186,7 @@ async def delete_todo(
     todo_id: str,
 ) -> None:
     """Doctor deletes one of their todos."""
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can delete todos")
 
     await _get_case_for_doctor(db, doctor, case_id)

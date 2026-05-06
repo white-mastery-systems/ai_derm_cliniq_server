@@ -136,7 +136,7 @@ async def scan_qr(
     - Marks the token as used (single-use enforcement)
     - Auto-assigns the doctor to the case if not already assigned
     """
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can scan QR codes")
 
     # Load token with case + patient eagerly
@@ -195,7 +195,7 @@ async def access_by_display_id(
     but the entry method is the human-readable case ID shown on the patient's
     QR screen instead of scanning the QR token.
     """
-    if doctor.role != UserRole.DOCTOR:
+    if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can access cases via case ID")
 
     # Parse "AI-9135" → 9135
