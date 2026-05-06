@@ -511,18 +511,6 @@ def save_results_task(self, analysis_result: dict) -> None:
         overall_description = desc.get("overall_description")
         type_of_lesion = desc.get("type_of_lesion")
 
-        # Build a patient-readable summary
-        case_summary_parts = []
-        if type_of_lesion:
-            case_summary_parts.append(f"Lesion type: {type_of_lesion}")
-        if most_probable_name:
-            case_summary_parts.append(f"Most probable diagnosis: {most_probable_name}")
-        if confidence:
-            case_summary_parts.append(f"Confidence: {confidence}")
-        if overall_description:
-            case_summary_parts.append(overall_description)
-        case_summary = ". ".join(case_summary_parts) if case_summary_parts else "Analysis complete."
-
         async with factory() as session:
             case = await _get_case(session, case_id)
             if case is None:
@@ -569,6 +557,51 @@ def save_results_task(self, analysis_result: dict) -> None:
             except Exception:
                 pass  # non-critical — default is fine
 
+            # Build numbered case summary matching the standard Flutter format
+            profile_result = await session.execute(
+                select(PatientProfile).where(PatientProfile.user_id == case.patient_id)
+            )
+            profile = profile_result.scalar_one_or_none()
+            age_str = "Not provided"
+            sex_str = "Not provided"
+            if profile:
+                if profile.date_of_birth:
+                    from datetime import date as _date
+                    age_str = str((_date.today() - profile.date_of_birth).days // 365)
+                if profile.gender:
+                    sex_str = profile.gender
+            chief_complaint = case.presenting_complaint or "Not provided"
+            photo_analysis = overall_description or "No photograph analysis available."
+            mpd_str = (
+                f"{most_probable_name} ({confidence})"
+                if confidence and most_probable_name
+                else most_probable_name or "Not determined"
+            )
+            diff_raw = diag.get("differential_diagnosis", [])
+            if isinstance(diff_raw, dict):
+                diff_str = ", ".join(f"{k} ({v})" for k, v in diff_raw.items()) if diff_raw else "Not available"
+            elif isinstance(diff_raw, list):
+                _parts = []
+                for item in diff_raw:
+                    if isinstance(item, dict):
+                        _n = item.get("diagnosis", "")
+                        _l = item.get("likelihood", item.get("confidence", ""))
+                        _parts.append(f"{_n} ({_l})" if _l else _n)
+                    else:
+                        _parts.append(str(item))
+                diff_str = ", ".join(_parts) if _parts else "Not available"
+            else:
+                diff_str = "Not available"
+            case_summary = (
+                f"1. **Age**: {age_str} "
+                f"2. **Sex**: {sex_str} "
+                f"3. **Chief Complaint**: {chief_complaint} "
+                f"4. **History**: Initial AI analysis complete. Q&A consultation in progress. "
+                f"5. **Photograph Analysis**: {photo_analysis} "
+                f"6. **Most Probable Diagnosis**: {mpd_str} "
+                f"7. **Differential Diagnosis**: {diff_str}"
+            )
+
             # Update case
             case.ai_status = AiStatus.COMPLETED
             case.celery_task_id = None
@@ -583,15 +616,18 @@ def save_results_task(self, analysis_result: dict) -> None:
             await session.commit()
 
         display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
-        try:
-            from src.workers.tasks.notifications import notify_patient_ai_complete
-            notify_patient_ai_complete.delay(
-                patient_id=_patient_id,
-                case_id=case_id,
-                display_id=display_id,
-            )
-        except Exception as exc:
-            logger.warning("notify_patient_ai_complete_enqueue_failed", case_id=case_id, error=str(exc))
+        if recommended_rounds == 0:
+            # No Q&A rounds — consultation is already complete, notify now.
+            # For cases with Q&A, _finalize_case fires this after all rounds are done.
+            try:
+                from src.workers.tasks.notifications import notify_patient_ai_complete
+                notify_patient_ai_complete.delay(
+                    patient_id=_patient_id,
+                    case_id=case_id,
+                    display_id=display_id,
+                )
+            except Exception as exc:
+                logger.warning("notify_patient_ai_complete_enqueue_failed", case_id=case_id, error=str(exc))
 
         logger.info(
             "save_results_task_ok",

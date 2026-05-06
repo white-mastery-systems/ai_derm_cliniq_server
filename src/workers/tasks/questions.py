@@ -648,6 +648,35 @@ def refine_analysis_task(self, case_id: str) -> None:
 # Finalization helper
 # ------------------------------------------------------------------ #
 
+def _dict_to_numbered_summary(d: dict) -> str:
+    """Convert a dict-typed case_summary (LLM returned wrong shape) to the standard numbered string."""
+    diff = d.get("Differential Diagnosis", d.get("differential_diagnosis", {}))
+    if isinstance(diff, dict):
+        diff_str = ", ".join(f"{k} ({v})" for k, v in diff.items()) if diff else "Not available"
+    elif isinstance(diff, list):
+        _parts = []
+        for item in diff:
+            if isinstance(item, dict):
+                _n = item.get("diagnosis", "")
+                _l = item.get("likelihood", item.get("confidence", ""))
+                _parts.append(f"{_n} ({_l})" if _l else _n)
+            else:
+                _parts.append(str(item))
+        diff_str = ", ".join(_parts) if _parts else "Not available"
+    else:
+        diff_str = str(diff) if diff else "Not available"
+
+    return (
+        f"1. **Age**: {d.get('Age', 'Not provided')} "
+        f"2. **Sex**: {d.get('Sex', 'Not provided')} "
+        f"3. **Chief Complaint**: {d.get('Chief Complaint', 'Not provided')} "
+        f"4. **History**: {d.get('History', 'Not provided')} "
+        f"5. **Photograph Analysis**: {d.get('Photograph Analysis', 'Not provided')} "
+        f"6. **Most Probable Diagnosis**: {d.get('Most Probable Diagnosis', 'Not determined')} "
+        f"7. **Differential Diagnosis**: {diff_str}"
+    )
+
+
 async def _finalize_case(
     session,
     case_id: str,
@@ -675,9 +704,10 @@ async def _finalize_case(
         summary_text = call_llm(summary_prompt, json_mode=True)
         summary_data = gemini_client.extract_json(summary_text)
         case_summary = summary_data.get("case_summary", "Consultation complete.")
-        # LLM occasionally returns case_summary as a nested dict instead of a string
+        # LLM occasionally returns case_summary as a nested dict instead of a string —
+        # convert to the standard numbered format so Flutter always gets one shape.
         if isinstance(case_summary, dict):
-            case_summary = json.dumps(case_summary)
+            case_summary = _dict_to_numbered_summary(case_summary)
     except (AIProviderException, Exception) as exc:
         logger.warning("make_case_summary_failed", case_id=case_id, error=str(exc))
         case_summary = "AI consultation rounds complete. Please review with your doctor."
@@ -698,11 +728,27 @@ async def _finalize_case(
 
     result = await session.execute(select(Case).where(Case.id == case_id))
     case = result.scalar_one_or_none()
+    _patient_id = None
+    _case_number = None
     if case:
         case.case_summary = case_summary
         if final_title:
             case.case_title = final_title
+        _patient_id = case.patient_id
+        _case_number = case.case_number
     logger.info("case_finalized", case_id=case_id, final_title=final_title)
+
+    if _patient_id:
+        display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
+        try:
+            from src.workers.tasks.notifications import notify_patient_ai_complete
+            notify_patient_ai_complete.delay(
+                patient_id=_patient_id,
+                case_id=case_id,
+                display_id=display_id,
+            )
+        except Exception as exc:
+            logger.warning("notify_patient_ai_complete_enqueue_failed", case_id=case_id, error=str(exc))
 
 
 # ------------------------------------------------------------------ #
