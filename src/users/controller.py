@@ -127,6 +127,19 @@ async def update_device_token(
 
 
 @router.delete(
+    "/me/device-token",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Clear FCM device token on logout",
+    description="Removes the stored FCM token so the device stops receiving push notifications after logout.",
+)
+async def clear_device_token(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> None:
+    await service.clear_device_token(db, current_user.id)
+
+
+@router.delete(
     "/me",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Soft-delete own account",

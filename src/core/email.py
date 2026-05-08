@@ -271,6 +271,67 @@ _DOCTOR_REJECTED_EMAIL_TEMPLATE = """
 """
 
 
+_REPORT_EMAIL_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #f4f6f9; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #ffffff;
+               border-radius: 8px; overflow: hidden;
+               box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .header { background-color: #1a6b5a; padding: 30px 40px; }
+    .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }
+    .header p  { color: #a8d5ca; margin: 4px 0 0; font-size: 14px; }
+    .body { padding: 32px 40px; color: #333333; }
+    .body p { line-height: 1.6; margin: 0 0 16px; }
+    .case-box { background: #f0f9f6; border-left: 4px solid #1a6b5a;
+                padding: 16px 20px; border-radius: 4px; margin: 20px 0; }
+    .case-box .label { font-size: 12px; color: #888; text-transform: uppercase;
+                       letter-spacing: 0.5px; margin-bottom: 4px; }
+    .case-box .value { font-size: 20px; font-weight: 700; color: #1a6b5a;
+                       letter-spacing: 1px; }
+    .footer { background-color: #f4f6f9; padding: 20px 40px;
+              text-align: center; color: #999; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>AiDerm Cliniq</h1>
+      <p>AI-Powered Dermatology Consultation</p>
+    </div>
+    <div class="body">
+      <p>Dear <strong>{{ patient_name }}</strong>,</p>
+      <p>Your clinical report is now ready. Please find it attached to this email as a PDF.</p>
+      <div class="case-box">
+        <div class="label">Your Case ID</div>
+        <div class="value">{{ display_id }}</div>
+      </div>
+      <p>The report includes your confirmed diagnosis, doctor notes, and treatment plan. Please save a copy for your records.</p>
+      <p>If you have any questions, contact your doctor or reach us at
+        <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+      </p>
+      <p style="font-size:13px; color:#777;">This email was generated automatically. Please do not reply.</p>
+    </div>
+    <div class="footer">
+      &copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; All rights reserved
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_report_email(patient_name: str, display_id: str) -> str:
+    """Render the clinical report ready HTML email body."""
+    return Template(_REPORT_EMAIL_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+    )
+
+
 def render_doctor_approved_email(name: str) -> str:
     """Render the doctor account approved HTML email."""
     return Template(_DOCTOR_APPROVED_EMAIL_TEMPLATE).render(name=name)

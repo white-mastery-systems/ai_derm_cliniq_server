@@ -367,6 +367,7 @@ async def list_cases(
     clinical_status: str | None = None,
     is_for_self: bool | None = None,
     bookmarked: bool | None = None,
+    assigned_only: bool | None = None,
 ) -> PaginatedCasesResponse:
     """
     Paginated list of cases filtered by the user's role.
@@ -401,6 +402,8 @@ async def list_cases(
         filters.append(Case.is_for_self == is_for_self)
     if bookmarked is not None:
         filters.append(Case.is_bookmarked == bookmarked)  # noqa: E712
+    if assigned_only is True:
+        filters.append(Case.doctor_id.isnot(None))
 
     where_clause = and_(*filters) if filters else True
 

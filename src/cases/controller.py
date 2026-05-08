@@ -85,10 +85,14 @@ async def list_cases(
         default=None,
         description="true = Important Cases list (bookmarked by doctor)",
     ),
+    assigned_only: bool | None = Query(
+        default=None,
+        description="true = only cases with a doctor assigned (useful for admin recent cases)",
+    ),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_session),
 ) -> PaginatedCasesResponse:
-    return await service.list_cases(db, user, page, page_size, clinical_status, is_for_self, bookmarked)
+    return await service.list_cases(db, user, page, page_size, clinical_status, is_for_self, bookmarked, assigned_only)
 
 
 @router.post(

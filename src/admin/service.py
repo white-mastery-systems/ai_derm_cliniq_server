@@ -456,8 +456,9 @@ async def list_doctors(
     """
     List all doctors with their profile data.
 
-    If pending_only=True, returns only doctors with is_verified=False
-    (awaiting admin approval).
+    If pending_only=True, returns only doctors with is_active=False
+    (awaiting admin approval). Uses is_active rather than is_verified so that
+    Google OAuth doctors (is_verified=True, is_active=False) are included.
     """
     query = (
         select(User)
@@ -465,7 +466,7 @@ async def list_doctors(
         .options(selectinload(User.doctor_profile))
     )
     if pending_only:
-        query = query.where(User.is_verified == False)  # noqa: E712
+        query = query.where(User.is_active == False)  # noqa: E712
 
     count_result = await db.execute(select(func.count()).select_from(query.subquery()))
     total = count_result.scalar_one()

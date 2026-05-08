@@ -277,7 +277,73 @@ def notify_patient_status_update(
 
 
 # ================================================================== #
-# 7. Red flag detected → notify all admins
+# 7. Doctor assigned to case (QR scan / display ID) → notify patient
+# ================================================================== #
+
+@celery_app.task(
+    name="src.workers.tasks.notifications.notify_patient_doctor_assigned",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=30,
+    time_limit=30,
+    soft_time_limit=25,
+)
+def notify_patient_doctor_assigned(
+    self, patient_id: str, case_id: str, display_id: str, doctor_name: str
+) -> dict:
+    """Notify the patient that a doctor has been assigned to their case."""
+    logger.info("notify_patient_doctor_assigned_start", patient_id=patient_id, case_id=case_id)
+    try:
+        token = _run_async(_get_user_token(patient_id))
+        if not token:
+            return {"status": "skipped", "reason": "no_fcm_token"}
+        ok = send_push_notification(
+            token=token,
+            title="Doctor Assigned",
+            body=f"Dr. {doctor_name} has been assigned to your case {display_id}.",
+            data={"type": "doctor_assigned", "case_id": case_id},
+        )
+        return {"status": "sent" if ok else "failed"}
+    except Exception as exc:
+        logger.warning("notify_patient_doctor_assigned_failed", error=str(exc))
+        return {"status": "failed", "error": str(exc)}
+
+
+# ================================================================== #
+# 8. Report generated → notify patient
+# ================================================================== #
+
+@celery_app.task(
+    name="src.workers.tasks.notifications.notify_patient_report_ready",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=30,
+    time_limit=30,
+    soft_time_limit=25,
+)
+def notify_patient_report_ready(
+    self, patient_id: str, case_id: str, display_id: str
+) -> dict:
+    """Notify the patient that their clinical report is ready."""
+    logger.info("notify_patient_report_ready_start", patient_id=patient_id, case_id=case_id)
+    try:
+        token = _run_async(_get_user_token(patient_id))
+        if not token:
+            return {"status": "skipped", "reason": "no_fcm_token"}
+        ok = send_push_notification(
+            token=token,
+            title="Your Report is Ready",
+            body=f"Your clinical report for case {display_id} is ready. Check your email or download it in the app.",
+            data={"type": "report_ready", "case_id": case_id},
+        )
+        return {"status": "sent" if ok else "failed"}
+    except Exception as exc:
+        logger.warning("notify_patient_report_ready_failed", error=str(exc))
+        return {"status": "failed", "error": str(exc)}
+
+
+# ================================================================== #
+# 9. Red flag detected → notify all admins
 # ================================================================== #
 
 @celery_app.task(

@@ -293,6 +293,11 @@ class Case(TimestampMixin, Base):
         nullable=True,
         comment="AI-generated case summary shown to patient before QR code",
     )
+    patient_treatment_plan: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON: patient-friendly treatment plan generated on first request, cached for subsequent calls",
+    )
 
     # ------------------------------------------------------------------ #
     # Doctor Diagnose Flow — visual findings from 3-image AI analysis

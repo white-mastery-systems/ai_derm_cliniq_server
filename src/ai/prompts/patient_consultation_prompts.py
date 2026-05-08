@@ -477,17 +477,37 @@ Last few conversations:
         Patient-friendly treatment plan based on differential and conversation.
 
         Template vars: {conversation}, {differential}
-        Returns: free-text response.
-        Used in: patient report section.
+        Returns: structured JSON (see format below).
+        Used in: patient treatment plan button + report section.
         """
-        return """Imagine that you are a dermatologist treating a patient. Generate a comprehensive treatment plan for the patient telling about the medications, lifestyle changes, dietary modifications/requirements based on their last few conversations with the agent and the differential. Tailor the plan based on the patient's age, sex and their severity of illness.
+        return """You are a dermatologist explaining a treatment plan to a patient in simple, friendly language. Based on the conversation history and differential diagnosis below, generate a comprehensive treatment plan tailored to the patient's condition and severity.
 
 Last few conversations:
 {conversation}
 
 Differential:
 {differential}
-"""
+
+Return ONLY a valid JSON object in this exact format (no markdown, no extra text):
+{{
+  "overview": "<2-3 sentence plain-English summary of the treatment approach>",
+  "medications": [
+    {{
+      "name": "<medication name>",
+      "purpose": "<what it does in simple terms>",
+      "dosage": "<dosage>",
+      "frequency": "<how often>",
+      "duration": "<how long>"
+    }}
+  ],
+  "lifestyle_modifications": [
+    "<one actionable lifestyle tip per item>"
+  ],
+  "dietary_recommendations": [
+    "<one dietary tip per item>"
+  ],
+  "follow_up": "<when the patient should see a doctor again>"
+}}"""
 
     # ------------------------------------------------------------------
     # 11. Disease cause / pathogenesis (patient-friendly)

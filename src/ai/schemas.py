@@ -113,12 +113,38 @@ class AnalysisResultsResponse(BaseModel):
     Returned by GET /results.
     Contains the latest visual description and differential from Gemini.
     Only available when ai_status == 'completed'.
+
+    treatment_plan_json is null until the assigned doctor generates a treatment
+    plan via the doctor review AI endpoint — show/hide in Flutter accordingly.
     """
     case_id: str
     ai_status: str
     visual_description: VisualDescriptionOut | None = None
     differential: DifferentialDiagnosisOut | None = None
     case_summary: str | None = None
+    treatment_plan_json: str | None = None
+
+
+# ================================================================== #
+# Treatment Plan  (patient-triggered, generated on-the-fly)
+# ================================================================== #
+
+class TreatmentMedication(BaseModel):
+    name: str
+    purpose: str
+    dosage: str
+    frequency: str
+    duration: str
+
+
+class TreatmentPlanResponse(BaseModel):
+    """Returned by POST /cases/{case_id}/ai/treatment-plan."""
+    case_id: str
+    overview: str
+    medications: list[TreatmentMedication]
+    lifestyle_modifications: list[str]
+    dietary_recommendations: list[str]
+    follow_up: str
 
 
 # ================================================================== #

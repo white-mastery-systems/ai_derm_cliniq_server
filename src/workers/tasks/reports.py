@@ -492,6 +492,32 @@ def generate_report_task(self, case_id: str) -> None:
             await session.commit()
 
         logger.info("generate_report_task_ok", case_id=case_id, gcs_path=gcs_path)
+
+        # ── 8. Push notification → patient ───────────────────────────── #
+        display_id = f"AI-{case.case_number}" if case.case_number else case_id[:8].upper()
+        try:
+            from src.workers.tasks.notifications import notify_patient_report_ready
+            notify_patient_report_ready.delay(case.patient.id, case_id, display_id)
+        except Exception as exc:
+            logger.warning("notify_report_ready_enqueue_failed", case_id=case_id, error=str(exc))
+
+        # ── 9. Email report PDF to patient ───────────────────────────── #
+        try:
+            from src.core.email import render_report_email, send_email_async
+            html_body = render_report_email(
+                patient_name=case.patient.full_name,
+                display_id=display_id,
+            )
+            await send_email_async(
+                to_email=case.patient.email,
+                subject=f"Your AiDerm Cliniq Report — Case {display_id}",
+                html_body=html_body,
+                attachments=[("report.pdf", pdf_bytes, "application/pdf")],
+            )
+            logger.info("report_email_sent", case_id=case_id, to=case.patient.email)
+        except Exception as exc:
+            logger.warning("report_email_failed", case_id=case_id, error=str(exc))
+
         await engine.dispose()
 
     try:

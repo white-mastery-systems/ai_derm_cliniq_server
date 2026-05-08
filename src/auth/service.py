@@ -54,6 +54,7 @@ from src.auth.security import (
 )
 from src.exceptions import (
     BadRequestException,
+    DoctorPendingApprovalException,
     EmailAlreadyRegisteredException,
     InvalidCredentialsException,
     InvalidTokenException,
@@ -296,6 +297,8 @@ async def login(db: AsyncSession, request: LoginRequest) -> TokenResponse:
         raise InvalidCredentialsException()
 
     if not user.is_active:
+        if user.role == UserRole.DOCTOR:
+            raise DoctorPendingApprovalException()
         raise UnauthorizedException(message="Account is suspended")
 
     # Always refresh fcm_token so the latest device is registered
@@ -365,6 +368,8 @@ async def refresh_tokens(db: AsyncSession, raw_refresh_token: str) -> TokenRespo
     user_result = await db.execute(select(User).where(User.id == user_id))
     user = user_result.scalar_one_or_none()
     if user is None or not user.is_active:
+        if user is not None and user.role == UserRole.DOCTOR:
+            raise DoctorPendingApprovalException()
         raise UnauthorizedException(message="User account not found or suspended")
 
     # 5. Issue new pair
@@ -464,13 +469,14 @@ async def google_auth(
             # 3b. Brand new user — create account
             # Only patient and doctor are allowed via OAuth — never admin.
             resolved_role = UserRole(role) if role in _ALLOWED_OAUTH_ROLES else UserRole.PATIENT
+            is_new_doctor = resolved_role == UserRole.DOCTOR
             user = User(
                 email=google_info.email,
                 full_name=google_info.full_name,
                 role=resolved_role,
                 google_id=google_info.google_id,
-                is_active=True,
-                is_verified=True,  # Google already verified the email
+                is_active=not is_new_doctor,  # Doctors start inactive — require admin approval
+                is_verified=True,             # Google already verified the email
             )
             db.add(user)
             await db.flush()
@@ -481,6 +487,15 @@ async def google_auth(
                 db.add(PatientProfile(user_id=user.id, patient_code=patient_code))
             else:
                 db.add(DoctorProfile(user_id=user.id, notifications_enabled=True))
+                # Notify admins — same as normal doctor registration
+                try:
+                    from src.workers.tasks.notifications import notify_admins_doctor_registered
+                    notify_admins_doctor_registered.delay(
+                        doctor_name=user.full_name,
+                        doctor_id=user.id,
+                    )
+                except Exception as exc:
+                    logger.warning("notify_admins_doctor_registered_enqueue_failed_oauth", error=str(exc))
 
             logger.info(
                 "google_user_registered",
@@ -490,6 +505,11 @@ async def google_auth(
             )
 
     if not user.is_active:
+        if user.role == UserRole.DOCTOR:
+            # Commit the new account before raising so it isn't rolled back.
+            # (Session rolls back on exception — committing first preserves the row.)
+            await db.commit()
+            raise DoctorPendingApprovalException()
         raise UnauthorizedException(message="Account is suspended")
 
     # Always refresh fcm_token on Google sign-in
@@ -611,9 +631,13 @@ async def forgot_password(db: AsyncSession, email: str) -> None:
     from src.core.email import render_password_reset_otp_email, send_email_async
 
     user = await _get_user_by_email(db, email)
-    if user is None or not user.is_active:
-        # Silent no-op — same 200 response as a real send
-        logger.info("forgot_password_email_not_found_or_inactive", email=email)
+    if user is None:
+        # Silent no-op — don't leak whether email exists
+        logger.info("forgot_password_email_not_found", email=email)
+        return
+    if not user.is_active and user.role != UserRole.DOCTOR:
+        # Suspended non-doctor accounts: silent no-op
+        logger.info("forgot_password_inactive_user", email=email)
         return
 
     if not user.password_hash:

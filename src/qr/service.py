@@ -53,6 +53,7 @@ from src.models.qr_token import QRToken
 from src.models.user import User, UserRole
 from src.qr.schemas import GenerateQRRequest, PatientCodeAccessResponse, QRScanResponse, QRTokenResponse
 from src.workers.tasks.email import send_visit_email_task
+from src.workers.tasks.notifications import notify_patient_doctor_assigned
 
 logger = get_logger(__name__)
 
@@ -163,8 +164,10 @@ async def scan_qr(
     qr_token.used_at = datetime.now(tz=timezone.utc)
 
     # Auto-assign doctor to case (only if not already assigned to another)
+    newly_assigned = False
     if case.doctor_id is None:
         case.doctor_id = doctor.id
+        newly_assigned = True
         logger.info("doctor_auto_assigned_via_qr", case_id=case.id, doctor_id=doctor.id)
     elif case.doctor_id != doctor.id:
         # Different doctor scanned — still valid scan, just don't overwrite assignment
@@ -176,6 +179,15 @@ async def scan_qr(
         )
 
     logger.info("qr_scanned", case_id=case.id, doctor_id=doctor.id)
+
+    if newly_assigned:
+        display_id = f"AI-{case.case_number}" if case.case_number else case.id[:8].upper()
+        try:
+            notify_patient_doctor_assigned.delay(
+                patient.id, case.id, display_id, doctor.full_name
+            )
+        except Exception as exc:
+            logger.warning("notify_doctor_assigned_enqueue_failed", case_id=case.id, error=str(exc))
 
     return QRScanResponse(
         case_id=case.id,
@@ -223,8 +235,10 @@ async def access_by_display_id(
         )
 
     # Auto-assign doctor (same logic as QR scan)
+    newly_assigned = False
     if case.doctor_id is None:
         case.doctor_id = doctor.id
+        newly_assigned = True
         logger.info("doctor_auto_assigned_via_display_id", case_id=case.id, doctor_id=doctor.id)
     elif case.doctor_id != doctor.id:
         logger.info(
@@ -235,6 +249,14 @@ async def access_by_display_id(
         )
 
     logger.info("display_id_access", case_id=case.id, doctor_id=doctor.id, display_id=normalized)
+
+    if newly_assigned:
+        try:
+            notify_patient_doctor_assigned.delay(
+                case.patient.id, case.id, normalized, doctor.full_name
+            )
+        except Exception as exc:
+            logger.warning("notify_doctor_assigned_enqueue_failed", case_id=case.id, error=str(exc))
 
     return PatientCodeAccessResponse(
         case_id=case.id,

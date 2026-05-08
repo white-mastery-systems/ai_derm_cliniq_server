@@ -221,6 +221,15 @@ async def update_device_token(db: AsyncSession, user_id: str, fcm_token: str) ->
     return DeviceTokenResponse()
 
 
+async def clear_device_token(db: AsyncSession, user_id: str) -> None:
+    """Clear FCM token on logout so the device stops receiving push notifications."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if user:
+        user.fcm_token = None
+        logger.info("device_token_cleared", user_id=user_id)
+
+
 # ------------------------------------------------------------------ #
 # soft_delete
 # ------------------------------------------------------------------ #

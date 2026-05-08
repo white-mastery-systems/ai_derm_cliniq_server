@@ -35,6 +35,7 @@ from src.ai.schemas import (
     AnalysisStatusResponse,
     CaseQueryRequest,
     CaseQueryResponse,
+    TreatmentPlanResponse,
 )
 from src.auth.dependencies import get_current_user
 from src.database.core import get_async_session
@@ -83,6 +84,25 @@ async def get_analysis_results(
     db: AsyncSession = Depends(get_async_session),
 ) -> AnalysisResultsResponse:
     return await service.get_results(db, user, case_id)
+
+
+@router.post(
+    "/treatment-plan",
+    response_model=TreatmentPlanResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Generate a patient-friendly treatment plan",
+    description=(
+        "Generates a treatment plan on-the-fly based on the AI differential and the "
+        "patient's Q&A conversation history. Requires AI analysis to be completed. "
+        "Each call regenerates the plan — result is not stored."
+    ),
+)
+async def generate_treatment_plan(
+    case_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_session),
+) -> TreatmentPlanResponse:
+    return await service.generate_patient_treatment_plan(db, user, case_id)
 
 
 @router.post(

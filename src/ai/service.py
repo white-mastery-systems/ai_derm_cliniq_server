@@ -36,6 +36,8 @@ from src.ai.schemas import (
     AnalysisStatusResponse,
     ChatMessageOut,
     DifferentialDiagnosisOut,
+    TreatmentMedication,
+    TreatmentPlanResponse,
     VisualDescriptionOut,
 )
 from src.exceptions import (
@@ -52,6 +54,7 @@ from src.models.case import AiStatus, Case
 from src.models.case_image import CaseImage
 from src.models.differential_diagnosis import DifferentialDiagnosis
 from src.models.user import User, UserRole
+from src.models.doctor_review import DoctorReview
 from src.models.visual_description import VisualDescription
 
 logger = get_logger(__name__)
@@ -258,6 +261,12 @@ async def get_results(
     )
     dd = dd_result.scalar_one_or_none()
 
+    # Fetch doctor review treatment plan (null until doctor generates it)
+    dr_result = await db.execute(
+        select(DoctorReview).where(DoctorReview.case_id == case_id)
+    )
+    dr = dr_result.scalar_one_or_none()
+
     visual_out = None
     if vd:
         import json as _json
@@ -291,6 +300,147 @@ async def get_results(
         visual_description=visual_out,
         differential=differential_out,
         case_summary=case.case_summary,
+        treatment_plan_json=dr.treatment_plan_json if dr else None,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Patient Treatment Plan  (on-the-fly, patient-triggered)
+# ------------------------------------------------------------------ #
+
+async def generate_patient_treatment_plan(
+    db: AsyncSession,
+    user: User,
+    case_id: str,
+) -> TreatmentPlanResponse:
+    """
+    Generate a patient-friendly treatment plan based on the final differential
+    and the patient's Q&A conversation history.
+
+    Mirrors the old Dermchatbot2 "Tell me the treatment plan." button flow.
+    Generated on-the-fly — not persisted to DB.
+    Requires AI analysis to be completed.
+    """
+    import asyncio
+    import json as _json
+
+    from src.ai.gemini_client import call_gemini
+    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+    from src.models.message import Message, MessageRole
+
+    case = await _get_case_with_access(db, case_id, user)
+
+    if case.ai_status != AiStatus.COMPLETED:
+        raise BadRequestException(
+            message="AI analysis must complete before generating a treatment plan."
+        )
+
+    # Return cached plan if already generated
+    if case.patient_treatment_plan:
+        try:
+            data = _json.loads(case.patient_treatment_plan)
+            medications = [
+                TreatmentMedication(
+                    name=m.get("name", ""),
+                    purpose=m.get("purpose", ""),
+                    dosage=m.get("dosage", ""),
+                    frequency=m.get("frequency", ""),
+                    duration=m.get("duration", ""),
+                )
+                for m in data.get("medications", [])
+            ]
+            return TreatmentPlanResponse(
+                case_id=case_id,
+                overview=data.get("overview", ""),
+                medications=medications,
+                lifestyle_modifications=data.get("lifestyle_modifications", []),
+                dietary_recommendations=data.get("dietary_recommendations", []),
+                follow_up=data.get("follow_up", ""),
+            )
+        except (ValueError, TypeError):
+            pass  # Corrupted cache — fall through to regenerate
+
+    # Fetch final differential
+    dd_result = await db.execute(
+        select(DifferentialDiagnosis)
+        .where(
+            DifferentialDiagnosis.case_id == case_id,
+            DifferentialDiagnosis.is_final.is_(True),
+        )
+        .order_by(DifferentialDiagnosis.round_number.desc())
+        .limit(1)
+    )
+    dd = dd_result.scalar_one_or_none()
+    differential = dd.diagnosis_json if dd else "{}"
+
+    # Build conversation history from Q&A messages
+    msgs_result = await db.execute(
+        select(Message)
+        .where(Message.case_id == case_id)
+        .order_by(Message.round_number, Message.question_index)
+    )
+    messages = list(msgs_result.scalars().all())
+
+    conv_lines: list[str] = []
+    for m in messages:
+        if m.role == MessageRole.AI:
+            try:
+                data = _json.loads(m.content)
+                if data.get("sentinel"):
+                    continue
+                q_text = data.get("question", "")
+                if q_text:
+                    conv_lines.append(f"Q: {q_text}")
+            except (ValueError, TypeError):
+                pass
+        elif m.role == MessageRole.PATIENT:
+            conv_lines.append(f"A: {m.content}")
+
+    conversation = "\n".join(conv_lines) if conv_lines else "No Q&A on record."
+
+    prompt = PatientConsultationPrompts.treatment_plan().format(
+        conversation=conversation,
+        differential=differential,
+    )
+
+    raw = await asyncio.to_thread(call_gemini, prompt)
+
+    # Strip markdown fences if Gemini wraps the JSON
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    try:
+        data = _json.loads(cleaned)
+    except (ValueError, TypeError) as exc:
+        logger.warning("treatment_plan_json_parse_failed", case_id=case_id, error=str(exc))
+        raise AIServiceException(message="Failed to parse treatment plan from AI response.") from exc
+
+    medications = [
+        TreatmentMedication(
+            name=m.get("name", ""),
+            purpose=m.get("purpose", ""),
+            dosage=m.get("dosage", ""),
+            frequency=m.get("frequency", ""),
+            duration=m.get("duration", ""),
+        )
+        for m in data.get("medications", [])
+    ]
+
+    # Cache in DB — subsequent calls return instantly without hitting Gemini
+    case.patient_treatment_plan = cleaned
+    await db.flush()
+
+    return TreatmentPlanResponse(
+        case_id=case_id,
+        overview=data.get("overview", ""),
+        medications=medications,
+        lifestyle_modifications=data.get("lifestyle_modifications", []),
+        dietary_recommendations=data.get("dietary_recommendations", []),
+        follow_up=data.get("follow_up", ""),
     )
 
 
@@ -450,7 +600,10 @@ async def chat_with_case(
     differential_json = dd.diagnosis_json if dd else "{}"
     case_summary = case.case_summary or "Not available"
 
-    # Build Q&A history from consultation rounds
+    # Cap Q&A history to last 6 pairs (Q+A) to bound system context size.
+    # The full diagnostic context (diagnosis, differential, case_summary) already
+    # carries the key facts — the raw Q&A transcript adds diminishing value beyond
+    # the most recent exchanges.
     msgs_result = await db.execute(
         select(Message)
         .where(Message.case_id == case_id)
@@ -466,38 +619,46 @@ async def chat_with_case(
                     continue
                 q_text = data.get("question", "")
                 if q_text:
-                    qa_lines.append(f"Q (Round {m.round_number}): {q_text}")
+                    qa_lines.append(f"Q: {q_text}")
             except (ValueError, TypeError):
                 pass
         elif m.role == MessageRole.PATIENT:
             qa_lines.append(f"A: {m.content}")
+    # Keep only the last 12 lines (≈6 Q+A pairs)
+    consultation_history = "\n".join(qa_lines[-12:]) if qa_lines else "No Q&A on record."
 
-    consultation_history = "\n".join(qa_lines) if qa_lines else "No Q&A on record."
-
-    # Build Gemini conversation: system context + prior chat turns + new message
+    # Build Gemini conversation: system context + sliding window of chat history + new message
     system_context = PatientConsultationPrompts.case_query().format(
         diagnosis=diagnosis,
         differential_json=differential_json,
         case_summary=case_summary,
         conversation_history=consultation_history,
-        question="{question}",   # placeholder — replaced per turn below
+        question="{question}",
     ).split('The patient has asked:')[0].strip()
 
-    # Construct full prompt with prior chat history + new message
+    # Sliding window: only send the last 10 chat messages (5 exchanges) to Gemini.
+    # This keeps prompt size bounded regardless of session length.
+    windowed = prior_messages[-10:]
     history_text = ""
-    for prior in prior_messages:
-        role_label = "Patient" if prior.role == AiChatRole.USER else "AI"
+    for prior in windowed:
+        role_label = "Patient" if prior.role == AiChatRole.USER else "Assistant"
         history_text += f"\n{role_label}: {prior.content}"
 
     full_prompt = (
         f"{system_context}\n\n"
         f"{'Prior conversation:' + history_text if history_text else ''}\n\n"
         f"Patient: {message}\n\n"
-        "Answer the patient's latest question in the context of the full conversation above."
+        "Answer the patient's latest question clearly and concisely. "
+        "Do not prefix your response with 'AI:' or 'Assistant:' — reply directly."
     )
 
     # Call Gemini
     answer = await asyncio.to_thread(call_gemini, full_prompt)
+    # Strip any role prefix Gemini echoes back ("AI:", "Assistant:", etc.)
+    for prefix in ("AI:", "Assistant:", "AI: ", "Assistant: "):
+        if answer.startswith(prefix):
+            answer = answer[len(prefix):]
+            break
     answer = answer.strip()
 
     # Persist both turns
