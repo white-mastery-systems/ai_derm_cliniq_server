@@ -53,5 +53,5 @@ firebase-admin==6.6.0            # Firebase Admin SDK (FCM push notifications)
 structlog==24.4.0                # Structured JSON logging
 
 # --- Utilities ---
-python-multipart==0.0.20         # Multipart form data (file uploads)
+python-multipart==0.0.27         # Multipart form data (file uploads)
 pillow==11.0.0                   # Image processing (HEIC conversion, thumbnails)
