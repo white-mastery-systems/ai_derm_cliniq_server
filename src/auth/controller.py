@@ -46,9 +46,11 @@ from src.auth.schemas import (
     PatientRegisterRequest,
     RefreshRequest,
     RegisterResponse,
+    ResendDoctorVerificationRequest,
     ResetPasswordRequest,
     TokenResponse,
     UserResponse,
+    VerifyDoctorEmailRequest,
     VerifyEmailOTPRequest,
 )
 from src.auth.dependencies import get_current_user
@@ -125,6 +127,53 @@ async def register_doctor(
             is_active=user.is_active,
             is_verified=user.is_verified,
         ),
+    )
+
+
+@router.post(
+    "/verify-doctor-email",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Verify a doctor's email address using a registration OTP",
+    description=(
+        "Validates the 6-digit OTP emailed at doctor registration and marks the "
+        "doctor's email as verified (is_verified=True). No authentication required — "
+        "doctors have no token until admin approval. "
+        "The account remains locked (is_active=False) until an admin approves it."
+    ),
+)
+@limiter.limit("5/minute")
+async def verify_doctor_email(
+    request: Request,  # noqa: ARG001
+    body: VerifyDoctorEmailRequest,
+    db: AsyncSession = Depends(get_async_session),
+) -> MessageResponse:
+    await service.verify_doctor_email(db, body.email, body.otp)
+    return MessageResponse(
+        message="Email verified successfully. Your account is pending admin approval."
+    )
+
+
+@router.post(
+    "/resend-doctor-verification",
+    response_model=MessageResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resend the doctor registration email verification OTP",
+    description=(
+        "Generates a new 6-digit OTP and emails it to the doctor's address. "
+        "Invalidates any previous unused OTP for this account. "
+        "Always returns 200 regardless of whether the email exists — prevents enumeration."
+    ),
+)
+@limiter.limit("3/minute")
+async def resend_doctor_verification(
+    request: Request,  # noqa: ARG001
+    body: ResendDoctorVerificationRequest,
+    db: AsyncSession = Depends(get_async_session),
+) -> MessageResponse:
+    await service.resend_doctor_verification(db, body.email)
+    return MessageResponse(
+        message="If that email is registered and unverified, a new code has been sent."
     )
 
 
@@ -312,4 +361,10 @@ async def google_auth(
     request: GoogleAuthRequest,
     db: AsyncSession = Depends(get_async_session),
 ) -> TokenResponse:
-    return await service.google_auth(db, request.id_token, request.role, request.fcm_token)
+    return await service.google_auth(
+        db,
+        role=request.role,
+        id_token=request.id_token,
+        access_token=request.access_token,
+        fcm_token=request.fcm_token,
+    )

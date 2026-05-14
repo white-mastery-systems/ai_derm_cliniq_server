@@ -214,6 +214,47 @@ _EMAIL_VERIFY_OTP_TEMPLATE = """
 </div></body></html>
 """
 
+_DOCTOR_REGISTRATION_OTP_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .header p{color:#a8d5ca;margin:4px 0 0;font-size:13px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .otp-box{background:#f0f9f6;border:2px dashed #1a6b5a;border-radius:8px;
+           text-align:center;padding:24px;margin:24px 0}
+  .otp-box .label{font-size:13px;color:#555;text-transform:uppercase;
+                  letter-spacing:1px;margin-bottom:8px}
+  .otp-box .code{font-size:40px;font-weight:700;color:#1a6b5a;letter-spacing:8px}
+  .info{background:#f0f9f6;border-left:4px solid #1a6b5a;padding:12px 16px;
+        border-radius:4px;font-size:13px;color:#1a4a3a;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header">
+    <h1>AiDerm Cliniq — Verify Your Email</h1>
+    <p>Doctor Registration</p>
+  </div>
+  <div class="body">
+    <p>Hi <strong>Dr. {{ name }}</strong>,</p>
+    <p>Thank you for registering as a doctor on AiDerm Cliniq. Enter the OTP code below to verify your email address:</p>
+    <div class="otp-box">
+      <div class="label">Your Verification Code</div>
+      <div class="code">{{ otp }}</div>
+    </div>
+    <div class="info">
+      This code expires in <strong>30 minutes</strong> and can only be used once.
+    </div>
+    <p>Once your email is verified, your account will be reviewed by our admin team before you can access the clinical dashboard.</p>
+    <p style="font-size:13px;color:#777">If you did not create this account, you can safely ignore this email.</p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
 
 _DOCTOR_APPROVED_EMAIL_TEMPLATE = """
 <!DOCTYPE html><html><head><meta charset="UTF-8">
@@ -350,6 +391,11 @@ def render_password_reset_otp_email(name: str, otp: str) -> str:
 def render_email_verify_otp_email(name: str, otp: str) -> str:
     """Render the email verification OTP HTML email."""
     return Template(_EMAIL_VERIFY_OTP_TEMPLATE).render(name=name, otp=otp)
+
+
+def render_doctor_registration_otp_email(name: str, otp: str) -> str:
+    """Render the doctor registration email verification OTP email."""
+    return Template(_DOCTOR_REGISTRATION_OTP_TEMPLATE).render(name=name, otp=otp)
 
 
 def render_visit_email(patient_name: str, display_id: str, patient_url: str) -> str:

@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.auth.google import verify_google_id_token
+from src.auth.google import verify_google_access_token, verify_google_id_token
 from src.auth.jwt import (
     create_access_token,
     get_refresh_token_expiry,
@@ -206,16 +206,14 @@ async def register_doctor(
     request: DoctorRegisterRequest,
 ) -> User:
     """
-    Create a new doctor account — pending admin approval.
+    Create a new doctor account — email verification required, then admin approval.
 
     Steps:
     1. Check email uniqueness
-    2. Create User row (DOCTOR role, is_verified=False)
+    2. Create User row (DOCTOR role, is_active=False, is_verified=False)
     3. Create DoctorProfile row
-    4. Return User — NO tokens issued until admin approves
-
-    The doctor cannot log in until an admin sets is_verified=True via
-    PATCH /api/v1/admin/users/{user_id}.
+    4. Generate OTP and email it for email verification
+    5. Return User — NO tokens issued until email verified + admin approves
 
     Raises:
         EmailAlreadyRegisteredException — if email is taken
@@ -224,15 +222,15 @@ async def register_doctor(
     if await _get_user_by_email(db, request.email):
         raise EmailAlreadyRegisteredException()
 
-    # 2. Create User (is_active=False until admin approves)
+    # 2. Create User (is_active=False until admin approves, is_verified=False until OTP confirmed)
     hashed_pw = await asyncio.to_thread(hash_password, request.password)
     user = User(
         email=request.email,
         full_name=request.full_name,
         role=UserRole.DOCTOR,
         password_hash=hashed_pw,
-        is_active=False,      # Cannot log in until admin activates
-        is_verified=False,    # Cannot access doctor endpoints until admin verifies
+        is_active=False,
+        is_verified=False,
         fcm_token=request.fcm_token or None,
     )
     db.add(user)
@@ -248,19 +246,90 @@ async def register_doctor(
     )
     db.add(profile)
 
-    logger.info("doctor_registered_pending_approval", user_id=user.id, email=user.email)
+    # 4. Generate OTP and send verification email
+    otp = await _create_verification_token(
+        db, user.id, TokenPurpose.EMAIL_VERIFY,
+        expiry_minutes=_EMAIL_VERIFY_EXPIRY_MINUTES,
+    )
+    try:
+        from src.core.email import render_doctor_registration_otp_email, send_email_async
+        html = render_doctor_registration_otp_email(name=request.full_name, otp=otp)
+        await send_email_async(
+            to_email=request.email,
+            subject="AiDerm Cliniq — Verify Your Email",
+            html_body=html,
+        )
+        logger.info("doctor_registration_otp_sent", user_id=user.id)
+    except Exception as exc:
+        logger.warning("doctor_registration_otp_email_failed", user_id=user.id, error=str(exc))
 
-    # Fire-and-forget: notify all admins a new doctor is pending approval
+    logger.info("doctor_registered_pending_email_verification", user_id=user.id, email=user.email)
+
+    return user
+
+
+async def verify_doctor_email(db: AsyncSession, email: str, otp: str) -> None:
+    """
+    Confirm a doctor's email address using a 6-digit OTP sent at registration.
+
+    Unlike the patient flow, this endpoint is unauthenticated — doctors have no
+    access token yet because they cannot log in until admin approves them.
+
+    On success, sets is_verified=True. The account remains is_active=False until
+    an admin approves the doctor.
+
+    Raises:
+        InvalidTokenException — OTP not found, already used, or expired
+    """
+    user = await _get_user_by_email(db, email)
+    if user is None or user.role != UserRole.DOCTOR:
+        raise InvalidTokenException(message="OTP is invalid or has already been used")
+
+    if user.is_verified:
+        raise BadRequestException(message="Email address is already verified")
+
+    await _redeem_otp(db, user.id, otp, TokenPurpose.EMAIL_VERIFY)
+    user.is_verified = True
+    logger.info("doctor_email_verified", user_id=user.id)
+
+    # Notify admins now that the doctor has verified their email
     try:
         from src.workers.tasks.notifications import notify_admins_doctor_registered
         notify_admins_doctor_registered.delay(
-            doctor_name=request.full_name,
+            doctor_name=user.full_name,
             doctor_id=user.id,
         )
     except Exception as exc:
         logger.warning("notify_admins_doctor_registered_enqueue_failed", error=str(exc))
 
-    return user
+
+async def resend_doctor_verification(db: AsyncSession, email: str) -> None:
+    """
+    Resend the email verification OTP to a doctor who hasn't verified yet.
+
+    Silent no-op if the email is not a registered doctor or is already verified —
+    prevents user enumeration.
+    """
+    user = await _get_user_by_email(db, email)
+    if user is None or user.role != UserRole.DOCTOR or user.is_verified:
+        logger.info("resend_doctor_verification_noop", email=email)
+        return
+
+    otp = await _create_verification_token(
+        db, user.id, TokenPurpose.EMAIL_VERIFY,
+        expiry_minutes=_EMAIL_VERIFY_EXPIRY_MINUTES,
+    )
+    try:
+        from src.core.email import render_doctor_registration_otp_email, send_email_async
+        html = render_doctor_registration_otp_email(name=user.full_name, otp=otp)
+        await send_email_async(
+            to_email=email,
+            subject="AiDerm Cliniq — Verify Your Email",
+            html_body=html,
+        )
+        logger.info("doctor_verification_otp_resent", user_id=user.id)
+    except Exception as exc:
+        logger.warning("doctor_verification_otp_resend_failed", user_id=user.id, error=str(exc))
 
 
 # ------------------------------------------------------------------ #
@@ -418,34 +487,25 @@ async def logout(db: AsyncSession, raw_refresh_token: str) -> None:
 
 async def google_auth(
     db: AsyncSession,
-    id_token: str,
     role: str,
+    id_token: str | None = None,
+    access_token: str | None = None,
     fcm_token: str | None = None,
 ) -> TokenResponse:
     """
     Sign in or register via Google OAuth.
 
-    UPSERT PATTERN
-    ---------------
-    This function handles both first-time Google login (register) and
-    returning Google users (login) with the same flow:
-
-    1. Verify the ID token with Google's tokeninfo endpoint
-    2. Look up user by google_id — if found, it's a returning user
-    3. If not found by google_id, check if email already exists:
-       - If email exists (password user), link the Google account
-       - If email does not exist, create a new user + profile
-    4. Issue tokens
+    Accepts either id_token (mobile) or access_token (Flutter web fallback).
+    The GIS OAuth popup on Flutter web returns an access_token but not an id_token.
 
     `role` is only used when creating a NEW user — returning users keep
     their existing role regardless of what `role` is sent.
-
-    Raises:
-        UnauthorizedException — token invalid, Google unreachable,
-                                or account suspended
     """
-    # 1. Verify token with Google
-    google_info = await verify_google_id_token(id_token)
+    # 1. Verify token with Google — prefer id_token, fall back to access_token
+    if id_token:
+        google_info = await verify_google_id_token(id_token)
+    else:
+        google_info = await verify_google_access_token(access_token)  # type: ignore[arg-type]
 
     # 2. Look up by google_id
     result = await db.execute(

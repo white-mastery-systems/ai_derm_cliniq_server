@@ -24,7 +24,7 @@ NAMING CONVENTION
 
 from datetime import date
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 # ================================================================== #
@@ -167,13 +167,20 @@ class GoogleAuthRequest(BaseModel):
     """
     POST /api/v1/auth/google
 
-    Flutter uses Google Sign-In SDK → receives an ID token.
-    This token is sent here for server-side verification.
+    Mobile (Android/iOS) sends id_token from the Google Sign-In SDK.
+    Flutter web sends access_token — the GIS OAuth popup flow does not return
+    an id_token on web. Exactly one of the two must be provided.
 
-    role is required so we know whether to create a patient or doctor profile
-    if this is the user's first Google login.
+    role is only used when creating a new account on first login.
     """
-    id_token: str
+    id_token: str | None = Field(
+        default=None,
+        description="Google ID token — returned by native mobile Google Sign-In",
+    )
+    access_token: str | None = Field(
+        default=None,
+        description="Google access token — Flutter web fallback when idToken is null",
+    )
     role: str = Field(
         default="patient",
         pattern="^(patient|doctor)$",
@@ -184,6 +191,12 @@ class GoogleAuthRequest(BaseModel):
         max_length=512,
         description="Firebase Cloud Messaging device token for push notifications",
     )
+
+    @model_validator(mode="after")
+    def require_one_token(self) -> "GoogleAuthRequest":
+        if not self.id_token and not self.access_token:
+            raise ValueError("Either id_token or access_token must be provided")
+        return self
 
 
 # ================================================================== #
@@ -277,8 +290,28 @@ class DoctorRegisterResponse(BaseModel):
     """
     POST /api/v1/auth/register/doctor response.
 
-    Doctors are NOT logged in immediately — they must wait for admin approval.
-    No tokens are issued. The Flutter app should show a "pending approval" screen.
+    Doctors are NOT logged in immediately — email verification is required first,
+    then admin approval. No tokens are issued at registration time.
     """
     user: UserResponse
-    message: str = "Registration successful. Your account is pending admin approval. You will be able to log in once an admin verifies your account."
+    message: str = (
+        "Registration successful. A 6-digit verification code has been sent to your email. "
+        "Please verify your email to complete registration. "
+        "After verification, your account will be reviewed by an admin before you can log in."
+    )
+
+
+class VerifyDoctorEmailRequest(BaseModel):
+    """POST /api/v1/auth/verify-doctor-email"""
+    email: EmailStr = Field(description="The email address used during registration")
+    otp: str = Field(
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+        description="6-digit OTP received in the registration verification email",
+    )
+
+
+class ResendDoctorVerificationRequest(BaseModel):
+    """POST /api/v1/auth/resend-doctor-verification"""
+    email: EmailStr = Field(description="The email address used during registration")

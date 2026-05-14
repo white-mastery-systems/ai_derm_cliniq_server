@@ -42,6 +42,7 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 GOOGLE_TOKEN_INFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo"
 
 
 class GoogleUserInfo:
@@ -107,6 +108,52 @@ async def verify_google_id_token(id_token: str) -> GoogleUserInfo:
     if not google_id or not email:
         raise UnauthorizedException(
             message="Google token missing required fields (sub, email)"
+        )
+
+    return GoogleUserInfo(
+        google_id=google_id,
+        email=email,
+        full_name=full_name,
+    )
+
+
+async def verify_google_access_token(access_token: str) -> GoogleUserInfo:
+    """
+    Verify a Google access token via the userinfo endpoint.
+
+    Used as a fallback for Flutter web: the GIS OAuth popup flow returns an
+    accessToken but not an idToken. The userinfo endpoint validates the token
+    and returns the same user fields we need.
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        try:
+            response = await client.get(
+                GOOGLE_USERINFO_URL,
+                params={"access_token": access_token},
+            )
+        except httpx.RequestError as e:
+            logger.error("google_userinfo_request_failed", error=str(e))
+            raise UnauthorizedException(
+                message="Could not reach Google authentication service"
+            )
+
+    if response.status_code != 200:
+        logger.warning(
+            "google_access_token_invalid",
+            status_code=response.status_code,
+            body=response.text[:200],
+        )
+        raise UnauthorizedException(message="Invalid or expired Google access token")
+
+    data = response.json()
+
+    google_id = data.get("id")
+    email = data.get("email")
+    full_name = data.get("name", email or "Google User")
+
+    if not google_id or not email:
+        raise UnauthorizedException(
+            message="Google token missing required fields (id, email)"
         )
 
     return GoogleUserInfo(
