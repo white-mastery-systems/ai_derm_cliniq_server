@@ -263,6 +263,27 @@ class RedFlagsResponse(BaseModel):
     message: str
 
 
+class SystemicSymptomOption(BaseModel):
+    """Single selectable symptom option shown on the Systemic Check screen."""
+    id: str
+    label: str
+
+
+class SystemicSymptomsResponse(BaseModel):
+    """
+    GET /api/v1/cases/{case_id}/systemic-symptoms
+
+    Returns the case-specific symptom options for the Systemic Check screen.
+    Generated from the AI differential at the end of save_results_task and
+    stored on the case — no extra LLM call at request time.
+
+    Falls back to a generic set if the case analysis has not completed yet.
+    Always ends with {"id": "none", "label": "None of the above"}.
+    """
+    case_id: str
+    symptoms: list[SystemicSymptomOption]
+
+
 class AssessmentDepthRequest(BaseModel):
     """
     POST /api/v1/cases/{case_id}/assessment-depth

@@ -39,6 +39,7 @@ from src.cases.schemas import (
     PaginatedSearchResponse,
     RedFlagsCheckRequest,
     RedFlagsResponse,
+    SystemicSymptomsResponse,
     VisualFindingsGenerateResponse,
     VisualFindingsPatchRequest,
     VisualFindingsResponse,
@@ -280,6 +281,26 @@ async def get_red_flags(
     db: AsyncSession = Depends(get_async_session),
 ) -> RedFlagsResponse:
     return await service.get_red_flags(db, user, case_id)
+
+
+@router.get(
+    "/{case_id}/systemic-symptoms",
+    response_model=SystemicSymptomsResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get case-specific systemic symptom options for the Systemic Check screen",
+    description=(
+        "Returns a list of {id, label} symptom options generated from the AI differential "
+        "diagnosis. Always ends with 'None of the above'. Falls back to a generic set if "
+        "the case analysis has not completed yet."
+    ),
+)
+async def get_systemic_symptoms(
+    case_id: str,
+    user: User = Depends(require_patient_or_assigned_doctor),
+    db: AsyncSession = Depends(get_async_session),
+) -> SystemicSymptomsResponse:
+    symptoms = await service.get_systemic_symptoms(db, user, case_id)
+    return SystemicSymptomsResponse(case_id=case_id, symptoms=symptoms)
 
 
 @router.post(

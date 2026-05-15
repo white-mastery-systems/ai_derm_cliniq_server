@@ -602,6 +602,21 @@ def save_results_task(self, analysis_result: dict) -> None:
                 f"7. **Differential Diagnosis**: {diff_str}"
             )
 
+            # Build dynamic systemic symptom options from the differential
+            from src.ai.symptom_mapper import map_symptoms_from_differential
+            diff_names: list[str] = []
+            for item in (diff_raw if isinstance(diff_raw, list) else []):
+                if isinstance(item, dict):
+                    n = item.get("diagnosis") or item.get("name", "")
+                    if n:
+                        diff_names.append(n)
+                elif isinstance(item, str):
+                    diff_names.append(item)
+            systemic_options = map_symptoms_from_differential(
+                most_probable=most_probable_name,
+                differentials=diff_names,
+            )
+
             # Update case
             case.ai_status = AiStatus.COMPLETED
             case.celery_task_id = None
@@ -609,6 +624,7 @@ def save_results_task(self, analysis_result: dict) -> None:
             case.case_title = most_probable_name
             case.symptom_tags = json.dumps(symptom_tags) if symptom_tags else None
             case.max_question_rounds = recommended_rounds  # AI recommendation
+            case.systemic_symptom_options = json.dumps(systemic_options)
 
             _patient_id = case.patient_id
             _case_number = case.case_number

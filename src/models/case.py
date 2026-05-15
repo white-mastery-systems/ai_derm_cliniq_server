@@ -330,6 +330,11 @@ class Case(TimestampMixin, Base):
         nullable=True,
         comment="AI-generated advice shown to patient when red flags are detected",
     )
+    systemic_symptom_options: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON list of {id, label} symptom options for the Systemic Check screen, generated from the AI differential",
+    )
 
     # ------------------------------------------------------------------ #
     # Bookmark — doctor marks case as important for quick retrieval
