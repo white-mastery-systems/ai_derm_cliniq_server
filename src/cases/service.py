@@ -351,6 +351,21 @@ async def create_case(
     db.add(case)
     await db.flush()
 
+    from src.models.audit_log import AuditEventType, CaseAuditLog
+    import json as _json
+    db.add(CaseAuditLog(
+        case_id=case.id,
+        event_type=AuditEventType.DISCLAIMER_ACCEPTED,
+        actor_id=patient.id,
+        actor_role="patient",
+        event_data=_json.dumps({
+            "consent_ai_analysis": True,
+            "consent_research": request.consent_research,
+            "accepted_at": now.isoformat(),
+        }),
+        created_at=now,
+    ))
+
     logger.info("case_created", case_id=case.id, patient_id=patient.id)
     return _to_case_response(case, image_count=0)
 
@@ -1190,6 +1205,23 @@ async def create_case_by_doctor(
     )
     db.add(case)
     await db.flush()
+
+    from src.models.audit_log import AuditEventType, CaseAuditLog
+    import json as _json
+    db.add(CaseAuditLog(
+        case_id=case.id,
+        event_type=AuditEventType.DISCLAIMER_ACCEPTED,
+        actor_id=doctor.id,
+        actor_role="doctor",
+        event_data=_json.dumps({
+            "consent_ai_analysis": True,
+            "consent_research": request.consent_research,
+            "accepted_at": now.isoformat(),
+            "created_by": "doctor",
+            "patient_id": patient.id,
+        }),
+        created_at=now,
+    ))
 
     logger.info(
         "case_created_by_doctor",

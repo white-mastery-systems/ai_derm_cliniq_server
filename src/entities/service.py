@@ -149,6 +149,7 @@ async def get_entities(
                 snomed_term=term,
                 is_most_probable=(i == 0),
                 confidence=None,
+                key_supporting_features=None,
             ))
 
         logger.info(
@@ -185,6 +186,7 @@ async def get_entities(
             snomed_term=term,
             is_most_probable=True,
             confidence=str(confidence) if confidence else None,
+            key_supporting_features=most_probable.get("key_supporting_features") or None,
         ))
 
     # Differential diagnoses
@@ -202,6 +204,7 @@ async def get_entities(
                 snomed_term=term,
                 is_most_probable=False,
                 confidence=diff.get("likelihood"),
+                key_supporting_features=diff.get("key_supporting_features") or None,
             ))
 
     logger.info(

@@ -24,11 +24,13 @@ DESIGN DECISIONS
 
 CURRENT EVENT TYPES
 --------------------
-  red_flag_triggered  — AI identified urgent symptoms; escalation sent to admins.
+  red_flag_triggered   — AI identified urgent symptoms; escalation sent to admins.
+  disclaimer_accepted  — Patient explicitly accepted the medical AI disclaimer at
+                         case creation. Closes GitHub issue #161.
 
-(Additional events — case_created, doctor_assigned, review_submitted — can be
-added by appending values to AuditEventType without a breaking schema change,
-since PostgreSQL ALTER TYPE ADD VALUE is non-destructive.)
+(Additional events — doctor_assigned, review_submitted — can be added by
+appending values to AuditEventType without a breaking schema change, since
+PostgreSQL ALTER TYPE ADD VALUE is non-destructive.)
 """
 
 import enum
@@ -41,7 +43,8 @@ from src.models.base import Base, new_uuid
 
 
 class AuditEventType(str, enum.Enum):
-    RED_FLAG_TRIGGERED = "red_flag_triggered"
+    RED_FLAG_TRIGGERED  = "red_flag_triggered"
+    DISCLAIMER_ACCEPTED = "disclaimer_accepted"
 
 
 class CaseAuditLog(Base):

@@ -36,7 +36,8 @@ class ClinicalEntity(BaseModel):
     snomed_code: str | None
     snomed_term: str | None
     is_most_probable: bool
-    confidence: str | None   # "high" | "medium" | "low" | None
+    confidence: str | None          # "high" | "medium" | "low" | None
+    key_supporting_features: str | None  # symptom evidence that drove this diagnosis
 
 
 class CaseEntitiesResponse(BaseModel):
