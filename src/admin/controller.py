@@ -40,6 +40,7 @@ from src.admin.schemas import (
     AdminUpdateUserRequest,
     AdminUserDetail,
     AiSettingsResponse,
+    CaseAuditLogResponse,
     PaginatedAdminCasesResponse,
     PaginatedAdminDoctorsResponse,
     PaginatedAdminUsersResponse,
@@ -328,6 +329,32 @@ async def get_case_detail(
     Returns 404 if the case does not exist.
     """
     return await service.get_case_detail(db, case_id)
+
+
+# ------------------------------------------------------------------ #
+# Case Audit Log
+# ------------------------------------------------------------------ #
+
+@router.get(
+    "/cases/{case_id}/audit-log",
+    response_model=CaseAuditLogResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get audit log for a case (admin only)",
+)
+async def get_case_audit_log(
+    case_id: str,
+    _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
+) -> CaseAuditLogResponse:
+    """
+    Return the full, ordered audit trail for a case.
+
+    Each entry records what happened, when, and who (or what system) triggered it.
+    actor_role = "system" means the event was triggered by the AI / Celery worker.
+
+    Returns 404 if the case does not exist.
+    """
+    return await service.get_case_audit_log(db, case_id)
 
 
 # ------------------------------------------------------------------ #

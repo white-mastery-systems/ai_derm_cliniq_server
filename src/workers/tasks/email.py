@@ -43,9 +43,15 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import NullPool
 
 from src.config import settings
-from src.core.email import render_visit_email, send_email
+from src.core.email import (
+    render_visit_email,
+    render_red_flag_patient_email,
+    render_red_flag_admin_email,
+    send_email,
+)
 from src.logger import get_logger
 from src.models.case import Case
+from src.models.user import User, UserRole
 from src.workers.celery_app import celery_app
 
 logger = get_logger(__name__)
@@ -177,3 +183,121 @@ def send_visit_email_task(self, case_id: str, token: str) -> dict:
     # Email failed — retry up to max_retries times for transient SMTP issues
     logger.warning("email_task_send_failed", case_id=case_id, to=patient_email)
     return {"status": "failed", "reason": "smtp_error", "case_id": case_id}
+
+
+# ------------------------------------------------------------------ #
+# Red Flag Emails — patient urgent alert + admin notification
+# ------------------------------------------------------------------ #
+
+async def _load_red_flag_recipients(case_id: str) -> tuple[str, str, str] | None:
+    """
+    Load patient email, patient name, and display_id for the case.
+    Returns (patient_email, patient_name, display_id) or None.
+    """
+    engine = _make_engine()
+    try:
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+        async with factory() as session:
+            result = await session.execute(
+                select(Case)
+                .where(Case.id == case_id)
+                .options(selectinload(Case.patient))
+            )
+            case = result.scalar_one_or_none()
+            if case is None or case.patient is None:
+                return None
+            display_id = f"AI-{case.case_number}" if case.case_number else case_id[:8].upper()
+            return case.patient.email, case.patient.full_name, display_id
+    finally:
+        await engine.dispose()
+
+
+async def _load_admin_emails() -> list[str]:
+    """Return email addresses of all active admin users."""
+    engine = _make_engine()
+    try:
+        factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+        async with factory() as session:
+            result = await session.execute(
+                select(User.email).where(
+                    User.role == UserRole.ADMIN,
+                    User.is_active.is_(True),
+                )
+            )
+            return [row[0] for row in result.fetchall()]
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(
+    name="src.workers.tasks.email.send_red_flag_emails_task",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=30,
+    time_limit=60,
+    soft_time_limit=50,
+)
+def send_red_flag_emails_task(
+    self,
+    case_id: str,
+    display_id: str,
+    flags: list[str],
+    advice: str | None,
+) -> dict:
+    """
+    Send red flag alert emails when a case is flagged as high-risk.
+
+    - Patient receives an urgent email listing the concerns and advice.
+    - All admin accounts receive a summary email for immediate review.
+    """
+    logger.info("red_flag_email_task_start", case_id=case_id)
+
+    result = _run_async(_load_red_flag_recipients(case_id))
+    if result is None:
+        logger.error("red_flag_email_case_not_found", case_id=case_id)
+        return {"status": "failed", "reason": "case_not_found"}
+
+    patient_email, patient_name, display_id_loaded = result
+    # Prefer the passed display_id (already computed by caller)
+    effective_display_id = display_id or display_id_loaded
+
+    sent_count = 0
+
+    # 1. Patient email
+    patient_html = render_red_flag_patient_email(
+        patient_name=patient_name,
+        display_id=effective_display_id,
+        flags=flags,
+        advice=advice,
+    )
+    if send_email(
+        to_email=patient_email,
+        subject=f"Urgent: Your AiDerm Cliniq Case {effective_display_id} Has Been Flagged",
+        html_body=patient_html,
+    ):
+        sent_count += 1
+        logger.info("red_flag_patient_email_sent", to=patient_email, case_id=case_id)
+    else:
+        logger.warning("red_flag_patient_email_failed", to=patient_email, case_id=case_id)
+
+    # 2. Admin emails
+    admin_emails = _run_async(_load_admin_emails())
+    admin_html = render_red_flag_admin_email(
+        patient_name=patient_name,
+        display_id=effective_display_id,
+        flags=flags,
+        advice=advice,
+    )
+    for admin_email in admin_emails:
+        if send_email(
+            to_email=admin_email,
+            subject=f"Red Flag Alert: Case {effective_display_id} Requires Urgent Review",
+            html_body=admin_html,
+        ):
+            sent_count += 1
+            logger.info("red_flag_admin_email_sent", to=admin_email, case_id=case_id)
+        else:
+            logger.warning("red_flag_admin_email_failed", to=admin_email, case_id=case_id)
+
+    logger.info("red_flag_email_task_done", case_id=case_id, sent=sent_count)
+    return {"status": "done", "sent": sent_count}

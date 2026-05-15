@@ -155,6 +155,11 @@ class Case(TimestampMixin, Base):
         index=True,
         comment="Assigned doctor. NULL until doctor scans the QR.",
     )
+    assigned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when a doctor was assigned (QR scan / manual assign)",
+    )
 
     # ------------------------------------------------------------------ #
     # Consultation Metadata — set at case creation
@@ -258,12 +263,22 @@ class Case(TimestampMixin, Base):
         index=True,
         comment="Celery pipeline state. Set by workers only.",
     )
+    ai_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when ai_status changed to COMPLETED",
+    )
     clinical_status: Mapped[ClinicalStatus] = mapped_column(
         Enum(ClinicalStatus, name="clinical_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ClinicalStatus.ACTIVE,
         index=True,
         comment="Doctor-set status. Shown as badge in patient History screen.",
+    )
+    clinical_status_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when clinical_status was last changed by a doctor",
     )
 
     # ------------------------------------------------------------------ #
@@ -330,6 +345,11 @@ class Case(TimestampMixin, Base):
         nullable=True,
         comment="AI-generated advice shown to patient when red flags are detected",
     )
+    red_flagged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when red_flag_status changed to FLAGGED",
+    )
     systemic_symptom_options: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
@@ -356,6 +376,11 @@ class Case(TimestampMixin, Base):
         nullable=False,
         index=True,
         comment="Soft-delete flag. Deleted cases are hidden from all queries but never removed from the DB.",
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when the case was soft-deleted",
     )
 
     # ------------------------------------------------------------------ #

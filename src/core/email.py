@@ -408,6 +408,159 @@ def render_visit_email(patient_name: str, display_id: str, patient_url: str) -> 
 
 
 # ------------------------------------------------------------------ #
+# Red Flag Email Templates
+# ------------------------------------------------------------------ #
+
+_RED_FLAG_PATIENT_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#b91c1c;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .header p{color:#fecaca;margin:4px 0 0;font-size:13px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .alert-box{background:#fef2f2;border-left:4px solid #b91c1c;padding:16px 20px;
+             border-radius:4px;margin:20px 0}
+  .alert-box .label{font-size:12px;color:#991b1b;text-transform:uppercase;
+                    letter-spacing:0.5px;margin-bottom:4px;font-weight:700}
+  .alert-box .value{font-size:18px;font-weight:700;color:#b91c1c;letter-spacing:1px}
+  .flags-list{background:#fff7ed;border-left:4px solid #ea580c;padding:14px 20px;
+              border-radius:4px;margin:16px 0}
+  .flags-list ul{margin:8px 0 0;padding-left:20px;color:#7c2d12}
+  .flags-list ul li{margin-bottom:6px;font-size:14px}
+  .advice-box{background:#f0f9f6;border-left:4px solid #1a6b5a;padding:14px 20px;
+              border-radius:4px;margin:16px 0;font-size:14px;color:#1a4a3a}
+  .urgent{background:#b91c1c;color:#fff;padding:12px 24px;border-radius:6px;
+          font-weight:700;font-size:15px;display:inline-block;margin:12px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header">
+    <h1>AiDerm Cliniq — Urgent Alert</h1>
+    <p>AI-Powered Dermatology Consultation</p>
+  </div>
+  <div class="body">
+    <p>Dear <strong>{{ patient_name }}</strong>,</p>
+    <p>Our AI system has reviewed your case and identified symptoms that may require <strong>urgent medical attention</strong>.</p>
+    <div class="alert-box">
+      <div class="label">Your Case ID</div>
+      <div class="value">{{ display_id }}</div>
+    </div>
+    {% if flags %}
+    <div class="flags-list">
+      <strong style="color:#7c2d12">Concerns identified:</strong>
+      <ul>{% for flag in flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if advice %}
+    <div class="advice-box">
+      <strong>Advice:</strong> {{ advice }}
+    </div>
+    {% endif %}
+    <div><span class="urgent">Please seek medical attention promptly</span></div>
+    <p style="font-size:13px;color:#777;margin-top:20px">
+      This is an automated alert from AiDerm Cliniq. If you have already sought medical care,
+      please disregard this message. For questions, contact
+      <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; All rights reserved</div>
+</div></body></html>
+"""
+
+_RED_FLAG_ADMIN_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#7f1d1d;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .header p{color:#fca5a5;margin:4px 0 0;font-size:13px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .meta-row{display:flex;gap:16px;margin:20px 0}
+  .meta-box{flex:1;background:#fef2f2;border-radius:6px;padding:14px 16px}
+  .meta-box .label{font-size:11px;color:#991b1b;text-transform:uppercase;
+                   letter-spacing:0.5px;margin-bottom:4px}
+  .meta-box .value{font-size:16px;font-weight:700;color:#b91c1c}
+  .flags-list{background:#fff7ed;border-left:4px solid #ea580c;padding:14px 20px;
+              border-radius:4px;margin:16px 0}
+  .flags-list ul{margin:8px 0 0;padding-left:20px;color:#7c2d12}
+  .flags-list ul li{margin-bottom:6px;font-size:14px}
+  .advice-box{background:#f0f9f6;border-left:4px solid #1a6b5a;padding:14px 20px;
+              border-radius:4px;margin:16px 0;font-size:14px;color:#1a4a3a}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header">
+    <h1>Red Flag Alert — Urgent Review Required</h1>
+    <p>AiDerm Cliniq Admin Notification</p>
+  </div>
+  <div class="body">
+    <p>A patient case has been flagged as <strong>high-risk</strong> by the AI analysis engine and requires immediate clinical review.</p>
+    <div class="meta-row">
+      <div class="meta-box">
+        <div class="label">Case ID</div>
+        <div class="value">{{ display_id }}</div>
+      </div>
+      <div class="meta-box">
+        <div class="label">Patient</div>
+        <div class="value">{{ patient_name }}</div>
+      </div>
+    </div>
+    {% if flags %}
+    <div class="flags-list">
+      <strong style="color:#7c2d12">Red flags detected:</strong>
+      <ul>{% for flag in flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if advice %}
+    <div class="advice-box">
+      <strong>AI Advice:</strong> {{ advice }}
+    </div>
+    {% endif %}
+    <p style="font-size:13px;color:#777;margin-top:20px">
+      Log in to the admin dashboard to review this case immediately.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; Admin Alert</div>
+</div></body></html>
+"""
+
+
+def render_red_flag_patient_email(
+    patient_name: str,
+    display_id: str,
+    flags: list[str],
+    advice: str | None,
+) -> str:
+    """Render the urgent red flag alert email for the patient."""
+    return Template(_RED_FLAG_PATIENT_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+        flags=flags,
+        advice=advice,
+    )
+
+
+def render_red_flag_admin_email(
+    patient_name: str,
+    display_id: str,
+    flags: list[str],
+    advice: str | None,
+) -> str:
+    """Render the red flag alert email for admins."""
+    return Template(_RED_FLAG_ADMIN_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+        flags=flags,
+        advice=advice,
+    )
+
+
+# ------------------------------------------------------------------ #
 # SMTP Send
 # ------------------------------------------------------------------ #
 

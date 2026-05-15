@@ -663,6 +663,7 @@ async def update_case(
                 message="Only a doctor can change the clinical status"
             )
         case.clinical_status = ClinicalStatus(request.clinical_status)
+        case.clinical_status_changed_at = datetime.now(tz=timezone.utc)
 
     image_count = await _get_image_count(db, case_id)
     logger.info("case_updated", case_id=case_id, user_id=user.id)
@@ -686,6 +687,7 @@ async def soft_delete_case(
 
     _assert_access(user, case)
     case.is_deleted = True
+    case.deleted_at = datetime.now(tz=timezone.utc)
     logger.info("case_soft_deleted", case_id=case_id, user_id=user.id)
 
 
@@ -716,6 +718,7 @@ async def assign_doctor(
 
     if case.doctor_id != doctor.id:
         case.doctor_id = doctor.id
+        case.assigned_at = datetime.now(tz=timezone.utc)
         logger.info("doctor_assigned", case_id=case_id, doctor_id=doctor.id)
 
     image_count = await _get_image_count(db, case_id)

@@ -80,7 +80,7 @@ _RULES: list[tuple[tuple[str, ...], list[str]]] = [
     ),
     (
         ("anaphylaxis", "urticaria", "angioedema", "allergic reaction",
-         "contact dermatitis", "drug reaction", "drug eruption"),
+         "allergic contact dermatitis", "drug reaction", "drug eruption"),
         ["throat_tightness", "breathing_difficulty", "spreading_hives"],
     ),
     (

@@ -825,4 +825,5 @@ async def verify_email(db: AsyncSession, user: User, otp: str) -> None:
 
     await _redeem_otp(db, user.id, otp, TokenPurpose.EMAIL_VERIFY)
     user.is_verified = True
+    user.verified_at = datetime.now(tz=timezone.utc)
     logger.info("email_verified", user_id=user.id)

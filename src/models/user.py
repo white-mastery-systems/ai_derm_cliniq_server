@@ -31,8 +31,9 @@ limited access (configurable via RBAC).
 """
 
 import enum
+from datetime import datetime
 
-from sqlalchemy import Boolean, Enum, String
+from sqlalchemy import Boolean, DateTime, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, new_uuid
@@ -132,11 +133,26 @@ class User(TimestampMixin, Base):
         nullable=False,
         comment="False = account suspended. Cannot log in.",
     )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when admin set is_active=True (doctor approval)",
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when admin set is_active=False after review (doctor rejection)",
+    )
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         nullable=False,
         comment="True after email confirmation link is clicked",
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when email was verified",
     )
 
     # ------------------------------------------------------------------ #

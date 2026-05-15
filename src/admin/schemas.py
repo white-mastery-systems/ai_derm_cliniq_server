@@ -258,6 +258,30 @@ class UpdatePromptRequest(BaseModel):
 
 
 # ================================================================== #
+# Audit Log
+# ================================================================== #
+
+class AuditLogEntry(BaseModel):
+    """One immutable audit event for a case."""
+    id: str
+    case_id: str
+    event_type: str
+    actor_id: str | None
+    actor_role: str
+    event_data: str | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CaseAuditLogResponse(BaseModel):
+    """Response for GET /admin/cases/{case_id}/audit-log."""
+    case_id: str
+    total: int
+    items: list[AuditLogEntry]
+
+
+# ================================================================== #
 # Stats
 # ================================================================== #
 

@@ -34,6 +34,7 @@ Consistent with GET /cases in cases/service.py:
   offset = (page - 1) * page_size
 """
 
+from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -48,6 +49,8 @@ from src.admin.schemas import (
     AdminUserDetail,
     AdminUserItem,
     AiSettingsResponse,
+    AuditLogEntry,
+    CaseAuditLogResponse,
     PaginatedAdminCasesResponse,
     PaginatedAdminDoctorsResponse,
     PaginatedAdminUsersResponse,
@@ -217,10 +220,17 @@ async def update_user(
     if is_active is not None:
         action = "activated" if is_active else "suspended"
         user.is_active = is_active
+        now = datetime.now(tz=timezone.utc)
+        if is_active and user.role == UserRole.DOCTOR:
+            user.approved_at = now
+        elif not is_active and user.role == UserRole.DOCTOR:
+            user.rejected_at = now
         logger.info(f"admin_user_{action}", user_id=user_id)
 
     if is_verified is not None:
         user.is_verified = is_verified
+        if is_verified:
+            user.verified_at = datetime.now(tz=timezone.utc)
         logger.info("admin_user_verification_updated", user_id=user_id, is_verified=is_verified)
 
     if role is not None:
@@ -727,3 +737,44 @@ async def reset_prompt(key: str) -> PromptItem:
         value=entry["value"],
         has_override=entry["has_override"],
     )
+
+
+# ================================================================== #
+# Case Audit Log
+# ================================================================== #
+
+async def get_case_audit_log(db: AsyncSession, case_id: str) -> CaseAuditLogResponse:
+    """
+    Return all audit log entries for a case, ordered oldest-first.
+
+    Raises 404 if the case does not exist.
+    The audit log is append-only — entries are never modified after insertion.
+    """
+    from src.models.audit_log import CaseAuditLog
+
+    # Confirm the case exists
+    case_exists = await db.execute(select(Case.id).where(Case.id == case_id))
+    if case_exists.scalar_one_or_none() is None:
+        raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    result = await db.execute(
+        select(CaseAuditLog)
+        .where(CaseAuditLog.case_id == case_id)
+        .order_by(CaseAuditLog.created_at.asc())
+    )
+    rows = list(result.scalars().all())
+
+    items = [
+        AuditLogEntry(
+            id=row.id,
+            case_id=row.case_id,
+            event_type=row.event_type.value,
+            actor_id=row.actor_id,
+            actor_role=row.actor_role,
+            event_data=row.event_data,
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+    return CaseAuditLogResponse(case_id=case_id, total=len(items), items=items)

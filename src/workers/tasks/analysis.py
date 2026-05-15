@@ -618,7 +618,9 @@ def save_results_task(self, analysis_result: dict) -> None:
             )
 
             # Update case
+            from datetime import datetime, timezone as _tz
             case.ai_status = AiStatus.COMPLETED
+            case.ai_completed_at = datetime.now(tz=_tz.utc)
             case.celery_task_id = None
             case.case_summary = case_summary
             case.case_title = most_probable_name
@@ -749,6 +751,20 @@ def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None 
             case.red_flag_status = RedFlagStatus.FLAGGED if has_flags else RedFlagStatus.CLEAR
             case.red_flags = json.dumps(flags)
             case.red_flag_advice = advice
+            if has_flags:
+                from datetime import datetime, timezone as _tz
+                now = datetime.now(tz=_tz.utc)
+                case.red_flagged_at = now
+
+                from src.models.audit_log import AuditEventType, CaseAuditLog
+                session.add(CaseAuditLog(
+                    case_id=case_id,
+                    event_type=AuditEventType.RED_FLAG_TRIGGERED,
+                    actor_id=None,
+                    actor_role="system",
+                    event_data=json.dumps({"flags": flags, "advice": advice}),
+                    created_at=now,
+                ))
             _case_number = case.case_number
             await session.commit()
 
@@ -759,6 +775,16 @@ def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None 
                 notify_admins_red_flag.delay(case_id=case_id, display_id=display_id)
             except Exception as exc:
                 logger.warning("notify_admins_red_flag_enqueue_failed", case_id=case_id, error=str(exc))
+            try:
+                from src.workers.tasks.email import send_red_flag_emails_task
+                send_red_flag_emails_task.delay(
+                    case_id=case_id,
+                    display_id=display_id,
+                    flags=flags,
+                    advice=advice,
+                )
+            except Exception as exc:
+                logger.warning("red_flag_email_enqueue_failed", case_id=case_id, error=str(exc))
 
         logger.info(
             "red_flag_check_complete",

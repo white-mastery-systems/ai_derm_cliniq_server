@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Redis (Celery broker + result backend + cache)
     # ------------------------------------------------------------------ #
-    REDIS_URL: str = "redis://:aiderm_0747_redis@148.113.16.40:6400/0"
+    REDIS_URL: str
 
     # ------------------------------------------------------------------ #
     # Google Cloud Storage
