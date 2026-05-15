@@ -42,7 +42,6 @@ from sqlalchemy.orm import selectinload
 
 from src.exceptions import (
     CaseNotFoundException,
-    ConflictException,
     ForbiddenException,
     NotFoundException,
 )
@@ -150,10 +149,13 @@ async def create_review(
     request: CreateReviewRequest,
 ) -> DoctorReviewResponse:
     """
-    Doctor creates a review for an assigned case.
+    Doctor creates (or upserts) a review for an assigned case.
+
+    If a review already exists, this behaves identically to PATCH —
+    all provided fields are merged into the existing row. This makes
+    POST idempotent so the Flutter never needs to track POST-vs-PATCH state.
 
     Raises 403 if the doctor is not assigned to the case.
-    Raises 409 if a review already exists for this case.
     """
     if doctor.role not in (UserRole.DOCTOR, UserRole.ADMIN):
         raise ForbiddenException(message="Only doctors can create reviews")
@@ -161,9 +163,21 @@ async def create_review(
     case = await _load_case_for_doctor(db, doctor, case_id)
 
     if case.doctor_review is not None:
-        raise ConflictException(
-            message="A review already exists for this case. Use PATCH to update it."
+        # Upsert: delegate to update logic so the Flutter can always call POST
+        update_req = UpdateReviewRequest(
+            is_ai_correct=request.is_ai_correct,
+            selected_differentials=request.selected_differentials,
+            confidence_level=request.confidence_level,
+            confirmed_diagnosis=request.confirmed_diagnosis,
+            diagnosis_type=request.diagnosis_type,
+            review_notes=request.review_notes,
+            treatment_plan_json=request.treatment_plan_json,
+            qa_history=request.qa_history,
+            clinical_indicators=request.clinical_indicators,
+            review_status=request.review_status,
         )
+        logger.info("doctor_review_upsert", case_id=case_id, doctor_id=doctor.id)
+        return await update_review(db, doctor, case_id, update_req)
 
     review = DoctorReview(
         id=new_uuid(),
