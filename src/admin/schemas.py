@@ -244,7 +244,8 @@ class PromptItem(BaseModel):
     """One prompt entry returned by GET /admin/prompts."""
     key: str
     label: str
-    value: str | None
+    value: str | None          # Redis override — None when using the hardcoded default
+    default_value: str | None  # Hardcoded default text from the codebase
     has_override: bool
 
 

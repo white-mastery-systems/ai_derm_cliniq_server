@@ -708,6 +708,7 @@ def get_all_prompts() -> PromptsListResponse:
             key=v["key"],
             label=v["label"],
             value=v["value"],
+            default_value=v["default_value"],
             has_override=v["has_override"],
         )
         for v in data.values()
@@ -729,6 +730,7 @@ async def update_prompt(key: str, value: str) -> PromptItem:
         key=entry["key"],
         label=entry["label"],
         value=entry["value"],
+        default_value=entry["default_value"],
         has_override=entry["has_override"],
     )
 
@@ -747,6 +749,7 @@ async def reset_prompt(key: str) -> PromptItem:
         key=entry["key"],
         label=entry["label"],
         value=entry["value"],
+        default_value=entry["default_value"],
         has_override=entry["has_override"],
     )
 
@@ -785,6 +788,7 @@ async def rollback_prompt(key: str) -> PromptItem:
         key=entry["key"],
         label=entry["label"],
         value=entry["value"],
+        default_value=entry["default_value"],
         has_override=entry["has_override"],
     )
 

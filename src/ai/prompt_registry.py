@@ -31,6 +31,7 @@ method falls back to the hardcoded default. The app never crashes.
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timezone
 
 import redis as redis_lib
@@ -43,6 +44,10 @@ logger = get_logger(__name__)
 _PREFIX = "aiderm:prompt:"
 _HISTORY_PREFIX = "aiderm:prompt:history:"
 _MAX_HISTORY = 10
+
+# Thread-local flag used by get_default_value() to bypass Redis during
+# default-text extraction, so _p() falls through to the hardcoded string.
+_tl = threading.local()
 
 # All valid prompt keys with their admin-facing labels
 _VALID_KEYS: dict[str, str] = {
@@ -136,13 +141,58 @@ def _redis_rollback(key: str) -> str | None:
 def get_prompt(key: str) -> str | None:
     """
     Return the Redis override for this prompt key, or None if not set.
+    Returns None unconditionally when called from get_default_value() so that
+    _p() falls through to its hardcoded string.
 
     Prompt methods call this and fall back to their hardcoded default
     when None is returned.
     """
     if key not in _VALID_KEYS:
         return None
+    if getattr(_tl, "bypass_redis", False):
+        return None
     return _redis_get(key)
+
+
+def _get_prompt_getters() -> dict[str, callable]:
+    """Lazy-import mapping of key → prompt method callable."""
+    from src.ai.prompts.image_analysis_prompts import ImageAnalysisPrompts
+    from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+    from src.ai.prompts.doctor_review_prompts import DoctorReviewPrompts
+    return {
+        "patient_first_question":       ImageAnalysisPrompts.first_question,
+        "patient_questions_no_image":   PatientConsultationPrompts.generate_questions_from_complaints,
+        "patient_follow_up_question":   PatientConsultationPrompts.generate_question_from_context,
+        "patient_diagnosis_refinement": PatientConsultationPrompts.diagnosis_analysis_from_conversation,
+        "patient_case_summary":         PatientConsultationPrompts.make_case_summary,
+        "doctor_complaints":            DoctorReviewPrompts.get_technical_complaints,
+        "doctor_diagnosis":             DoctorReviewPrompts.generate_diagnosis,
+        "doctor_question":              DoctorReviewPrompts.generate_doctor_question_direct,
+        "doctor_final_summary":         DoctorReviewPrompts.generate_final_summary,
+        "doctor_treatment_plan":        DoctorReviewPrompts.generate_treatment_plan,
+    }
+
+
+def get_default_value(key: str) -> str | None:
+    """
+    Return the hardcoded default prompt text for a key, bypassing Redis.
+
+    Temporarily sets a thread-local flag so get_prompt() returns None,
+    causing _p() in each prompt method to fall through to its hardcoded string.
+    Thread-safe — concurrent requests are unaffected.
+    """
+    getters = _get_prompt_getters()
+    getter = getters.get(key)
+    if getter is None:
+        return None
+    _tl.bypass_redis = True
+    try:
+        return getter()
+    except Exception as exc:
+        logger.warning("prompt_default_fetch_failed", key=key, error=str(exc))
+        return None
+    finally:
+        _tl.bypass_redis = False
 
 
 def get_all() -> dict[str, dict]:
@@ -151,7 +201,7 @@ def get_all() -> dict[str, dict]:
 
     Used by GET /admin/prompts.
     Returns a dict keyed by prompt_key with:
-        { "label": str, "value": str | None, "has_override": bool }
+        { "label": str, "value": str | None, "default_value": str | None, "has_override": bool }
     """
     result = {}
     for key, label in _VALID_KEYS.items():
@@ -160,6 +210,7 @@ def get_all() -> dict[str, dict]:
             "key": key,
             "label": label,
             "value": override,
+            "default_value": get_default_value(key),
             "has_override": override is not None,
         }
     return result
