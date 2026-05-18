@@ -44,8 +44,9 @@ from src.admin.schemas import (
     PaginatedAdminCasesResponse,
     PaginatedAdminDoctorsResponse,
     PaginatedAdminUsersResponse,
-    PromptsListResponse,
+    PromptHistoryResponse,
     PromptItem,
+    PromptsListResponse,
     RejectDoctorRequest,
     UpdateAiSettingsRequest,
     UpdatePromptRequest,
@@ -328,7 +329,7 @@ async def get_case_detail(
 
     Returns 404 if the case does not exist.
     """
-    return await service.get_case_detail(db, case_id)
+    return await service.get_case_detail(db, case_id, admin_id=_admin.id)
 
 
 # ------------------------------------------------------------------ #
@@ -472,6 +473,57 @@ async def reset_prompt(
     """
     try:
         return await service.reset_prompt(key)
+    except ValueError as exc:
+        from src.exceptions import BadRequestException
+        raise BadRequestException(message=str(exc))
+
+
+@router.get(
+    "/prompts/{key}/history",
+    response_model=PromptHistoryResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get version history for an AI prompt (admin only)",
+)
+async def get_prompt_history(
+    key: str,
+    _admin: User = Depends(require_admin),
+) -> PromptHistoryResponse:
+    """
+    Return the last 10 saved versions of a prompt, newest first.
+
+    Each entry contains the prompt text and the UTC timestamp when it was
+    replaced. An empty list means the prompt has never been edited via the
+    admin panel (no history to roll back to).
+
+    Returns 400 if `key` is not a valid prompt key.
+    """
+    try:
+        return await service.get_prompt_history(key)
+    except ValueError as exc:
+        from src.exceptions import BadRequestException
+        raise BadRequestException(message=str(exc))
+
+
+@router.post(
+    "/prompts/{key}/rollback",
+    response_model=PromptItem,
+    status_code=status.HTTP_200_OK,
+    summary="Roll back an AI prompt to its previous version (admin only)",
+)
+async def rollback_prompt(
+    key: str,
+    _admin: User = Depends(require_admin),
+) -> PromptItem:
+    """
+    Restore the most recent previous version of a prompt from history.
+
+    The current value is discarded and the previous value becomes active
+    immediately across all running processes (API + Celery workers).
+
+    Returns 400 if `key` is invalid or there is no history to roll back to.
+    """
+    try:
+        return await service.rollback_prompt(key)
     except ValueError as exc:
         from src.exceptions import BadRequestException
         raise BadRequestException(message=str(exc))

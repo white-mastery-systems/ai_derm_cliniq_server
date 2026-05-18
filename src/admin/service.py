@@ -54,6 +54,8 @@ from src.admin.schemas import (
     PaginatedAdminCasesResponse,
     PaginatedAdminDoctorsResponse,
     PaginatedAdminUsersResponse,
+    PromptHistoryEntry,
+    PromptHistoryResponse,
     PromptItem,
     PromptsListResponse,
     UpdateAiSettingsRequest,
@@ -592,11 +594,12 @@ async def reject_doctor(db: AsyncSession, user_id: str, reason: str | None) -> N
 # Case Detail
 # ================================================================== #
 
-async def get_case_detail(db: AsyncSession, case_id: str) -> AdminCaseDetail:
+async def get_case_detail(db: AsyncSession, case_id: str, admin_id: str | None = None) -> AdminCaseDetail:
     """
     Fetch full case detail for admin view.
 
-    Raises 404 if case not found.
+    Writes a CASE_ACCESSED audit entry so every admin view of patient data
+    is traceable. Raises 404 if case not found.
     """
     result = await db.execute(
         select(Case)
@@ -609,6 +612,15 @@ async def get_case_detail(db: AsyncSession, case_id: str) -> AdminCaseDetail:
     case = result.scalar_one_or_none()
     if case is None:
         raise CaseNotFoundException(message=f"No case found with id: {case_id}")
+
+    from src.models.audit_log import AuditEventType, CaseAuditLog
+    db.add(CaseAuditLog(
+        case_id=case_id,
+        event_type=AuditEventType.CASE_ACCESSED,
+        actor_id=admin_id,
+        actor_role="admin",
+    ))
+    await db.commit()
 
     return AdminCaseDetail(
         id=case.id,
@@ -730,6 +742,44 @@ async def reset_prompt(key: str) -> PromptItem:
     from src.ai import prompt_registry
     await prompt_registry.async_reset_prompt(key)
     logger.info("admin_prompt_reset", key=key)
+    entry = prompt_registry.get_all()[key]
+    return PromptItem(
+        key=entry["key"],
+        label=entry["label"],
+        value=entry["value"],
+        has_override=entry["has_override"],
+    )
+
+
+async def get_prompt_history(key: str) -> PromptHistoryResponse:
+    """
+    Return the version history for a prompt key (newest first, up to 10 entries).
+
+    Raises ValueError (→ 400) if key is not a valid prompt key.
+    """
+    from src.ai import prompt_registry
+    history = await prompt_registry.async_get_history(key)
+    return PromptHistoryResponse(
+        key=key,
+        history=[
+            PromptHistoryEntry(value=e["value"], updated_at=e["updated_at"])
+            for e in history
+        ],
+    )
+
+
+async def rollback_prompt(key: str) -> PromptItem:
+    """
+    Restore the previous version of a prompt from history.
+
+    Pops the most recent history entry and sets it as the current value.
+    Raises ValueError (→ 400) if key is invalid or history is empty.
+    """
+    from src.ai import prompt_registry
+    restored = await prompt_registry.async_rollback_prompt(key)
+    if restored is None:
+        raise ValueError(f"No history available for prompt key '{key}'")
+    logger.info("admin_prompt_rolled_back", key=key)
     entry = prompt_registry.get_all()[key]
     return PromptItem(
         key=entry["key"],

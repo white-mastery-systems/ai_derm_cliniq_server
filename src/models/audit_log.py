@@ -27,10 +27,14 @@ CURRENT EVENT TYPES
   red_flag_triggered   — AI identified urgent symptoms; escalation sent to admins.
   disclaimer_accepted  — Patient explicitly accepted the medical AI disclaimer at
                          case creation. Closes GitHub issue #161.
-
-(Additional events — doctor_assigned, review_submitted — can be added by
-appending values to AuditEventType without a breaking schema change, since
-PostgreSQL ALTER TYPE ADD VALUE is non-destructive.)
+  note_edited          — Doctor edited review_notes on a DoctorReview. Captures
+                         old and new content. Closes GitHub issue #165.
+  case_accessed        — Admin viewed full case detail. Closes GitHub issue #195.
+  review_submitted     — Doctor set review_status=completed. Closes GitHub issue #173.
+  doctor_assigned      — Doctor was auto-assigned to a case via QR scan or display
+                         ID lookup. Closes GitHub issue #173.
+  diagnosis_confirmed  — Doctor set or changed confirmed_diagnosis on a review.
+                         Captures old and new diagnosis. Closes GitHub issue #173.
 """
 
 import enum
@@ -45,6 +49,11 @@ from src.models.base import Base, new_uuid
 class AuditEventType(str, enum.Enum):
     RED_FLAG_TRIGGERED  = "red_flag_triggered"
     DISCLAIMER_ACCEPTED = "disclaimer_accepted"
+    NOTE_EDITED         = "note_edited"
+    CASE_ACCESSED       = "case_accessed"
+    REVIEW_SUBMITTED    = "review_submitted"
+    DOCTOR_ASSIGNED     = "doctor_assigned"
+    DIAGNOSIS_CONFIRMED = "diagnosis_confirmed"
 
 
 class CaseAuditLog(Base):

@@ -14,6 +14,10 @@ override exists or if Redis is unreachable.
 Redis key format:  aiderm:prompt:<key>
 Example:           aiderm:prompt:patient_first_question
 
+History key:       aiderm:prompt:history:<key>  (Redis list, newest first)
+Each history entry is JSON: {"value": "...", "updated_at": "<ISO datetime>"}
+History is capped at _MAX_HISTORY entries per key.
+
 VALID KEYS
 ----------
 See _VALID_KEYS dict below. Each entry maps the key to a human-readable
@@ -26,6 +30,8 @@ method falls back to the hardcoded default. The app never crashes.
 """
 
 import asyncio
+import json
+from datetime import datetime, timezone
 
 import redis as redis_lib
 
@@ -35,6 +41,8 @@ from src.logger import get_logger
 logger = get_logger(__name__)
 
 _PREFIX = "aiderm:prompt:"
+_HISTORY_PREFIX = "aiderm:prompt:history:"
+_MAX_HISTORY = 10
 
 # All valid prompt keys with their admin-facing labels
 _VALID_KEYS: dict[str, str] = {
@@ -72,6 +80,15 @@ def _redis_get(key: str) -> str | None:
 
 def _redis_set(key: str, value: str) -> None:
     client = _get_redis_client()
+    # Save the current value to history before overwriting
+    current = client.get(f"{_PREFIX}{key}")
+    if current:
+        entry = json.dumps({
+            "value": current,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        client.lpush(f"{_HISTORY_PREFIX}{key}", entry)
+        client.ltrim(f"{_HISTORY_PREFIX}{key}", 0, _MAX_HISTORY - 1)
     client.set(f"{_PREFIX}{key}", value)
     logger.info("prompt_registry_updated", key=key)
 
@@ -83,6 +100,33 @@ def _redis_delete(key: str) -> None:
         logger.info("prompt_registry_reset", key=key)
     except Exception as exc:
         logger.warning("prompt_registry_redis_delete_failed", key=key, error=str(exc))
+
+
+def _redis_get_history(key: str) -> list[dict]:
+    try:
+        client = _get_redis_client()
+        raw = client.lrange(f"{_HISTORY_PREFIX}{key}", 0, _MAX_HISTORY - 1)
+        return [json.loads(entry) for entry in raw]
+    except Exception as exc:
+        logger.warning("prompt_registry_history_read_failed", key=key, error=str(exc))
+        return []
+
+
+def _redis_rollback(key: str) -> str | None:
+    """
+    Pop the most recent history entry and set it as the current value.
+    Returns the restored value, or None if history is empty.
+    """
+    client = _get_redis_client()
+    raw = client.lpop(f"{_HISTORY_PREFIX}{key}")
+    if raw is None:
+        return None
+    entry = json.loads(raw)
+    previous_value = entry["value"]
+    # Set directly (do NOT push to history — this is an undo, not a new edit)
+    client.set(f"{_PREFIX}{key}", previous_value)
+    logger.info("prompt_registry_rolled_back", key=key)
+    return previous_value
 
 
 # ------------------------------------------------------------------ #
@@ -121,6 +165,13 @@ def get_all() -> dict[str, dict]:
     return result
 
 
+def get_history(key: str) -> list[dict]:
+    """Return the version history for a prompt key (newest first)."""
+    if key not in _VALID_KEYS:
+        raise ValueError(f"Invalid prompt key '{key}'. Valid keys: {', '.join(_VALID_KEYS)}")
+    return _redis_get_history(key)
+
+
 # ------------------------------------------------------------------ #
 # Public write API — used by admin service
 # ------------------------------------------------------------------ #
@@ -137,6 +188,18 @@ def reset_prompt(key: str) -> None:
     _redis_delete(key)
 
 
+def rollback_prompt(key: str) -> str | None:
+    """
+    Restore the previous version of a prompt from history.
+
+    Returns the restored value, or None if no history exists for this key.
+    Raises ValueError if the key is invalid.
+    """
+    if key not in _VALID_KEYS:
+        raise ValueError(f"Invalid prompt key '{key}'. Valid keys: {', '.join(_VALID_KEYS)}")
+    return _redis_rollback(key)
+
+
 # ------------------------------------------------------------------ #
 # Async wrappers — for use inside async FastAPI route handlers
 # ------------------------------------------------------------------ #
@@ -151,3 +214,11 @@ async def async_set_prompt(key: str, value: str) -> None:
 
 async def async_reset_prompt(key: str) -> None:
     await asyncio.to_thread(reset_prompt, key)
+
+
+async def async_get_history(key: str) -> list[dict]:
+    return await asyncio.to_thread(get_history, key)
+
+
+async def async_rollback_prompt(key: str) -> str | None:
+    return await asyncio.to_thread(rollback_prompt, key)

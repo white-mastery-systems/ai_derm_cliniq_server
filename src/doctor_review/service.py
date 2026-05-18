@@ -218,6 +218,17 @@ async def create_review(
         case.case_title = title_source[0]
 
     db.add(review)
+
+    if request.review_status == ReviewStatus.COMPLETED:
+        from src.models.audit_log import AuditEventType, CaseAuditLog
+        db.add(CaseAuditLog(
+            case_id=case_id,
+            event_type=AuditEventType.REVIEW_SUBMITTED,
+            actor_id=doctor.id,
+            actor_role=doctor.role.value,
+            event_data=json.dumps({"review_id": review.id, "diagnosis": review.confirmed_diagnosis}),
+        ))
+
     await db.flush()
     await db.refresh(review)
     logger.info("doctor_review_created", case_id=case_id, doctor_id=doctor.id)
@@ -282,10 +293,39 @@ async def update_review(
     if request.confidence_level is not None:
         review.confidence_level = request.confidence_level
     if request.confirmed_diagnosis is not None:
-        review.confirmed_diagnosis = json.dumps(request.confirmed_diagnosis)
+        old_diagnosis = review.confirmed_diagnosis
+        new_diagnosis = json.dumps(request.confirmed_diagnosis)
+        if old_diagnosis != new_diagnosis:
+            from src.models.audit_log import AuditEventType, CaseAuditLog
+            db.add(CaseAuditLog(
+                case_id=case_id,
+                event_type=AuditEventType.DIAGNOSIS_CONFIRMED,
+                actor_id=doctor.id,
+                actor_role=doctor.role.value,
+                event_data=json.dumps({
+                    "old_diagnosis": old_diagnosis,
+                    "new_diagnosis": new_diagnosis,
+                }),
+            ))
+        review.confirmed_diagnosis = new_diagnosis
         if request.confirmed_diagnosis:
             case.case_title = request.confirmed_diagnosis[0]
     if request.review_notes is not None:
+        if request.review_notes != review.review_notes:
+            import json as _json
+            from datetime import datetime, timezone as _tz
+            from src.models.audit_log import AuditEventType, CaseAuditLog
+            db.add(CaseAuditLog(
+                case_id=case_id,
+                event_type=AuditEventType.NOTE_EDITED,
+                actor_id=doctor.id,
+                actor_role=doctor.role.value,
+                event_data=_json.dumps({
+                    "old_note": review.review_notes,
+                    "new_note": request.review_notes,
+                }),
+                created_at=datetime.now(tz=_tz.utc),
+            ))
         review.review_notes = request.review_notes
     if request.treatment_plan_json is not None:
         review.treatment_plan_json = request.treatment_plan_json
@@ -300,9 +340,16 @@ async def update_review(
     if request.review_status is not None:
         review.review_status = request.review_status
         if request.review_status == ReviewStatus.COMPLETED:
-            # Always refresh reviewed_at so revisions show the latest completion time.
             review.reviewed_at = datetime.now(tz=timezone.utc)
             review_just_completed = True
+            from src.models.audit_log import AuditEventType, CaseAuditLog
+            db.add(CaseAuditLog(
+                case_id=case_id,
+                event_type=AuditEventType.REVIEW_SUBMITTED,
+                actor_id=doctor.id,
+                actor_role=doctor.role.value,
+                event_data=json.dumps({"review_id": review.id, "diagnosis": review.confirmed_diagnosis}),
+            ))
 
     # Update case clinical_status when doctor completes review
     clinical_status_changed = False

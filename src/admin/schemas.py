@@ -257,6 +257,17 @@ class UpdatePromptRequest(BaseModel):
     value: str
 
 
+class PromptHistoryEntry(BaseModel):
+    """One version in a prompt's history (newest first)."""
+    value: str
+    updated_at: str
+
+
+class PromptHistoryResponse(BaseModel):
+    key: str
+    history: list[PromptHistoryEntry]
+
+
 # ================================================================== #
 # Audit Log
 # ================================================================== #

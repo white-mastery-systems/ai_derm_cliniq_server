@@ -181,6 +181,17 @@ async def scan_qr(
     logger.info("qr_scanned", case_id=case.id, doctor_id=doctor.id)
 
     if newly_assigned:
+        import json as _json
+        from src.models.audit_log import AuditEventType, CaseAuditLog
+        db.add(CaseAuditLog(
+            case_id=case.id,
+            event_type=AuditEventType.DOCTOR_ASSIGNED,
+            actor_id=doctor.id,
+            actor_role=doctor.role.value,
+            event_data=_json.dumps({"method": "qr_scan", "doctor_name": doctor.full_name}),
+        ))
+
+    if newly_assigned:
         display_id = f"AI-{case.case_number}" if case.case_number else case.id[:8].upper()
         try:
             notify_patient_doctor_assigned.delay(
@@ -249,6 +260,17 @@ async def access_by_display_id(
         )
 
     logger.info("display_id_access", case_id=case.id, doctor_id=doctor.id, display_id=normalized)
+
+    if newly_assigned:
+        import json as _json
+        from src.models.audit_log import AuditEventType, CaseAuditLog
+        db.add(CaseAuditLog(
+            case_id=case.id,
+            event_type=AuditEventType.DOCTOR_ASSIGNED,
+            actor_id=doctor.id,
+            actor_role=doctor.role.value,
+            event_data=_json.dumps({"method": "display_id", "doctor_name": doctor.full_name}),
+        ))
 
     if newly_assigned:
         try:
