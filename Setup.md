@@ -16,8 +16,10 @@ This guide walks you through setting up every component referenced in the `.env`
 7. [Google OAuth 2.0 — Social Login](#7-google-oauth-20--social-login)
 8. [AI Provider API Keys](#8-ai-provider-api-keys)
 9. [Gmail SMTP — Email Notifications](#9-gmail-smtp--email-notifications)
-10. [Run the Server](#10-run-the-server)
-11. [Environment Variable Reference](#11-environment-variable-reference)
+10. [Firebase — Push Notifications](#10-firebase--push-notifications)
+11. [Admin Bootstrap](#11-admin-bootstrap)
+12. [Run the Server](#12-run-the-server)
+13. [Environment Variable Reference](#13-environment-variable-reference)
 
 ---
 
@@ -26,7 +28,7 @@ This guide walks you through setting up every component referenced in the `.env`
 Install these before starting:
 
 | Tool | Version | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | Python | 3.11+ | Runtime |
 | PostgreSQL | 15+ | Primary database |
 | Redis | 7+ | Celery task queue + rate limiter |
@@ -95,7 +97,7 @@ REFRESH_TOKEN_EXPIRE_DAYS=30      # How long refresh tokens last (30 days)
 **Create the database:**
 
 ```bash
-# Open psql (PostgreSQL terminal)psqlps
+# Open psql (PostgreSQL terminal)
 psql -U postgres
 
 # Inside psql:
@@ -160,6 +162,7 @@ asyncio.run(test())
 Redis is used for two things:
 - **Celery broker:** queues background AI pipeline tasks
 - **Rate limiter:** slowapi uses Redis to track request counts per IP
+- **Prompt registry:** admin-overridden AI prompts are stored here
 
 ### Option A: Local Installation
 
@@ -252,17 +255,51 @@ A service account gives the backend permission to read/write to GCS without usin
 2. Go to **Keys** tab
 3. Click **Add Key → Create new key**
 4. Choose **JSON**
-5. Download the file — it will be named something like `aiderm-cliniq-abc123.json`
-6. Move it to a safe location (e.g. `D:\@White Mastery Systems\Derm AI\secrets\gcs-key.json`)
-7. **Never commit this file to Git**
+5. Download the file
+6. Rename it to `service-account.json` and place it at:
+
+   ```text
+   ai_derm_cliniq_server/credentials/service-account.json
+   ```
+
+7. **Never commit this file to Git** — it is in `.gitignore`
 
 **Set in .env:**
 
 ```env
-GOOGLE_APPLICATION_CREDENTIALS=D:\@White Mastery Systems\Derm AI\secrets\gcs-key.json
+GOOGLE_APPLICATION_CREDENTIALS=credentials/service-account.json
 ```
 
-Use forward slashes or escaped backslashes in the path.
+This is a relative path from the project root — works in both local dev and Docker.
+
+### Step 6 — Configure CORS on the Bucket (required for Flutter Web)
+
+Flutter Web loads images directly from GCS signed URLs. Without a CORS policy, the browser blocks them. Run this once after creating the bucket:
+
+```bash
+cd ai_derm_cliniq_server
+python -c "
+from google.cloud import storage
+from google.oauth2 import service_account
+
+creds = service_account.Credentials.from_service_account_file('credentials/service-account.json')
+client = storage.Client(credentials=creds)
+bucket = client.bucket('aiderm-cliniq-storage')
+
+bucket.cors = [
+    {
+        'origin': ['*'],
+        'method': ['GET', 'HEAD', 'OPTIONS'],
+        'responseHeader': ['Content-Type', 'Authorization', 'Access-Control-Allow-Origin'],
+        'maxAgeSeconds': 3600,
+    }
+]
+bucket.patch()
+print('CORS configured:', bucket.cors)
+"
+```
+
+> In production, replace `'*'` with your actual web app domain (e.g. `'https://app.aidermcliniq.com'`).
 
 ---
 
@@ -322,10 +359,11 @@ The backend supports 4 AI providers. At minimum you need one — Gemini is the d
 
 ```env
 GEMINI_API_KEY=AIzaSy...
+GEMINI_MODEL=gemini-2.5-flash
 DEFAULT_LLM_PROVIDER=gemini
 ```
 
-### OpenAI (Optional)
+### OpenAI (Optional — also used for Whisper voice transcription)
 
 1. Go to [platform.openai.com](https://platform.openai.com)
 2. Go to **API Keys** in your account
@@ -334,7 +372,10 @@ DEFAULT_LLM_PROVIDER=gemini
 
 ```env
 OPENAI_API_KEY=sk-proj-...
+OPENAI_MODEL=gpt-4o
 ```
+
+> **Note:** Even if `DEFAULT_LLM_PROVIDER=gemini`, the OpenAI key is required for the doctor voice note transcription feature (Whisper).
 
 ### Perplexity (Optional)
 
@@ -356,11 +397,12 @@ PERPLEXITY_API_KEY=pplx-...
 
 ```env
 DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-chat
 ```
 
 ### Switching Providers
 
-Change this setting at any time:
+Change this setting at any time — or switch via the admin panel at runtime:
 
 ```env
 DEFAULT_LLM_PROVIDER=gemini   # or: openai, perplexity, deepseek
@@ -370,7 +412,7 @@ DEFAULT_LLM_PROVIDER=gemini   # or: openai, perplexity, deepseek
 
 ## 9. Gmail SMTP — Email Notifications
 
-Used for sending verification emails, password reset links, and case status updates.
+Used for: OTP verification emails, password reset codes, doctor approval/rejection emails, red flag alerts, and patient visit emails.
 
 ### Step 1 — Enable 2-Step Verification
 
@@ -394,13 +436,78 @@ Google App Passwords require 2FA on your account.
 ```env
 GMAIL_USER=aidermcliniq@gmail.com
 GMAIL_APP_PASSWORD=abcd efgh ijkl mnop   # your 16-char app password
+FRONTEND_URL=https://your-app-domain.com  # embedded in patient visit emails
 ```
-
-**Note:** If you're using a Gmail account with Google Workspace (not a personal Gmail), the App Password process is the same but the setting may be under admin controls.
 
 ---
 
-## 10. Run the Server
+## 10. Firebase — Push Notifications
+
+Firebase Cloud Messaging (FCM) sends push notifications to patients and doctors (e.g. "Doctor assigned", "Report ready").
+
+### Step 1 — Create a Firebase Project
+
+1. Go to [console.firebase.google.com](https://console.firebase.google.com)
+2. Click **Add project**
+3. Name it: `AiDerm Cliniq` (can be the same Google Cloud project)
+4. Enable Google Analytics if desired → **Create project**
+
+### Step 2 — Download the Service Account Key
+
+1. In your Firebase project, go to **Project Settings** (gear icon)
+2. Click the **Service accounts** tab
+3. Click **Generate new private key**
+4. Download the JSON file
+5. Rename it to `firebase_service_account.json` and place it at:
+
+   ```text
+   ai_derm_cliniq_server/credentials/firebase_service_account.json
+   ```
+
+6. **Never commit this file to Git** — it is in `.gitignore`
+
+**Set in .env:**
+
+```env
+FIREBASE_CREDENTIALS_PATH=credentials/firebase_service_account.json
+```
+
+### Step 3 — Add Firebase to the Flutter App
+
+1. Install the Firebase CLI: `npm install -g firebase-tools`
+2. Run `flutterfire configure` in the Flutter project root
+3. Select your Firebase project
+4. This generates `lib/firebase_options.dart` automatically
+
+---
+
+## 11. Admin Bootstrap
+
+The server can auto-create the first admin account on startup. This saves you from manually inserting a row into the database.
+
+**Set in .env:**
+
+```env
+ADMIN_EMAIL=admin@aidermcliniq.com
+ADMIN_PASSWORD=YourStrongPassword123!
+```
+
+**How it works:**
+
+- On every server start, the app checks if a user with `ADMIN_EMAIL` exists
+- If not → creates a `User` (role: admin) + a `DoctorProfile` (admins can also review cases)
+- If already exists → skips creation (idempotent — safe to restart many times)
+- If `ADMIN_EMAIL` or `ADMIN_PASSWORD` are empty → bootstrap is skipped entirely
+
+**Security notes:**
+
+- The bootstrap admin cannot be deleted or have their role changed via the admin panel
+- Use a strong password — this account has full access to all data
+- Leave both fields empty if you prefer to create the admin manually
+
+---
+
+## 12. Run the Server
 
 Once all required variables are set:
 
@@ -413,7 +520,13 @@ Before starting, confirm these are set in `.env`:
 - [ ] `REDIS_URL` — Redis is running
 - [ ] At least one AI key (`GEMINI_API_KEY` if using the default provider)
 
-GCS, Google OAuth, and Gmail are only required for their specific features — they don't block server startup.
+GCS, Google OAuth, Gmail, and Firebase are only required for their specific features — they don't block server startup.
+
+### Run database migrations
+
+```bash
+alembic upgrade head
+```
 
 ### Start the API server
 
@@ -431,45 +544,52 @@ curl http://localhost:8000/health
 Expected response:
 ```json
 {
-    "status": "ok",
-    "database": "connected",
-    "version": "1.0.0"
+    "status": "healthy",
+    "app": "AiDerm Cliniq API",
+    "version": "1.0.0",
+    "environment": "development",
+    "database": "ok",
+    "redis": "ok"
 }
 ```
+
+If database or Redis is unreachable, `status` will be `"degraded"` and the affected service will show `"unreachable"`.
 
 **View auto-generated API docs:**
 
 Open in your browser: `http://localhost:8000/docs`
 
-This shows all endpoints with interactive testing capability.
+This shows all endpoints with interactive testing capability. Docs are hidden in production (`APP_ENV=production`).
 
 ### Start the Celery worker (for AI pipeline tasks)
 
 In a second terminal:
 
 ```bash
-celery -A src.worker worker --loglevel=info
+celery -A src.workers.celery_app worker --loglevel=info
 ```
+
+The Celery worker handles all background tasks: AI image analysis, PDF report generation, email sending, and push notifications.
 
 ---
 
-## 11. Environment Variable Reference
+## 13. Environment Variable Reference
 
 Complete list of all variables with descriptions.
 
 ### App Settings
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `APP_ENV` | `development` | No | `development`, `staging`, or `production` |
 | `APP_NAME` | `AiDerm Cliniq API` | No | Display name in logs and Swagger UI |
 | `APP_VERSION` | `1.0.0` | No | API version shown in /health |
-| `DEBUG` | `false` | No | `true` prints SQL queries and error details to console |
+| `DEBUG` | `true` | No | `true` prints SQL queries and error details to console |
 
 ### Security / JWT
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `SECRET_KEY` | — | **YES** | Random 64-char hex string for JWT signing |
 | `ALGORITHM` | `HS256` | No | JWT signing algorithm |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | No | Access token lifetime in minutes |
@@ -478,26 +598,26 @@ Complete list of all variables with descriptions.
 ### Database
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `DATABASE_URL` | — | **YES** | `postgresql+asyncpg://USER:PASS@HOST:PORT/DBNAME` |
 
 ### Redis
 
-| Variable | Default | Required | Description |
-|---|---|---|---|
-| `REDIS_URL` | `redis://localhost:6379/0` | No | Redis connection URL |
+| Variable    | Default | Required  | Description                                          |
+|-------------|---------|-----------|------------------------------------------------------|
+| `REDIS_URL` | —       | **YES**   | Redis connection URL e.g. `redis://localhost:6379/0` |
 
 ### Google Cloud Storage
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
-| `GOOGLE_APPLICATION_CREDENTIALS` | `""` | For image upload | Path to service account JSON file |
+| --- | --- | --- | --- |
+| `GOOGLE_APPLICATION_CREDENTIALS` | `""` | For image upload | Relative path to service account JSON: `credentials/service-account.json` |
 | `GCS_BUCKET_NAME` | `aiderm-cliniq-storage` | For image upload | GCS bucket name |
 
 ### Google OAuth
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `GOOGLE_CLIENT_ID` | `""` | For Google login | OAuth 2.0 client ID from Google Console |
 | `GOOGLE_CLIENT_SECRET` | `""` | For Google login | OAuth 2.0 client secret |
 | `GOOGLE_REDIRECT_URI` | `http://localhost:8000/api/v1/auth/google/callback` | For Google login | Must match what you registered in Google Console |
@@ -505,52 +625,72 @@ Complete list of all variables with descriptions.
 ### AI Providers
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `GEMINI_API_KEY` | `""` | If using Gemini | Google AI Studio API key |
-| `OPENAI_API_KEY` | `""` | If using OpenAI | OpenAI platform API key |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | No | Gemini model name (overridable via admin panel) |
+| `OPENAI_API_KEY` | `""` | For voice transcription | OpenAI API key — also needed for Whisper voice notes |
+| `OPENAI_MODEL` | `gpt-4o` | No | OpenAI model name (overridable via admin panel) |
 | `PERPLEXITY_API_KEY` | `""` | If using Perplexity | Perplexity API key |
 | `DEEPSEEK_API_KEY` | `""` | If using DeepSeek | DeepSeek platform API key |
+| `DEEPSEEK_MODEL` | `deepseek-chat` | No | DeepSeek model name (overridable via admin panel) |
 | `DEFAULT_LLM_PROVIDER` | `gemini` | No | `gemini`, `openai`, `perplexity`, or `deepseek` |
 
 ### Email
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `GMAIL_USER` | `""` | For email sending | Gmail address to send from |
 | `GMAIL_APP_PASSWORD` | `""` | For email sending | 16-char Gmail App Password (not your account password) |
+| `FRONTEND_URL` | `https://aidermcliniq.com` | No | Base URL embedded in patient visit emails |
 
 ### CORS
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
-| `CORS_ORIGINS` | `["*"]` | No | List of allowed origins. Use `["*"]` for dev, restrict in production e.g. `["https://yourapp.com"]` |
+| --- | --- | --- | --- |
+| `CORS_ORIGINS` | `["*"]` | No | List of allowed origins. Use `["*"]` for dev, restrict in production |
 
 ### Rate Limiting
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
+| `RATE_LIMIT_ENABLED` | `false` | No | Set to `true` to enable rate limiting |
 | `RATE_LIMIT_PER_MINUTE` | `60` | No | Max requests per IP per minute |
 
 ### File Upload
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `MAX_IMAGE_SIZE_MB` | `10` | No | Maximum size of a single uploaded image in MB |
 | `MAX_IMAGES_PER_CASE` | `10` | No | Maximum number of images per case |
 
 ### QR Tokens
 
 | Variable | Default | Required | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `QR_TOKEN_EXPIRE_HOURS` | `24` | No | How long a QR code is valid after generation |
+
+### Firebase / Push Notifications
+
+| Variable | Default | Required | Description |
+| --- | --- | --- | --- |
+| `FIREBASE_CREDENTIALS_PATH` | `credentials/firebase_service_account.json` | For push notifications | Relative path to Firebase service account JSON |
+
+### Admin Bootstrap
+
+| Variable | Default | Required | Description |
+| --- | --- | --- | --- |
+| `ADMIN_EMAIL` | `""` | No | Email for auto-created admin account. Leave blank to disable. |
+| `ADMIN_PASSWORD` | `""` | No | Password for auto-created admin account. |
 
 ---
 
 ## Security Reminders
 
 - **Never commit `.env` to Git** — it is already in `.gitignore`
+- **Never commit `credentials/`** — service account JSON files are in `.gitignore`
 - **Rotate API keys immediately** if they are ever accidentally exposed (pushed to GitHub, pasted in a chat, visible in a screenshot)
 - **Use a different `SECRET_KEY`** in every environment — if production keys are compromised, development keys should not give access
 - **In production**, set `DEBUG=false` and `APP_ENV=production`
 - **In production**, restrict `CORS_ORIGINS` to your actual app domains
 - **In production**, use a strong PostgreSQL password, not `postgres:postgres`
+- **In production**, set `RATE_LIMIT_ENABLED=true`
