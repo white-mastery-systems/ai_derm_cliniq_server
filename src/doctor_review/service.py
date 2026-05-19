@@ -312,19 +312,17 @@ async def update_review(
             case.case_title = request.confirmed_diagnosis[0]
     if request.review_notes is not None:
         if request.review_notes != review.review_notes:
-            import json as _json
-            from datetime import datetime, timezone as _tz
             from src.models.audit_log import AuditEventType, CaseAuditLog
             db.add(CaseAuditLog(
                 case_id=case_id,
                 event_type=AuditEventType.NOTE_EDITED,
                 actor_id=doctor.id,
                 actor_role=doctor.role.value,
-                event_data=_json.dumps({
+                event_data=json.dumps({
                     "old_note": review.review_notes,
                     "new_note": request.review_notes,
                 }),
-                created_at=datetime.now(tz=_tz.utc),
+                created_at=datetime.now(tz=timezone.utc),
             ))
         review.review_notes = request.review_notes
     if request.treatment_plan_json is not None:
