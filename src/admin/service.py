@@ -641,6 +641,7 @@ async def get_case_detail(db: AsyncSession, case_id: str, admin_id: str | None =
         symptom_tags=case.symptom_tags,
         ai_status=case.ai_status.value,
         clinical_status=case.clinical_status.value,
+        clinical_status_changed_at=case.clinical_status_changed_at,
         red_flag_status=case.red_flag_status.value,
         red_flags=case.red_flags,
         red_flag_advice=case.red_flag_advice,

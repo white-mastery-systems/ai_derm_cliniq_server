@@ -35,6 +35,9 @@ CURRENT EVENT TYPES
                          ID lookup. Closes GitHub issue #173.
   diagnosis_confirmed  — Doctor set or changed confirmed_diagnosis on a review.
                          Captures old and new diagnosis. Closes GitHub issue #173.
+  clinical_status_changed — Doctor changed the clinical_status on a case via PATCH
+                         /review. Captures old_status and new_status. Closes GitHub
+                         issue #344.
 """
 
 import enum
@@ -52,8 +55,9 @@ class AuditEventType(str, enum.Enum):
     NOTE_EDITED         = "note_edited"
     CASE_ACCESSED       = "case_accessed"
     REVIEW_SUBMITTED    = "review_submitted"
-    DOCTOR_ASSIGNED     = "doctor_assigned"
-    DIAGNOSIS_CONFIRMED = "diagnosis_confirmed"
+    DOCTOR_ASSIGNED          = "doctor_assigned"
+    DIAGNOSIS_CONFIRMED      = "diagnosis_confirmed"
+    CLINICAL_STATUS_CHANGED  = "clinical_status_changed"
 
 
 class CaseAuditLog(Base):

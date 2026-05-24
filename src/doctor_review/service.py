@@ -349,15 +349,26 @@ async def update_review(
                 event_data=json.dumps({"review_id": review.id, "diagnosis": review.confirmed_diagnosis}),
             ))
 
-    # Update case clinical_status when doctor completes review
+    # Update case clinical_status when doctor changes it via review
     clinical_status_changed = False
     if request.clinical_status is not None:
+        old_status = case.clinical_status.value
         case.clinical_status = request.clinical_status
+        case.clinical_status_changed_at = datetime.now(tz=timezone.utc)
         clinical_status_changed = True
+        from src.models.audit_log import AuditEventType, CaseAuditLog
+        db.add(CaseAuditLog(
+            case_id=case_id,
+            event_type=AuditEventType.CLINICAL_STATUS_CHANGED,
+            actor_id=doctor.id,
+            actor_role=doctor.role.value,
+            event_data=json.dumps({"old_status": old_status, "new_status": request.clinical_status.value}),
+        ))
         logger.info(
             "clinical_status_updated",
             case_id=case_id,
-            clinical_status=request.clinical_status.value,
+            old_status=old_status,
+            new_status=request.clinical_status.value,
         )
 
     logger.info(

@@ -176,6 +176,7 @@ class CaseResponse(BaseModel):
     patient_id: str
     doctor_id: str | None = None
     consultation_type: str
+    case_type: str | None = None
     has_visible_lesion: bool
     consent_ai_analysis: bool
     consent_ai_analysis_at: datetime | None = None

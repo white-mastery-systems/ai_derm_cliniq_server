@@ -170,6 +170,12 @@ class Case(TimestampMixin, Base):
         default=ConsultationType.NEW_COMPLAINT,
         comment="new_complaint | follow_up — patient selects at start",
     )
+    case_type: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        default=None,
+        comment="diagnose | null — set to 'diagnose' for cases created via POST /cases/doctor",
+    )
     has_visible_lesion: Mapped[bool] = mapped_column(
         Boolean,
         default=True,

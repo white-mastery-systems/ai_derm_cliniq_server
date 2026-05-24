@@ -1189,6 +1189,7 @@ async def create_case_by_doctor(
         patient_id=patient.id,
         doctor_id=doctor.id,
         consultation_type=c_type,
+        case_type="diagnose",
         has_visible_lesion=request.has_visible_lesion,
         is_for_self=True,
         body_location=request.body_location,

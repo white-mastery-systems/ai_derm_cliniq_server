@@ -225,6 +225,7 @@ class AdminCaseDetail(BaseModel):
     symptom_tags: str | None
     ai_status: str
     clinical_status: str
+    clinical_status_changed_at: datetime | None
     red_flag_status: str
     red_flags: str | None
     red_flag_advice: str | None
