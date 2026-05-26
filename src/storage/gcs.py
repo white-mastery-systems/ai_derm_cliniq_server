@@ -158,7 +158,7 @@ def get_signed_url(gcs_path: str, expiry_minutes: int = 30) -> str:
             expiration=timedelta(minutes=expiry_minutes),
             method="GET",
             version="v4",
-            response_headers={"Access-Control-Allow-Origin": "*"},
+            # response_headers={"Access-Control-Allow-Origin": "*"},
         )
         return url
     except StorageException:
