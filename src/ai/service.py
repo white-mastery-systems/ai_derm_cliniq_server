@@ -153,8 +153,14 @@ async def trigger_analysis(
             message="Analysis is already in progress for this case"
         )
     if case.ai_status == AiStatus.COMPLETED:
-        raise ConflictException(
-            message="Analysis has already completed for this case"
+        # Graceful no-op: analysis already ran (common on crash-recovery retry).
+        # Return the stored task_id so the client can poll /status and get 'completed'
+        # immediately — no re-enqueue, no error shown to the user.
+        logger.info("analysis_trigger_noop_already_completed", case_id=case_id)
+        return AnalysisAcceptedResponse(
+            case_id=case_id,
+            task_id=case.celery_task_id or "",
+            message="Analysis already completed for this case.",
         )
 
     # Update status to PROCESSING first — so any concurrent request hits 409

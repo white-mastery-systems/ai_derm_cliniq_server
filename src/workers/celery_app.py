@@ -71,6 +71,7 @@ celery_app = Celery(
         "src.workers.tasks.email",
         "src.workers.tasks.doctor_analysis",
         "src.workers.tasks.notifications",
+        "src.workers.tasks.cleanup",
     ],
 )
 
@@ -97,4 +98,18 @@ celery_app.conf.update(
 
     # Suppress Celery 6.0 deprecation warning
     # broker_connection_retry_on_startup=True,
+
+    # Periodic cleanup schedule (requires celery beat to be running)
+    beat_schedule={
+        # Every 6 hours: soft-delete PENDING cases with no images older than 24 h
+        "cleanup-orphaned-cases": {
+            "task": "cleanup.mark_orphaned_cases_failed",
+            "schedule": 6 * 60 * 60,  # seconds
+        },
+        # Every 2 hours: reset cases stuck in PROCESSING for more than 2 h
+        "cleanup-stuck-processing-cases": {
+            "task": "cleanup.mark_stuck_processing_cases_failed",
+            "schedule": 2 * 60 * 60,  # seconds
+        },
+    },
 )

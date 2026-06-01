@@ -90,6 +90,16 @@ def _parse_symptom_tags(raw: str | None) -> list[str]:
         return []
 
 
+def _resolve_avatar_url(path_or_url: str | None) -> str | None:
+    """Return a fresh 60-minute signed URL if the value is a GCS path, otherwise pass through."""
+    if path_or_url and path_or_url.startswith("avatars/"):
+        try:
+            return gcs.get_signed_url(path_or_url, 60)
+        except Exception:
+            return None
+    return path_or_url
+
+
 def _build_image_response(img: CaseImage) -> ImageResponse:
     """Convert a CaseImage row to an ImageResponse with a fresh signed URL."""
     try:
@@ -456,11 +466,11 @@ async def list_cases(
             row.Case,
             counts.get(row.Case.id, 0),
             patient_name=row.patient_name,
-            patient_avatar_url=row.patient_avatar_url,
+            patient_avatar_url=_resolve_avatar_url(row.patient_avatar_url),
             doctor_name=row.doctor_name,
             doctor_specialization=row.doctor_specialization,
             doctor_clinic_name=row.doctor_clinic_name,
-            doctor_avatar_url=row.doctor_avatar_url,
+            doctor_avatar_url=_resolve_avatar_url(row.doctor_avatar_url),
         )
         for row in rows
     ]
@@ -508,7 +518,7 @@ async def get_case(
         profile = profile_result.scalar_one_or_none()
         if profile:
             patient_gender = profile.gender
-            patient_avatar_url = profile.avatar_url
+            patient_avatar_url = _resolve_avatar_url(profile.avatar_url)
             if profile.date_of_birth:
                 today = date.today()
                 dob = profile.date_of_birth
@@ -534,7 +544,7 @@ async def get_case(
             if dr_profile:
                 doctor_specialization = dr_profile.specialization
                 doctor_clinic_name = dr_profile.clinic_name
-                doctor_avatar_url = dr_profile.avatar_url
+                doctor_avatar_url = _resolve_avatar_url(dr_profile.avatar_url)
 
     # ---- Visit X of Y ----
     # Total cases for this patient

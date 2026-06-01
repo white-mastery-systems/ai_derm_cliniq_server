@@ -65,6 +65,17 @@ async def _load_user_with_profile(db: AsyncSession, user_id: str) -> User:
     return user
 
 
+async def _resolve_avatar_url(path_or_url: str | None) -> str | None:
+    """
+    Return a fresh 60-minute signed URL if the stored value is a GCS path.
+    Legacy rows that already contain a full https:// URL are returned as-is
+    until the URL naturally expires (max 7 days from when it was stored).
+    """
+    if path_or_url and path_or_url.startswith("avatars/"):
+        return await asyncio.to_thread(gcs.get_signed_url, path_or_url, 60)
+    return path_or_url
+
+
 def _build_profile_response(user: User) -> UserProfileResponse:
     """
     Construct UserProfileResponse without accessing any lazy-loaded attributes.
@@ -93,7 +104,12 @@ async def get_profile(db: AsyncSession, user_id: str) -> UserProfileResponse:
     Used by: GET /api/v1/users/me
     """
     user = await _load_user_with_profile(db, user_id)
-    return _build_profile_response(user)
+    response = _build_profile_response(user)
+    if response.patient_profile:
+        response.patient_profile.avatar_url = await _resolve_avatar_url(response.patient_profile.avatar_url)
+    if response.doctor_profile:
+        response.doctor_profile.avatar_url = await _resolve_avatar_url(response.doctor_profile.avatar_url)
+    return response
 
 
 # ------------------------------------------------------------------ #
@@ -128,7 +144,12 @@ async def update_profile(
         _apply_doctor_fields(user.doctor_profile, request)
 
     logger.info("profile_updated", user_id=user_id, role=user.role.value)
-    return _build_profile_response(user)
+    response = _build_profile_response(user)
+    if response.patient_profile:
+        response.patient_profile.avatar_url = await _resolve_avatar_url(response.patient_profile.avatar_url)
+    if response.doctor_profile:
+        response.doctor_profile.avatar_url = await _resolve_avatar_url(response.doctor_profile.avatar_url)
+    return response
 
 
 def _apply_phone(user: User, phone: str) -> None:
@@ -194,7 +215,7 @@ async def get_patient_by_code(
         patient_code=profile.patient_code,
         date_of_birth=profile.date_of_birth,
         gender=profile.gender,
-        avatar_url=profile.avatar_url,
+        avatar_url=await _resolve_avatar_url(profile.avatar_url),
     )
 
 
@@ -300,15 +321,17 @@ async def upload_avatar(
 
     # GCS calls are synchronous — run in thread pool to avoid blocking the event loop
     await asyncio.to_thread(gcs.upload_file, gcs_path, file_bytes, content_type)
-    signed_url = await asyncio.to_thread(gcs.get_signed_url, gcs_path, 60 * 24 * 7)  # 7-day URL
 
-    # Persist the URL on the correct profile row
+    # Store the GCS path (not a signed URL) so the URL never expires in the DB.
+    # A fresh signed URL is generated on every profile read by _resolve_avatar_url.
     user_with_profile = await _load_user_with_profile(db, user.id)
 
     if user_with_profile.role == UserRole.PATIENT and user_with_profile.patient_profile:
-        user_with_profile.patient_profile.avatar_url = signed_url
+        user_with_profile.patient_profile.avatar_url = gcs_path
     elif user_with_profile.role == UserRole.DOCTOR and user_with_profile.doctor_profile:
-        user_with_profile.doctor_profile.avatar_url = signed_url
+        user_with_profile.doctor_profile.avatar_url = gcs_path
 
+    # Return a fresh 60-minute signed URL so Flutter can display the image immediately
+    signed_url = await asyncio.to_thread(gcs.get_signed_url, gcs_path, 60)
     logger.info("avatar_uploaded", user_id=user.id, gcs_path=gcs_path)
     return AvatarUploadResponse(avatar_url=signed_url)
