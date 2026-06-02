@@ -140,11 +140,17 @@ async def require_patient(user: User = Depends(get_current_user)) -> User:
     """
     Dependency: route is only accessible to PATIENT-role users.
 
+    Admins are also permitted so they can test the patient flow without
+    needing a separate patient account. Matches the same bypass pattern
+    used in require_doctor.
+
     Usage:
         @router.get("/my-cases")
         async def get_my_cases(patient: User = Depends(require_patient)):
             ...
     """
+    if user.role == UserRole.ADMIN:
+        return user  # admins can access patient endpoints for testing
     if user.role != UserRole.PATIENT:
         raise InsufficientRoleException(
             message="This endpoint requires the 'patient' role"
