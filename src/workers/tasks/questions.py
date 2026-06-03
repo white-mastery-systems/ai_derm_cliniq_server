@@ -365,16 +365,19 @@ def generate_questions_task(self, case_id: str) -> None:
                 response_text = call_llm(combined_prompt, json_mode=True)
                 questions_data = gemini_client.extract_json(response_text)
 
-                # If no more doubts — finalize early (no more questions needed).
-                # Also set question_round = max_question_rounds so GET /chat
-                # returns is_complete=True and Flutter exits the polling loop.
+                # The prompt is now instructed to ALWAYS return a question, so
+                # doubt_present=="no" should not occur. If it does (e.g. older
+                # admin-overridden prompt), log and fall through — the round
+                # counter in refine_analysis_task is the only stop signal, which
+                # respects the user's chosen question count.
                 if questions_data.get("doubt_present") == "no":
-                    logger.info("no_more_doubts_finalizing", case_id=case_id)
-                    case.question_round = case.max_question_rounds
-                    await _finalize_case(session, case_id, conv_history, visual_desc, differential, follow_up_context, patient_particulars)
-                    await session.commit()
-                    await engine.dispose()
-                    return
+                    logger.warning(
+                        "no_more_doubts_received_but_continuing",
+                        case_id=case_id,
+                        round=round_number,
+                        max_rounds=case.max_question_rounds,
+                        note="prompt should always return a question; check admin prompt override",
+                    )
 
             # Delete any sentinel message written by trigger_questions to claim
             # the slot before this task ran. Real messages replace it below.

@@ -211,9 +211,8 @@ IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "
                        {previous_questions}, {prescription}, {datetime},
                        {follow_up_context}
         follow_up_context is an empty string for new complaints.
-        Returns:
-          If more to ask: {{"doubt_present":"yes","Questions":[{{"question":"...","answer_options":[...]}}]}}
-          If nothing more: {{"doubt_present":"no"}}
+        Returns: always {{"doubt_present":"yes","Questions":[...]}} — never doubt_present:no,
+                 because the user's chosen round count is the only stop signal.
         Used in: Celery `generate_questions_task` round 1+.
         """
         return _p("patient_follow_up_question", """You are an intelligent dermatologist AI assistant conducting a patient consultation.
@@ -221,12 +220,12 @@ IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "
 You have access to the conversation history, visual description, differential diagnosis, and previous prescription.
 
 Step 1 — Think medically:
-Review everything available. Identify the single most important clinical doubt that, if clarified, would most help you differentiate between diagnoses or better understand the patient's condition.
-Consider: symptom patterns, triggers, duration, severity, associated conditions, response to treatments, or anything inconsistent in the current data.
-If you have no remaining doubts that would meaningfully change the diagnosis or management — return doubt_present: no.
+Review everything available and identify the single most clinically useful aspect to explore next.
+Consider symptom patterns, triggers, duration, progression, severity, body areas affected, associated systemic symptoms, family history, lifestyle, occupation, medications, allergies, or response to previous treatments.
+Even when the leading diagnosis seems clear, there is always something valuable to explore — treatment preferences, lifestyle impact, comorbidities, adherence factors, or anything that helps personalise management.
 
 Step 2 — Frame for the patient:
-Convert that one medical doubt into a single clear, simple question a non-medical patient can understand and answer.
+Convert that one clinical aspect into a single clear, simple question a non-medical patient can understand and answer.
 Provide as many descriptive answer options as needed to cover all likely responses.
 Do NOT repeat any question already asked in the conversation.
 Do NOT ask anything irrelevant to this specific case.
@@ -251,12 +250,8 @@ Current date and time:
 {follow_up_context}
 
 Respond in JSON only. No other text.
-
-If you have a question to ask:
+You MUST always return a question — never return an empty response:
 {{"doubt_present": "yes", "Questions": [{{"question": "<patient-friendly question>", "answer_options": ["<option1>", "<option2>", ...]}}]}}
-
-If nothing more to ask:
-{{"doubt_present": "no"}}
 """)
 
     @staticmethod

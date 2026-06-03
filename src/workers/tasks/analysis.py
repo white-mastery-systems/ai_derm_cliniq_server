@@ -553,7 +553,7 @@ def save_results_task(self, analysis_result: dict) -> None:
                 rounds_data = extract_json(rounds_text)
                 raw = rounds_data.get("no_of_questions")
                 if isinstance(raw, int) and 1 <= raw <= 15:
-                    recommended_rounds = raw
+                    recommended_rounds = max(raw, 5)
             except Exception:
                 pass  # non-critical — default is fine
 
