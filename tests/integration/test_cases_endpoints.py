@@ -490,3 +490,86 @@ class TestDoctorStats:
         assert resp.status_code == 403
 
 
+# ================================================================== #
+# POST /api/v1/cases/doctor
+# ================================================================== #
+
+class TestDoctorCreateCase:
+    """
+    Tests for POST /api/v1/cases/doctor — doctor-initiated case creation.
+
+    KEY BEHAVIOURS
+    - patient_email is optional: omitted, null, or empty string all accepted.
+    - When no email supplied a placeholder patient account is auto-created.
+    - A valid email finds or creates the matching patient account.
+    - An invalid (non-empty) email is rejected with 422.
+    - Only approved doctors may call this endpoint.
+    """
+
+    BASE_PAYLOAD = {
+        "patient_name": "Test Patient",
+        "has_visible_lesion": True,
+        "consultation_type": "new_complaint",
+        "consent_research": False,
+    }
+
+    async def test_with_valid_email_creates_case(
+        self, db_app_client: AsyncClient, test_engine
+    ):
+        d_token, _ = await register_and_login_doctor(db_app_client, "dc01", test_engine)
+        resp = await db_app_client.post(
+            "/api/v1/cases/doctor",
+            headers=auth_header(d_token),
+            json={**self.BASE_PAYLOAD, "patient_email": "newpatient_dc01@example.com"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert "id" in resp.json()
+
+    async def test_with_empty_string_email_creates_case(
+        self, db_app_client: AsyncClient, test_engine
+    ):
+        """Diagnose flow sends patient_email: '' — must be accepted after the fix."""
+        d_token, _ = await register_and_login_doctor(db_app_client, "dc02", test_engine)
+        resp = await db_app_client.post(
+            "/api/v1/cases/doctor",
+            headers=auth_header(d_token),
+            json={**self.BASE_PAYLOAD, "patient_email": ""},
+        )
+        assert resp.status_code == 201, resp.text
+        assert "id" in resp.json()
+
+    async def test_with_missing_email_key_creates_case(
+        self, db_app_client: AsyncClient, test_engine
+    ):
+        """Omitting patient_email entirely must also be accepted."""
+        d_token, _ = await register_and_login_doctor(db_app_client, "dc03", test_engine)
+        resp = await db_app_client.post(
+            "/api/v1/cases/doctor",
+            headers=auth_header(d_token),
+            json=self.BASE_PAYLOAD,
+        )
+        assert resp.status_code == 201, resp.text
+        assert "id" in resp.json()
+
+    async def test_with_invalid_email_rejected(
+        self, db_app_client: AsyncClient, test_engine
+    ):
+        """A non-empty, non-valid email must still be rejected with 422."""
+        d_token, _ = await register_and_login_doctor(db_app_client, "dc04", test_engine)
+        resp = await db_app_client.post(
+            "/api/v1/cases/doctor",
+            headers=auth_header(d_token),
+            json={**self.BASE_PAYLOAD, "patient_email": "not-an-email"},
+        )
+        assert resp.status_code == 422
+
+    async def test_patient_cannot_create_doctor_case(self, db_app_client: AsyncClient):
+        token, _ = await register_and_login_patient(db_app_client, "dc05")
+        resp = await db_app_client.post(
+            "/api/v1/cases/doctor",
+            headers=auth_header(token),
+            json={**self.BASE_PAYLOAD, "patient_email": "x@x.com"},
+        )
+        assert resp.status_code == 403
+
+

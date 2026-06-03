@@ -23,7 +23,17 @@ DoctorStatsResponse — dashboard numbers for the doctor home screen
 
 from datetime import date, datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from typing import Annotated
+from pydantic import BaseModel, BeforeValidator, EmailStr, Field
+
+
+def _blank_to_none(v: object) -> object:
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
+OptionalEmail = Annotated[EmailStr | None, BeforeValidator(_blank_to_none)]
 
 from src.images.schemas import ImageResponse
 
@@ -328,8 +338,10 @@ class DoctorCaseCreateRequest(BaseModel):
         max_length=255,
         description="Patient's full name — used when creating a new account",
     )
-    patient_email: EmailStr = Field(
-        description="Patient's email — used to find or create their account",
+    patient_email: OptionalEmail = Field(
+        default=None,
+        description="Patient's email — used to find or create their account. "
+                    "Omit or send an empty string for anonymous/diagnose-only cases.",
     )
     patient_age: int | None = Field(
         default=None,

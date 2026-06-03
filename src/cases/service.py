@@ -1110,36 +1110,41 @@ async def create_case_by_doctor(
                          - timedelta(days=request.patient_age * 365))
 
     # ── 1. Find or create patient ─────────────────────────────────── #
-    patient_result = await db.execute(
-        select(User).where(User.email == request.patient_email)
-    )
-    patient = patient_result.scalar_one_or_none()
+    patient: User | None = None
+    if request.patient_email:
+        patient_result = await db.execute(
+            select(User).where(User.email == request.patient_email)
+        )
+        patient = patient_result.scalar_one_or_none()
 
-    if patient is not None:
-        # Existing account — must be an active patient
-        if not patient.is_active or patient.role != UserRole.PATIENT:
-            raise BadRequestException(
-                message=f"An account with email {request.patient_email!r} exists "
-                        "but is not an active patient account"
-            )
-        # Fill in missing profile fields if doctor provided them
-        if request.patient_date_of_birth or request.patient_gender:
-            profile_result = await db.execute(
-                select(PatientProfile).where(PatientProfile.user_id == patient.id)
-            )
-            profile = profile_result.scalar_one_or_none()
-            if profile:
-                if not profile.date_of_birth and effective_dob:
-                    profile.date_of_birth = effective_dob
-                if not profile.gender and request.patient_gender:
-                    profile.gender = request.patient_gender
-        logger.info("doctor_case_patient_found", patient_id=patient.id, doctor_id=doctor.id)
+        if patient is not None:
+            # Existing account — must be an active patient
+            if not patient.is_active or patient.role != UserRole.PATIENT:
+                raise BadRequestException(
+                    message=f"An account with email {request.patient_email!r} exists "
+                            "but is not an active patient account"
+                )
+            # Fill in missing profile fields if doctor provided them
+            if request.patient_date_of_birth or request.patient_gender:
+                profile_result = await db.execute(
+                    select(PatientProfile).where(PatientProfile.user_id == patient.id)
+                )
+                profile = profile_result.scalar_one_or_none()
+                if profile:
+                    if not profile.date_of_birth and effective_dob:
+                        profile.date_of_birth = effective_dob
+                    if not profile.gender and request.patient_gender:
+                        profile.gender = request.patient_gender
+            logger.info("doctor_case_patient_found", patient_id=patient.id, doctor_id=doctor.id)
 
-    else:
-        # New patient — create account without a password
-        # Patient claims account later via forgot-password OTP
+    if patient is None:
+        # New patient — create account without a password.
+        # If no email was supplied (diagnose-only flow) generate a unique placeholder
+        # so the unique-email constraint is satisfied; the patient can claim the account
+        # later once a real email is known.
+        effective_email = request.patient_email or f"anon-{new_uuid().replace('-', '')[:16]}@placeholder.aiderm.internal"
         patient = User(
-            email=request.patient_email,
+            email=effective_email,
             full_name=request.patient_name,
             role=UserRole.PATIENT,
             password_hash=None,
@@ -1171,7 +1176,7 @@ async def create_case_by_doctor(
         logger.info(
             "doctor_case_patient_created",
             patient_id=patient.id,
-            email=request.patient_email,
+            email=effective_email,
             doctor_id=doctor.id,
         )
 
