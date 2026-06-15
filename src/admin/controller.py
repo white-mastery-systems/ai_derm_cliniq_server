@@ -437,17 +437,19 @@ async def update_prompt(
     key: str,
     request: UpdatePromptRequest,
     _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
 ) -> PromptItem:
     """
-    Set a Redis override for an AI prompt.
+    Persist a prompt override to PostgreSQL and refresh the Redis cache.
 
     The new prompt takes effect immediately for all running processes
-    (API server + Celery workers) without a restart.
+    (API server + Celery workers) without a restart. The override survives
+    server restarts because it is stored in PostgreSQL.
 
     Returns 400 if `key` is not a valid prompt key.
     """
     try:
-        return await service.update_prompt(key, request.value)
+        return await service.update_prompt(db, key, request.value)
     except ValueError as exc:
         from src.exceptions import BadRequestException
         raise BadRequestException(message=str(exc))
@@ -462,9 +464,10 @@ async def update_prompt(
 async def reset_prompt(
     key: str,
     _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
 ) -> PromptItem:
     """
-    Delete the Redis override for a prompt key.
+    Delete the prompt override from PostgreSQL and remove the Redis cache key.
 
     After this call the prompt method will use its hardcoded default value.
     Returns the prompt entry with `has_override=false` and `value=null`.
@@ -472,7 +475,7 @@ async def reset_prompt(
     Returns 400 if `key` is not a valid prompt key.
     """
     try:
-        return await service.reset_prompt(key)
+        return await service.reset_prompt(db, key)
     except ValueError as exc:
         from src.exceptions import BadRequestException
         raise BadRequestException(message=str(exc))
@@ -487,9 +490,10 @@ async def reset_prompt(
 async def get_prompt_history(
     key: str,
     _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
 ) -> PromptHistoryResponse:
     """
-    Return the last 10 saved versions of a prompt, newest first.
+    Return the last 10 saved versions of a prompt from PostgreSQL, newest first.
 
     Each entry contains the prompt text and the UTC timestamp when it was
     replaced. An empty list means the prompt has never been edited via the
@@ -498,7 +502,7 @@ async def get_prompt_history(
     Returns 400 if `key` is not a valid prompt key.
     """
     try:
-        return await service.get_prompt_history(key)
+        return await service.get_prompt_history(db, key)
     except ValueError as exc:
         from src.exceptions import BadRequestException
         raise BadRequestException(message=str(exc))
@@ -513,9 +517,10 @@ async def get_prompt_history(
 async def rollback_prompt(
     key: str,
     _admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_session),
 ) -> PromptItem:
     """
-    Restore the most recent previous version of a prompt from history.
+    Restore the most recent previous version of a prompt from PostgreSQL history.
 
     The current value is discarded and the previous value becomes active
     immediately across all running processes (API + Celery workers).
@@ -523,7 +528,7 @@ async def rollback_prompt(
     Returns 400 if `key` is invalid or there is no history to roll back to.
     """
     try:
-        return await service.rollback_prompt(key)
+        return await service.rollback_prompt(db, key)
     except ValueError as exc:
         from src.exceptions import BadRequestException
         raise BadRequestException(message=str(exc))

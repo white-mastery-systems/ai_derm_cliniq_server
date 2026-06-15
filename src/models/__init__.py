@@ -42,6 +42,7 @@ from src.models.snomed_mapping import SnomedMapping
 from src.models.todo import Todo
 from src.models.user import User, UserRole
 from src.models.visual_description import VisualDescription
+from src.models.prompt_override import PromptOverride, PromptHistory
 
 __all__ = [
     # Base
@@ -87,4 +88,7 @@ __all__ = [
     # Audit
     "AuditEventType",
     "CaseAuditLog",
+    # Prompt persistence
+    "PromptOverride",
+    "PromptHistory",
 ]

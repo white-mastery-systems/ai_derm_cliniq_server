@@ -717,14 +717,14 @@ def get_all_prompts() -> PromptsListResponse:
     return PromptsListResponse(prompts=prompts)
 
 
-async def update_prompt(key: str, value: str) -> PromptItem:
+async def update_prompt(db: AsyncSession, key: str, value: str) -> PromptItem:
     """
-    Set a Redis override for a prompt key.
+    Persist a prompt override to PostgreSQL (source of truth) and refresh Redis cache.
 
     Raises ValueError (→ 400) if key is not a valid prompt key.
     """
     from src.ai import prompt_registry
-    await prompt_registry.async_set_prompt(key, value)
+    await prompt_registry.db_set_prompt(db, key, value)
     logger.info("admin_prompt_updated", key=key)
     entry = prompt_registry.get_all()[key]
     return PromptItem(
@@ -736,14 +736,15 @@ async def update_prompt(key: str, value: str) -> PromptItem:
     )
 
 
-async def reset_prompt(key: str) -> PromptItem:
+async def reset_prompt(db: AsyncSession, key: str) -> PromptItem:
     """
-    Delete the Redis override for a prompt key, restoring the hardcoded default.
+    Delete the prompt override from PostgreSQL and remove the Redis cache key,
+    restoring the hardcoded default.
 
     Raises ValueError (→ 400) if key is not a valid prompt key.
     """
     from src.ai import prompt_registry
-    await prompt_registry.async_reset_prompt(key)
+    await prompt_registry.db_reset_prompt(db, key)
     logger.info("admin_prompt_reset", key=key)
     entry = prompt_registry.get_all()[key]
     return PromptItem(
@@ -755,14 +756,14 @@ async def reset_prompt(key: str) -> PromptItem:
     )
 
 
-async def get_prompt_history(key: str) -> PromptHistoryResponse:
+async def get_prompt_history(db: AsyncSession, key: str) -> PromptHistoryResponse:
     """
-    Return the version history for a prompt key (newest first, up to 10 entries).
+    Return the version history for a prompt key from PostgreSQL (newest first, up to 10).
 
     Raises ValueError (→ 400) if key is not a valid prompt key.
     """
     from src.ai import prompt_registry
-    history = await prompt_registry.async_get_history(key)
+    history = await prompt_registry.db_get_history(db, key)
     return PromptHistoryResponse(
         key=key,
         history=[
@@ -772,15 +773,16 @@ async def get_prompt_history(key: str) -> PromptHistoryResponse:
     )
 
 
-async def rollback_prompt(key: str) -> PromptItem:
+async def rollback_prompt(db: AsyncSession, key: str) -> PromptItem:
     """
-    Restore the previous version of a prompt from history.
+    Restore the previous version of a prompt from PostgreSQL history.
 
-    Pops the most recent history entry and sets it as the current value.
-    Raises ValueError (→ 400) if key is invalid or history is empty.
+    Pops the most recent PromptHistory row and sets it as the current value
+    in both PostgreSQL and Redis.
+    Raises ValueError (→ 400) if key is invalid or no history exists.
     """
     from src.ai import prompt_registry
-    restored = await prompt_registry.async_rollback_prompt(key)
+    restored = await prompt_registry.db_rollback_prompt(db, key)
     if restored is None:
         raise ValueError(f"No history available for prompt key '{key}'")
     logger.info("admin_prompt_rolled_back", key=key)

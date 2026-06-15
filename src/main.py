@@ -161,6 +161,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     await _bootstrap_admin()
 
+    # Warm Redis prompt cache from PostgreSQL.
+    # This ensures Celery workers always see the latest overrides even after
+    # a Redis restart, because PostgreSQL is the source of truth.
+    from src.ai.prompt_registry import warm_redis_from_db
+    from sqlalchemy.ext.asyncio import async_sessionmaker as _sm
+    _factory = _sm(engine, expire_on_commit=False)
+    async with _factory() as _db:
+        await warm_redis_from_db(_db)
+
     logger.info("app_ready", docs_url="/docs")
 
     yield  # ← Server is running and handling requests here
