@@ -70,9 +70,13 @@ async def _resolve_avatar_url(path_or_url: str | None) -> str | None:
     Return a fresh 60-minute signed URL if the stored value is a GCS path.
     Legacy rows that already contain a full https:// URL are returned as-is
     until the URL naturally expires (max 7 days from when it was stored).
+    Returns None if GCS is not configured or the signed URL call fails.
     """
     if path_or_url and path_or_url.startswith("avatars/"):
-        return await asyncio.to_thread(gcs.get_signed_url, path_or_url, 60)
+        try:
+            return await asyncio.to_thread(gcs.get_signed_url, path_or_url, 60)
+        except Exception:
+            return None
     return path_or_url
 
 

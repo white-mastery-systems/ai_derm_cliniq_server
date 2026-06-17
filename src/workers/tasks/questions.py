@@ -410,6 +410,49 @@ def generate_questions_task(self, case_id: str) -> None:
                 session.add(msg)
 
             await session.commit()
+
+            # Mirror doubts to legacy GCS folder structure (best-effort)
+            if questions_list:
+                try:
+                    from src.storage.legacy_sync import (
+                        get_legacy_prefix,
+                        build_doubts_txt,
+                        mirror_text,
+                    )
+                    # Use the initial diagnosis (case_title) — fixed at first analysis,
+                    # never updated — so all rounds write to the same GCS folder.
+                    diag_name = case.case_title
+                    if diag_name:
+                        legacy_prefix = await get_legacy_prefix(session, case, diag_name)
+                        if legacy_prefix:
+                            # Build doubts.txt from all AI messages so far (one section per round)
+                            all_msgs = await _get_all_messages(session, case_id)
+                            ai_by_round: dict[int, list[dict]] = {}
+                            for msg in all_msgs:
+                                if msg.role == MessageRole.AI and msg.content != '{"sentinel": true}':
+                                    try:
+                                        q_data = json.loads(msg.content)
+                                        ai_by_round.setdefault(msg.round_number, []).append(q_data)
+                                    except Exception:
+                                        pass
+                            rounds_data = []
+                            for rn in sorted(ai_by_round.keys()):
+                                qs = ai_by_round[rn]
+                                doubts_dict = {
+                                    "doubt_present": "yes",
+                                    "doubt": [
+                                        {
+                                            f"doubt{i + 1}": q.get("question", ""),
+                                            "reason": q.get("reason", "Follow-up assessment required"),
+                                        }
+                                        for i, q in enumerate(qs)
+                                    ],
+                                }
+                                rounds_data.append((rn, doubts_dict))
+                            mirror_text(legacy_prefix, "doubts.txt", build_doubts_txt(rounds_data))
+                except Exception:
+                    pass
+
             if not questions_list:
                 logger.warning(
                     "questions_generated_empty",
@@ -623,6 +666,102 @@ def refine_analysis_task(self, case_id: str) -> None:
                 new_round=new_round,
                 diagnosis=most_probable_name,
             )
+
+            # Mirror question_answer.txt to legacy GCS (best-effort)
+            try:
+                from src.storage.legacy_sync import (
+                    get_legacy_prefix,
+                    build_question_answer_txt,
+                    mirror_text,
+                )
+                # Use case_title (initial diagnosis) — never the current-round
+                # diagnosis — so all rounds write to the same GCS folder.
+                if case.case_title:
+                    legacy_prefix = await get_legacy_prefix(session, case, case.case_title)
+                    if legacy_prefix:
+                        all_msgs = await _get_all_messages(session, case_id)
+                        ai_msgs_sorted = sorted(
+                            [m for m in all_msgs if m.role == MessageRole.AI and m.content != '{"sentinel": true}'],
+                            key=lambda m: (m.round_number, m.question_index or 0),
+                        )
+                        pat_answers = {
+                            (m.round_number, m.question_index): m.content
+                            for m in all_msgs if m.role == MessageRole.PATIENT
+                        }
+                        qa_pairs: list[tuple] = []
+                        for msg in ai_msgs_sorted:
+                            try:
+                                q_data = json.loads(msg.content)
+                                q_text = q_data.get("question", "")
+                                options = q_data.get("answer_options", [])
+                            except Exception:
+                                q_text = msg.content
+                                options = []
+                            answer = pat_answers.get((msg.round_number, msg.question_index), "")
+                            qa_pairs.append(("assistant", q_text))
+                            qa_pairs.append(("answer_list", options))
+                            qa_pairs.append(("User", answer))
+                        mirror_text(
+                            legacy_prefix,
+                            "question_answer.txt",
+                            build_question_answer_txt(qa_pairs),
+                        )
+            except Exception:
+                pass
+
+            # Re-mirror ALL case images after each Q&A round.
+            # This catches images the user uploaded after analysis started (race
+            # condition: save_results_task only sees images in DB at that moment).
+            try:
+                from sqlalchemy import func as _func
+                from src.storage.legacy_sync import (
+                    build_study_metadata,
+                    get_legacy_prefix,
+                    mirror_bytes,
+                    mirror_json,
+                )
+                if case.case_title:
+                    _prefix = await get_legacy_prefix(session, case, case.case_title)
+                    if _prefix:
+                        _imgs_result = await session.execute(
+                            select(CaseImage)
+                            .where(CaseImage.case_id == case_id)
+                            .order_by(CaseImage.upload_order)
+                        )
+                        _imgs = list(_imgs_result.scalars().all())
+                        for _idx, _img in enumerate(_imgs, start=1):
+                            try:
+                                _img_bytes = gcs.download_bytes(_img.gcs_path)
+                                _ext = (_img.mime_type or "image/jpeg").split("/")[-1]
+                                if _ext == "jpeg":
+                                    _ext = "jpg"
+                                mirror_bytes(
+                                    _prefix,
+                                    f"uploaded_image_{_idx}.{_ext}",
+                                    _img_bytes,
+                                    _img.mime_type or "image/jpeg",
+                                )
+                            except Exception:
+                                pass
+                        # Also refresh study_metadata.json with up-to-date counts.
+                        _n_diffs = (await session.execute(
+                            select(_func.count(DifferentialDiagnosis.id))
+                            .where(DifferentialDiagnosis.case_id == case_id)
+                        )).scalar() or 1
+                        _llm = getattr(settings, "DEFAULT_LLM_MODEL", None) or settings.DEFAULT_LLM_PROVIDER
+                        mirror_json(
+                            _prefix,
+                            "study_metadata.json",
+                            build_study_metadata(
+                                prefix=_prefix,
+                                llm_provider=_llm,
+                                total_questions=case.max_question_rounds or 0,
+                                n_differentials=_n_diffs,
+                                timestamp=(case.created_at or datetime.now(tz=timezone.utc)).isoformat(),
+                            ),
+                        )
+            except Exception:
+                pass
 
         if should_generate_more:
             generate_questions_task.delay(case_id)

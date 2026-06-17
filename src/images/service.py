@@ -188,7 +188,8 @@ async def upload_image(
     except ValueError:
         img_type = ImageType.SKIN
 
-    # Build GCS path and upload
+    # Build GCS path — standard format. Legacy mirror is written after AI analysis
+    # completes (when diagnosis name is known for the complaint folder).
     image_id = new_uuid()
     extension = _MIME_TO_EXT.get(content_type, "jpg")
     gcs_path = gcs.build_image_path(case_id, image_id, extension)

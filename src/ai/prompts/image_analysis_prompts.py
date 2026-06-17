@@ -403,7 +403,8 @@ Give your response in json format as:
   "Questions": [
     {{
       "question": "<question>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
+      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...],
+      "reason": "<brief clinical reason why this question helps narrow the diagnosis>"
     }}
   ]
 }}

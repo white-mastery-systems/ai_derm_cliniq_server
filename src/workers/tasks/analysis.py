@@ -52,7 +52,7 @@ import json
 
 from celery import chain
 from celery.exceptions import Ignore, SoftTimeLimitExceeded
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -632,6 +632,117 @@ def save_results_task(self, analysis_result: dict) -> None:
             _case_number = case.case_number
 
             await session.commit()
+
+            # Mirror case files to legacy GCS folder structure (best-effort, exact old app format)
+            try:
+                from datetime import date as _date2
+                from src.models.case_image import CaseImage as _CaseImage
+                from src.entities.snomed import lookup_snomed as _lookup_snomed
+                from src.storage.legacy_sync import (
+                    get_legacy_prefix,
+                    build_chat_history_txt,
+                    build_differential_txt,
+                    build_snomed_txt,
+                    build_study_metadata,
+                    mirror_bytes,
+                    mirror_text,
+                    mirror_json,
+                )
+                if most_probable_name:
+                    legacy_prefix = await get_legacy_prefix(session, case, most_probable_name)
+                    if legacy_prefix:
+                        # 1. Mirror images as uploaded_image_N.ext
+                        imgs_result = await session.execute(
+                            select(_CaseImage)
+                            .where(_CaseImage.case_id == case_id)
+                            .order_by(_CaseImage.upload_order)
+                        )
+                        imgs = list(imgs_result.scalars().all())
+                        logger.info("legacy_mirror_images", case_id=case_id, total=len(imgs))
+                        for idx, img in enumerate(imgs, start=1):
+                            try:
+                                img_bytes = gcs.download_bytes(img.gcs_path)
+                                ext = (img.mime_type or "image/jpeg").split("/")[-1]
+                                if ext == "jpeg":
+                                    ext = "jpg"
+                                mirror_bytes(
+                                    legacy_prefix,
+                                    f"uploaded_image_{idx}.{ext}",
+                                    img_bytes,
+                                    img.mime_type or "image/jpeg",
+                                )
+                                logger.info("legacy_mirror_image_ok", case_id=case_id, idx=idx, path=img.gcs_path)
+                            except Exception as _img_exc:
+                                logger.warning("legacy_mirror_image_failed", case_id=case_id, idx=idx, path=img.gcs_path, error=str(_img_exc))
+
+                        # 2. chat_history.txt — age, sex, visual description
+                        age_str = "Unknown"
+                        sex_str = "Unknown"
+                        if case.dependent_id:
+                            try:
+                                if case.dependent_dob:
+                                    age_str = str((_date2.today() - case.dependent_dob).days // 365)
+                                sex_str = case.dependent_gender or "Unknown"
+                            except Exception:
+                                pass
+                        elif profile:
+                            if profile.date_of_birth:
+                                age_str = str((_date2.today() - profile.date_of_birth).days // 365)
+                            sex_str = profile.gender or "Unknown"
+                        mirror_text(
+                            legacy_prefix,
+                            "chat_history.txt",
+                            build_chat_history_txt(age_str, sex_str, desc),
+                        )
+
+                        # 3. differential_diagnoses.txt
+                        mirror_text(
+                            legacy_prefix,
+                            "differential_diagnoses.txt",
+                            build_differential_txt(diag),
+                        )
+
+                        # 4. snomed_diagnosis.txt
+                        snomed_entries = []
+                        for _diag_item in [{"diagnosis": most_probable_name}] + (
+                            [d for d in (diag.get("differential_diagnoses") or [])
+                             if isinstance(d, dict) and d.get("diagnosis")]
+                        ):
+                            _name = _diag_item.get("diagnosis") or _diag_item.get("name", "")
+                            if _name:
+                                _code, _term = _lookup_snomed(_name)
+                                snomed_entries.append({
+                                    "diagnosis": _name,
+                                    "snomed_term": _term or "None",
+                                })
+                        if snomed_entries:
+                            mirror_text(
+                                legacy_prefix,
+                                "snomed_diagnosis.txt",
+                                build_snomed_txt(snomed_entries),
+                            )
+
+                        # 5. study_metadata.json
+                        from src.models.differential_diagnosis import DifferentialDiagnosis as _DD2
+                        _dd_count_result = await session.execute(
+                            select(func.count(_DD2.id)).where(_DD2.case_id == case_id)
+                        )
+                        _n_diffs = _dd_count_result.scalar() or 1
+                        _llm_model = getattr(settings, "DEFAULT_LLM_MODEL", None) or settings.DEFAULT_LLM_PROVIDER
+                        _ts = (case.created_at or datetime.now(tz=_tz.utc)).isoformat()
+                        mirror_json(
+                            legacy_prefix,
+                            "study_metadata.json",
+                            build_study_metadata(
+                                prefix=legacy_prefix,
+                                llm_provider=_llm_model,
+                                total_questions=case.max_question_rounds or 0,
+                                n_differentials=_n_diffs,
+                                timestamp=_ts,
+                            ),
+                        )
+            except Exception:
+                pass
 
         display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
         if recommended_rounds == 0:

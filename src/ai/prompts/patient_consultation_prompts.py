@@ -80,7 +80,8 @@ Return the output in the following JSON format:
   "Questions": [
     {{
       "question": "<question>",
-      "answer_options": ["<answer1>", "<answer2>", ...]
+      "answer_options": ["<answer1>", "<answer2>", ...],
+      "reason": "<brief clinical reason why this question helps narrow the diagnosis>"
     }}
   ]
 }}
@@ -251,7 +252,7 @@ Current date and time:
 
 Respond in JSON only. No other text.
 You MUST always return a question — never return an empty response:
-{{"doubt_present": "yes", "Questions": [{{"question": "<patient-friendly question>", "answer_options": ["<option1>", "<option2>", ...]}}]}}
+{{"doubt_present": "yes", "Questions": [{{"question": "<patient-friendly question>", "answer_options": ["<option1>", "<option2>", ...], "reason": "<brief clinical reason why this question helps narrow the diagnosis>"}}]}}
 """)
 
     @staticmethod

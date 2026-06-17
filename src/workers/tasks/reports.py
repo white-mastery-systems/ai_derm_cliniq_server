@@ -350,6 +350,7 @@ def generate_report_task(self, case_id: str) -> None:
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
         # ── 1. Load case with all related data ──────────────────────── #
+        legacy_prefix = None
         async with factory() as session:
             result = await session.execute(
                 select(Case)
@@ -364,6 +365,10 @@ def generate_report_task(self, case_id: str) -> None:
                 )
             )
             case = result.scalar_one_or_none()
+            if case is not None:
+                from src.storage.legacy_sync import get_legacy_prefix as _get_legacy_prefix
+                _diag_name = case.case_title or "unknown_diagnosis"
+                legacy_prefix = await _get_legacy_prefix(session, case, _diag_name)
 
         if case is None:
             logger.error("generate_report_task_case_not_found", case_id=case_id)
@@ -465,7 +470,10 @@ def generate_report_task(self, case_id: str) -> None:
             return
 
         # ── 6. Upload to GCS ─────────────────────────────────────────── #
-        gcs_path = f"cases/{case_id}/reports/report_doctor.pdf"
+        if legacy_prefix:
+            gcs_path = f"{legacy_prefix}/report.pdf"
+        else:
+            gcs_path = f"cases/{case_id}/reports/report_doctor.pdf"
         try:
             gcs.upload_file(gcs_path, pdf_bytes, content_type="application/pdf")
         except Exception as exc:
