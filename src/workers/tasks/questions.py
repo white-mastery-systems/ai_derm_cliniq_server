@@ -652,6 +652,11 @@ def refine_analysis_task(self, case_id: str) -> None:
             case.question_round = new_round
             max_rounds = case.max_question_rounds
 
+            # Snapshot BEFORE _finalize_case — which overwrites case.case_title with the
+            # final diagnosis. All mirror code below must use this snapshot so every round
+            # writes to the same legacy GCS folder (keyed on the initial diagnosis).
+            _mirror_case_title = case.case_title
+
             if new_round >= max_rounds:
                 # Max rounds reached — finalize
                 await _finalize_case(session, case_id, conv_history, visual_desc, new_diff_json, follow_up_context, patient_particulars)
@@ -674,10 +679,8 @@ def refine_analysis_task(self, case_id: str) -> None:
                     build_question_answer_txt,
                     mirror_text,
                 )
-                # Use case_title (initial diagnosis) — never the current-round
-                # diagnosis — so all rounds write to the same GCS folder.
-                if case.case_title:
-                    legacy_prefix = await get_legacy_prefix(session, case, case.case_title)
+                if _mirror_case_title:
+                    legacy_prefix = await get_legacy_prefix(session, case, _mirror_case_title)
                     if legacy_prefix:
                         all_msgs = await _get_all_messages(session, case_id)
                         ai_msgs_sorted = sorted(
@@ -720,8 +723,8 @@ def refine_analysis_task(self, case_id: str) -> None:
                     mirror_bytes,
                     mirror_json,
                 )
-                if case.case_title:
-                    _prefix = await get_legacy_prefix(session, case, case.case_title)
+                if _mirror_case_title:
+                    _prefix = await get_legacy_prefix(session, case, _mirror_case_title)
                     if _prefix:
                         _imgs_result = await session.execute(
                             select(CaseImage)
