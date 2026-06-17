@@ -554,5 +554,16 @@ async def transcribe_voice_note(
         logger.error("whisper_transcription_failed", case_id=case_id, error=str(exc))
         raise AIServiceException(message=f"Voice transcription failed: {exc}")
 
+    # ── Legacy mirror: prescription.txt (best-effort) ──────────────────── #
+    try:
+        if case.case_title:
+            from src.storage.legacy_sync import get_legacy_prefix, mirror_text
+            _prefix = await get_legacy_prefix(db, case, case.case_title)
+            if _prefix:
+                mirror_text(_prefix, "prescription.txt", transcript)
+                logger.info("mirror_prescription_txt_ok", case_id=case_id)
+    except Exception:
+        pass
+
     logger.info("voice_note_transcribed", case_id=case_id, chars=len(transcript))
     return VoiceNoteResponse(case_id=case_id, transcript=transcript)

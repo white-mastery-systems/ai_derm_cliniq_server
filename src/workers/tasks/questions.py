@@ -419,8 +419,9 @@ def generate_questions_task(self, case_id: str) -> None:
                         build_doubts_txt,
                         mirror_text,
                     )
-                    # Use the initial diagnosis (case_title) — fixed at first analysis,
-                    # never updated — so all rounds write to the same GCS folder.
+                    # get_legacy_prefix anchors the slug to round-0 DifferentialDiagnosis,
+                    # so the path is stable even if case_title is later updated by
+                    # _finalize_case or the doctor. diag_name is only the fallback.
                     diag_name = case.case_title
                     if diag_name:
                         legacy_prefix = await get_legacy_prefix(session, case, diag_name)
@@ -672,11 +673,16 @@ def refine_analysis_task(self, case_id: str) -> None:
                 diagnosis=most_probable_name,
             )
 
-            # Mirror question_answer.txt to legacy GCS (best-effort)
+            # Mirror question_answer.txt, differential_diagnoses.txt, and chat_history.txt
+            # to legacy GCS after each Q&A round (best-effort — never blocks primary flow).
             try:
+                from src.models.patient_profile import PatientProfile as _PP2
+                from src.models.visual_description import VisualDescription as _VD2
                 from src.storage.legacy_sync import (
-                    get_legacy_prefix,
+                    build_all_differentials_txt,
+                    build_chat_history_with_qa_txt,
                     build_question_answer_txt,
+                    get_legacy_prefix,
                     mirror_text,
                 )
                 if _mirror_case_title:
@@ -708,6 +714,66 @@ def refine_analysis_task(self, case_id: str) -> None:
                             legacy_prefix,
                             "question_answer.txt",
                             build_question_answer_txt(qa_pairs),
+                        )
+
+                        # Update differential_diagnoses.txt with ALL rounds accumulated so far.
+                        # Old app: VISION BASED DIFFERENTIALS (round 0) + DIFFERENTIAL AFTER
+                        # ITERATION NO. N for each subsequent Q&A refinement round.
+                        _all_dd_result = await session.execute(
+                            select(DifferentialDiagnosis)
+                            .where(DifferentialDiagnosis.case_id == case_id)
+                            .order_by(DifferentialDiagnosis.round_number)
+                        )
+                        _diffs_data: list[tuple[int, dict]] = []
+                        for _dd in _all_dd_result.scalars():
+                            try:
+                                _d = json.loads(_dd.diagnosis_json)
+                            except Exception:
+                                _d = {}
+                            _diffs_data.append((_dd.round_number, _d))
+                        if _diffs_data:
+                            mirror_text(
+                                legacy_prefix,
+                                "differential_diagnoses.txt",
+                                build_all_differentials_txt(_diffs_data),
+                            )
+
+                        # Update chat_history.txt to include all Q&A messages so far.
+                        # Old app's periodic_save() appended every turn after the visual desc.
+                        from datetime import date as _date3
+                        _age_str2 = "Unknown"
+                        _sex_str2 = "Unknown"
+                        if case.dependent_id:
+                            if case.dependent_dob:
+                                _age_str2 = str((_date3.today() - case.dependent_dob).days // 365)
+                            _sex_str2 = case.dependent_gender or "Unknown"
+                        else:
+                            _pp_result2 = await session.execute(
+                                select(_PP2).where(_PP2.user_id == case.patient_id)
+                            )
+                            _pp2 = _pp_result2.scalar_one_or_none()
+                            if _pp2 and _pp2.date_of_birth:
+                                _age_str2 = str((_date3.today() - _pp2.date_of_birth).days // 365)
+                            _sex_str2 = (_pp2.gender or "Unknown") if _pp2 else "Unknown"
+                        # Use round-0 visual description (locked at initial analysis — matches
+                        # old app which never updated lesion_description during Q&A).
+                        _vd_result2 = await session.execute(
+                            select(_VD2)
+                            .where(_VD2.case_id == case_id, _VD2.round_number == 0)
+                        )
+                        _vd2 = _vd_result2.scalar_one_or_none()
+                        _desc_dict2: dict = {}
+                        if _vd2 and _vd2.description_json:
+                            try:
+                                _desc_dict2 = json.loads(_vd2.description_json)
+                            except Exception:
+                                pass
+                        mirror_text(
+                            legacy_prefix,
+                            "chat_history.txt",
+                            build_chat_history_with_qa_txt(
+                                _age_str2, _sex_str2, _desc_dict2, ai_msgs_sorted, pat_answers
+                            ),
                         )
             except Exception:
                 pass

@@ -246,6 +246,12 @@ async def create_review(
         except Exception as exc:
             logger.warning("notify_patient_review_complete_enqueue_failed", error=str(exc))
 
+        try:
+            from src.storage.legacy_sync import mirror_doctor_initiated_case
+            await mirror_doctor_initiated_case(db, case, review)
+        except Exception:
+            pass
+
     return _to_response(review)
 
 
@@ -403,6 +409,21 @@ async def update_review(
             )
         except Exception as exc:
             logger.warning("notify_patient_status_update_enqueue_failed", error=str(exc))
+
+    # ── Legacy GCS mirror (best-effort — never blocks primary flow) ──────── #
+    if request.qa_history is not None:
+        try:
+            from src.storage.legacy_sync import mirror_doctor_agent_conversation
+            await mirror_doctor_agent_conversation(db, case, request.qa_history)
+        except Exception:
+            pass
+
+    if review_just_completed:
+        try:
+            from src.storage.legacy_sync import mirror_doctor_initiated_case
+            await mirror_doctor_initiated_case(db, case, review)
+        except Exception:
+            pass
 
     return _to_response(review)
 
