@@ -79,7 +79,7 @@ services:
     env_file:
       - ../.env
     ports:
-      - "8000:8000"
+      - "8880:8880"
     depends_on:
       db:
         condition: service_healthy
@@ -89,7 +89,7 @@ services:
       # Mount GCP credentials file (path set in .env)
       - ${GCS_CREDENTIALS_FILE:-/dev/null}:/app/gcp_credentials.json:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8880/health"]
       interval: 30s
       timeout: 10s
       retries: 3

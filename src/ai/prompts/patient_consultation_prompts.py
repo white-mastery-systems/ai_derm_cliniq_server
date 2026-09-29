@@ -12,6 +12,15 @@ complaints, visual description text, and differential diagnosis JSON.
 from __future__ import annotations
 
 
+def _p(key: str, default: str) -> str:
+    try:
+        from src.ai.prompt_registry import get_prompt
+        v = get_prompt(key)
+        return v if v else default
+    except Exception:
+        return default
+
+
 class PatientConsultationPrompts:
     """Factory for patient-facing consultation prompts."""
 
@@ -50,38 +59,33 @@ Return the output in the following JSON format:
     @staticmethod
     def generate_questions_from_complaints() -> str:
         """
-        Generate 3 follow-up questions from patient complaints when no image exists.
+        Generate 1 follow-up question from patient complaints when no image exists.
 
-        Template vars: {age}, {sex}, {complaints}
+        Template vars: {age}, {sex}, {complaints}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: Questions JSON schema.
         Used in: no-image consultation Q&A rounds.
         """
-        return """You are a dermatology AI assistant. The patient has reported specific complaints but no visible lesions (or no image provided).
-Based on the complaints, age, and sex, generate 3 relevant questions to ask the patient to narrow down the diagnosis.
-Provide answer options for each question.
+        return _p("patient_questions_no_image", """You are a dermatology AI assistant. The patient has reported specific complaints but no visible lesions (or no image provided).
+Based on the complaints, age, and sex, generate 1 relevant question to ask the patient to narrow down the diagnosis. Choose the single most important question that will provide the most diagnostic value.
+Provide answer options for the question.
 
 Age: {age}
 Sex: {sex}
 Complaints: {complaints}
+{follow_up_context}
 
 Return the output in the following JSON format:
 {{
   "Questions": [
     {{
-      "question": "<question1>",
-      "answer_options": ["<answer1>", "<answer2>", ...]
-    }},
-    {{
-      "question": "<question2>",
-      "answer_options": ["<answer1>", "<answer2>", ...]
-    }},
-    {{
-      "question": "<question3>",
-      "answer_options": ["<answer1>", "<answer2>", ...]
+      "question": "<question>",
+      "answer_options": ["<answer1>", "<answer2>", ...],
+      "reason": "<brief clinical reason why this question helps narrow the diagnosis>"
     }}
   ]
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 3. Differential from complaints (no image)
@@ -92,7 +96,8 @@ Return the output in the following JSON format:
         """
         Generate initial differential when only complaints are available (no image).
 
-        Template vars: {age}, {sex}, {complaints}, {prescription}
+        Template vars: {age}, {sex}, {complaints}, {prescription}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: differential-diagnosis JSON schema.
         Used in: no-image path initial differential.
         """
@@ -106,23 +111,26 @@ Age: {age}
 Sex: {sex}
 Complaints: {complaints}
 Previous prescription: {prescription}
+{follow_up_context}
 
 The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": "high",
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": "medium",
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer": "<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "medium", "high", "very high". Do not use numbers.
 
 Be sure not to include '/' in the diagnosis.
 """
@@ -138,11 +146,12 @@ Be sure not to include '/' in the diagnosis.
         Keeps or updates most-probable diagnosis and ordering.
 
         Template vars: {conversation_history}, {previous_differential},
-                       {visual_description}, {prescription}
+                       {visual_description}, {prescription}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: differential-diagnosis JSON schema.
         Used in: after every patient answer round.
         """
-        return """Create a revised json from the current json of Disease and differentials based on any new findings that might have appeared in the last message of the conversation. You can choose to keep the most probable diagnosis and the order of differential diagnosis and their likelihood as it is or can choose to change.
+        return _p("patient_diagnosis_refinement", """Create a revised json from the current json of Disease and differentials based on any new findings that might have appeared in the last message of the conversation. You can choose to keep the most probable diagnosis and the order of differential diagnosis and their likelihood as it is or can choose to change.
 You are also being provided with the patient particulars and the visual description of the lesion for additional context.
 
 Conversation history:
@@ -156,6 +165,7 @@ Visual description:
 
 Previous prescription:
 {prescription}
+{follow_up_context}
 
 Generate a structured JSON output that includes:
 
@@ -168,37 +178,93 @@ The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": "high",
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": "medium",
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
-"""
+
+IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "medium", "high", "very high". Do not use numbers.
+""")
 
     # ------------------------------------------------------------------
     # 5. Doctor-agent doubts (patient-side)
     # ------------------------------------------------------------------
 
     @staticmethod
+    def generate_question_from_context() -> str:
+        """
+        Single-call replacement for the old two-step
+        generate_doctor_doubts_patient() → generate_follow_up_questions() chain.
+
+        Thinks medically first (dermatologist reasoning), then immediately
+        frames the single most important doubt as a patient-friendly question.
+        Cuts round latency from ~29s (2 Gemini calls) to ~15s (1 Gemini call).
+
+        Template vars: {conversation}, {visual_description}, {diagnoses},
+                       {previous_questions}, {prescription}, {datetime},
+                       {follow_up_context}
+        follow_up_context is an empty string for new complaints.
+        Returns: always {{"doubt_present":"yes","Questions":[...]}} — never doubt_present:no,
+                 because the user's chosen round count is the only stop signal.
+        Used in: Celery `generate_questions_task` round 1+.
+        """
+        return _p("patient_follow_up_question", """You are an intelligent dermatologist AI assistant conducting a patient consultation.
+
+You have access to the conversation history, visual description, differential diagnosis, and previous prescription.
+
+Step 1 — Think medically:
+Review everything available and identify the single most clinically useful aspect to explore next.
+Consider symptom patterns, triggers, duration, progression, severity, body areas affected, associated systemic symptoms, family history, lifestyle, occupation, medications, allergies, or response to previous treatments.
+Even when the leading diagnosis seems clear, there is always something valuable to explore — treatment preferences, lifestyle impact, comorbidities, adherence factors, or anything that helps personalise management.
+
+Step 2 — Frame for the patient:
+Convert that one clinical aspect into a single clear, simple question a non-medical patient can understand and answer.
+Provide as many descriptive answer options as needed to cover all likely responses.
+Do NOT repeat any question already asked in the conversation.
+Do NOT ask anything irrelevant to this specific case.
+
+Conversation:
+{conversation}
+
+Visual description:
+{visual_description}
+
+Diagnoses:
+{diagnoses}
+
+Previous questions asked:
+{previous_questions}
+
+Previous prescription:
+{prescription}
+
+Current date and time:
+{datetime}
+{follow_up_context}
+
+Respond in JSON only. No other text.
+You MUST always return a question — never return an empty response:
+{{"doubt_present": "yes", "Questions": [{{"question": "<patient-friendly question>", "answer_options": ["<option1>", "<option2>", ...], "reason": "<brief clinical reason why this question helps narrow the diagnosis>"}}]}}
+""")
+
+    @staticmethod
     def generate_doctor_doubts_patient() -> str:
         """
-        Dermatologist agent raises doubts/queries based on full consultation context.
-        Doubts are then converted to patient questions by generate_follow_up_questions().
+        DEPRECATED — replaced by generate_question_from_context() which does
+        both doubt-raising and question generation in a single Gemini call.
+        Kept for reference only.
 
         Template vars: {conversation}, {visual_description}, {diagnoses},
                        {prescription}, {datetime}
         Returns: {{"doubt_present":"yes","doubt":[...]}} or {{"doubt_present":"no"}}
-        Used in: Celery `generate_questions_task` after each Q&A round.
-
-        IMPORTANT: Sequential chain — call this ONCE per round, then pass doubts
-        to generate_follow_up_questions(). Do NOT run 3 parallel doubt chains.
         """
         return """You are a part of a dermatological diagnostic application where you are playing the role of an intelligent dermatologist agent.
 The application takes in photographs of the patient, generates visual description and differential diagnosis from the photograph. It also takes in text extracted from OCR of previous prescription. Remember the prescription might be for the same or any other disease. Based on this it generates questions which are answered by the patient.
@@ -248,7 +314,7 @@ If doubt absent:
     @staticmethod
     def generate_follow_up_questions() -> str:
         """
-        Convert doctor-agent doubts into 3 patient-friendly questions with answer options.
+        Convert doctor-agent doubts into 1 patient-friendly question with answer options.
         Prevents repeating questions from previous rounds.
 
         Template vars: {doubts}, {conversation_history}, {diagnoses},
@@ -256,11 +322,11 @@ If doubt absent:
         Returns: Questions JSON schema.
         Used in: Celery `generate_questions_task` — called AFTER generate_doctor_doubts_patient().
         """
-        return """You are a question generating agent whose job is to generate questions based on the doubts raised by the doctor agent.
-Based on the doubt raised by the dermatologist agent frame three questions which clears one or more of the doubt.
-Also provide as many descriptive answer choices for each question as possible that encompasses all likely patient responses.
+        return """You are a question generating agent whose job is to generate a question based on the doubts raised by the doctor agent.
+Based on the doubts raised by the dermatologist agent, choose the single most important doubt and frame one question that best clears it.
+Also provide as many descriptive answer choices for the question as possible that encompasses all likely patient responses.
 Remember not to repeat any question from the set of previous questions.
-You are also being provided with conversation history, differential diagnosis list, previous prescription and visual description just to add context to your questions and answer choices.
+You are also being provided with conversation history, differential diagnosis list, previous prescription and visual description just to add context to your question and answer choices.
 While choosing the question to ask, remember to not repeat any question which has already been asked in the conversation earlier unless the doubts mentioned by the doctor clearly states that it wants some clarification. In that case also don't repeat a similar question more than twice under any circumstance. If questions for all doubts have been asked in the previous conversation, you can generate any other question relevant to this case.
 In case you are repeating the question clearly mention why you are asking the question again while asking the question.
 Also under no circumstances ask same/similar question thrice even if the same doubt has been raised by the doctor agent. Don't ask any question which is not relevant to the current case.
@@ -288,15 +354,7 @@ Remember to give your response in json format as below:
 {{
   "Questions": [
     {{
-      "question": "<question1>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question2>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question3>",
+      "question": "<question>",
       "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
     }}
   ]
@@ -339,11 +397,12 @@ Respond only in the following JSON format:
         Generate a structured patient case summary (<150 words) for handoff to doctor.
 
         Template vars: {conversation_history}, {visual_language_model_text},
-                       {possible_diagnoses}
+                       {possible_diagnoses}, {personal_particulars}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: {{"case_summary": "...", "display_statements": [...]}}
         Used in: final step of patient consultation before doctor review.
         """
-        return """Based on the user's age, sex, medical history, answers given by user in the chat, and the visual language model's analysis of the uploaded photograph, create a structured case summary in less than 150 words.
+        return _p("patient_case_summary", """Based on the user's age, sex, medical history, answers given by user in the chat, and the visual language model's analysis of the uploaded photograph, create a structured case summary in less than 150 words.
 At the end give the most probable diagnosis with its likelihood taken from 'Possible Diagnoses' to you and place all other diagnoses in differential diagnoses with their likelihood.
 Your output should follow this exact structure for easy parsing:
 
@@ -355,7 +414,12 @@ Your output should follow this exact structure for easy parsing:
 6. **Most Probable Diagnosis**: Clearly state one single most probable diagnosis with its likelihood.
 7. **Differential Diagnosis**: Clearly state other differential diagnoses to consider with their likelihood.
 
+If this is a follow-up visit (previous visit context provided below), begin the History section with a reference to the previous visit diagnosis and note whether symptoms have improved, worsened, or stayed the same.
+
 Do not skip any part of the context provided. Do not fabricate any facts that are not present.
+
+Patient particulars:
+{personal_particulars}
 
 Conversation history:
 {conversation_history}
@@ -365,6 +429,7 @@ Visual language model text:
 
 Possible diagnoses:
 {possible_diagnoses}
+{follow_up_context}
 
 Return JSON in the following format:
 {{
@@ -377,7 +442,7 @@ Return JSON in the following format:
 
 The display_statements should be concise, non-repetitive, and avoid medical advice.
 Keep them grounded in the provided context (age/sex/complaint/visual findings).
-"""
+""")
 
     # ------------------------------------------------------------------
     # 9. Patient chatbot (post-summary)
@@ -412,17 +477,37 @@ Last few conversations:
         Patient-friendly treatment plan based on differential and conversation.
 
         Template vars: {conversation}, {differential}
-        Returns: free-text response.
-        Used in: patient report section.
+        Returns: structured JSON (see format below).
+        Used in: patient treatment plan button + report section.
         """
-        return """Imagine that you are a dermatologist treating a patient. Generate a comprehensive treatment plan for the patient telling about the medications, lifestyle changes, dietary modifications/requirements based on their last few conversations with the agent and the differential. Tailor the plan based on the patient's age, sex and their severity of illness.
+        return """You are a dermatologist explaining a treatment plan to a patient in simple, friendly language. Based on the conversation history and differential diagnosis below, generate a comprehensive treatment plan tailored to the patient's condition and severity.
 
 Last few conversations:
 {conversation}
 
 Differential:
 {differential}
-"""
+
+Return ONLY a valid JSON object in this exact format (no markdown, no extra text):
+{{
+  "overview": "<2-3 sentence plain-English summary of the treatment approach>",
+  "medications": [
+    {{
+      "name": "<medication name>",
+      "purpose": "<what it does in simple terms>",
+      "dosage": "<dosage>",
+      "frequency": "<how often>",
+      "duration": "<how long>"
+    }}
+  ],
+  "lifestyle_modifications": [
+    "<one actionable lifestyle tip per item>"
+  ],
+  "dietary_recommendations": [
+    "<one dietary tip per item>"
+  ],
+  "follow_up": "<when the patient should see a doctor again>"
+}}"""
 
     # ------------------------------------------------------------------
     # 11. Disease cause / pathogenesis (patient-friendly)
@@ -498,4 +583,98 @@ Damaged JSON:
 
 Correct format:
 {correct_format}
+"""
+
+    # ------------------------------------------------------------------
+    # 14. Systemic / red flag check
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def red_flag_check(
+        complaint: str,
+        answers: str,
+        patient_reported_symptoms: str = "",
+    ) -> str:
+        """
+        Check patient complaint, Q&A answers, and self-reported systemic symptoms
+        for urgent / red-flag conditions.
+
+        patient_reported_symptoms: pre-formatted bullet list of symptoms the patient
+        selected on the Systemic Check screen. Empty string if none reported.
+
+        Returns JSON: {{"flags": [...], "advice": "<string or null>"}}
+        flags is an empty list when no red flags are found.
+        advice is a patient-readable warning present only when flags is non-empty.
+        """
+        symptoms_section = (
+            f"Patient self-reported systemic symptoms:\n{patient_reported_symptoms}"
+            if patient_reported_symptoms
+            else "Patient self-reported systemic symptoms:\nNone reported"
+        )
+        return f"""You are a dermatology triage assistant.
+Review the patient's presenting complaint, their answers to follow-up questions, and
+any systemic symptoms they self-reported on the Systemic Check screen.
+Identify any urgent 'red flag' symptoms that require immediate medical attention.
+
+Red flag examples (not exhaustive):
+- Rapidly changing or bleeding mole (possible melanoma)
+- Systemic symptoms: fever, weight loss, night sweats alongside skin changes
+- Signs of cellulitis with spreading redness, warmth, systemic fever
+- Stevens-Johnson syndrome indicators: blistering mucous membranes
+- Anaphylaxis indicators: hives + throat tightness + difficulty breathing
+- Rapidly spreading purpuric rash (possible meningococcal)
+
+Presenting complaint:
+{complaint}
+
+Patient answers:
+{answers}
+
+{symptoms_section}
+
+Respond ONLY with valid JSON in this exact format:
+{{"flags": ["<flag1>", "<flag2>"], "advice": "<patient-friendly urgent advice, or null if no flags>"}}
+
+If no red flags are found: {{"flags": [], "advice": null}}
+"""
+
+    # ------------------------------------------------------------------
+    # Case summary AI query (patient Ask AI feature)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def case_query() -> str:
+        """
+        Answer a free-text patient question about their own case.
+
+        Template vars: {diagnosis}, {differential_json}, {case_summary},
+                       {conversation_history}, {question}
+        Used in: POST /cases/{case_id}/ai/query
+        """
+        return """You are a compassionate AI health assistant helping a patient understand their dermatology case summary.
+
+You have access to the following information about the patient's case:
+
+**AI Diagnosis:** {diagnosis}
+
+**Full Differential:** {differential_json}
+
+**Case Summary:**
+{case_summary}
+
+**Q&A History:**
+{conversation_history}
+
+---
+
+The patient has asked: "{question}"
+
+Instructions:
+- Answer clearly and in simple, non-technical language the patient can understand.
+- If the question is about treatment, explain general options but remind them their doctor will give the final plan.
+- If the question is about investigations, mention what is typically recommended for the diagnosis.
+- Do NOT speculate beyond what the case data supports.
+- Keep the answer concise — 2 to 4 short paragraphs maximum.
+- Do not repeat the diagnosis name unnecessarily.
+- Never say you cannot help — always give a useful, grounded answer based on the case data above.
 """

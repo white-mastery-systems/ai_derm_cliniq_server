@@ -31,8 +31,9 @@ limited access (configurable via RBAC).
 """
 
 import enum
+from datetime import datetime
 
-from sqlalchemy import Boolean, Enum, String
+from sqlalchemy import Boolean, DateTime, Enum, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, new_uuid
@@ -91,7 +92,7 @@ class User(TimestampMixin, Base):
         comment="Display name shown in the app",
     )
     role: Mapped[UserRole] = mapped_column(
-        Enum(UserRole, name="user_role_enum", create_type=True),
+        Enum(UserRole, name="user_role_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         index=True,
         comment="patient | doctor | admin",
@@ -114,6 +115,16 @@ class User(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Device / Push Notifications
+    # ------------------------------------------------------------------ #
+    fcm_token: Mapped[str | None] = mapped_column(
+        String(512),
+        nullable=True,
+        comment="Firebase Cloud Messaging token — updated on every login. "
+                "NULL means the user has not granted notification permission.",
+    )
+
+    # ------------------------------------------------------------------ #
     # Account State
     # ------------------------------------------------------------------ #
     is_active: Mapped[bool] = mapped_column(
@@ -122,11 +133,26 @@ class User(TimestampMixin, Base):
         nullable=False,
         comment="False = account suspended. Cannot log in.",
     )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when admin set is_active=True (doctor approval)",
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when admin set is_active=False after review (doctor rejection)",
+    )
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         nullable=False,
         comment="True after email confirmation link is clicked",
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when email was verified",
     )
 
     # ------------------------------------------------------------------ #
@@ -157,6 +183,11 @@ class User(TimestampMixin, Base):
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(  # noqa: F821
         "RefreshToken",
         back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    dependents: Mapped[list["Dependent"]] = relationship(  # noqa: F821  # type: ignore[name-defined]
+        "Dependent",
+        back_populates="patient",
         cascade="all, delete-orphan",
     )
 

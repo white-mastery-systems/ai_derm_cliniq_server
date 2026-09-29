@@ -68,7 +68,7 @@ class Message(TimestampMixin, Base):
     # Message Content
     # ------------------------------------------------------------------ #
     role: Mapped[MessageRole] = mapped_column(
-        Enum(MessageRole, name="message_role_enum", create_type=True),
+        Enum(MessageRole, name="message_role_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         comment="ai | patient | doctor",
     )
@@ -91,6 +91,11 @@ class Message(TimestampMixin, Base):
         Integer,
         nullable=True,
         comment="Position within a round (0-indexed). NULL for free-text replies.",
+    )
+    image_url: Mapped[str | None] = mapped_column(
+        String(2000),
+        nullable=True,
+        comment="Signed GCS URL of an image the patient attached to this answer",
     )
 
     # ------------------------------------------------------------------ #

@@ -1,0 +1,69 @@
+﻿TASK 2 — VERIFY DATA ISOLATION
+Tested On : 2026-05-04
+Server    : http://148.113.16.40:8880/api/v1
+======================================================================
+
+======================================================================
+[2.1 | Patient A — Create Case]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/cases
+HEADER   : Authorization: Bearer <token>
+BODY     : {
+    "has_visible_lesion":  true,
+    "consent_ai_analysis":  true,
+    "consultation_type":  "new_complaint",
+    "is_for_self":  true,
+    "presenting_complaint":  "Rash on arm"
+}
+STATUS   : 2xx OK
+RESPONSE : {"id":"d1da3499-87ef-4627-b1c1-c04056549d25","case_number":9112,"display_id":"AI-9112","case_title":null,"original_case_id":null,"patient_id":"fc3f8aa1-3af4-483f-868f-eebaa933403f","doctor_id":null,"consultation_type":"new_complaint","has_visible_lesion":true,"consent_ai_analysis":true,"consent_ai_analysis_at":"2026-05-04T16:25:05.634403Z","consent_research":false,"is_for_self":true,"dependent_name":null,"dependent_relationship":null,"dependent_dob":null,"dependent_gender":null,"ai_status":"pending","clinical_status":"active","body_location":null,"symptom_progression":null,"symptom_tags":[],"is_bookmarked":false,"presenting_complaint":"Rash on arm","case_summary":null,"celery_task_id":null,"question_round":0,"max_question_rounds":5,"image_count":0,"images":[],"patient_name":null,"patient_age":null,"patient_gender":null,"patient_avatar_url":null,"doctor_name":null,"doctor_specialization":null,"doctor_clinic_name":null,"doctor_avatar_url":null,"visit_index":null,"total_visits":null,"created_at":"2026-05-04T16:25:05.633107Z","updated_at":"2026-05-04T16:25:05.633107Z"}
+
+======================================================================
+[2.2 | Patient B reads Patient A case → EXPECT 404]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/cases/d1da3499-87ef-4627-b1c1-c04056549d25
+HEADER   : Authorization: Bearer <token>
+STATUS   : 404
+RESPONSE : {"error":{"code":"CASE_NOT_FOUND","message":"Case not found","status":404,"details":{}}}
+RESULT   : PASS - 404 returned (enumeration safe)
+
+======================================================================
+[2.3 | Patient B updates Patient A case → EXPECT 404]
+REQUEST  : PATCH http://148.113.16.40:8880/api/v1/cases/d1da3499-87ef-4627-b1c1-c04056549d25
+HEADER   : Authorization: Bearer <token>
+BODY     : {
+    "presenting_complaint":  "Injected"
+}
+STATUS   : 404
+RESPONSE : {"error":{"code":"CASE_NOT_FOUND","message":"Case not found","status":404,"details":{}}}
+RESULT   : PASS - 404 returned
+
+======================================================================
+[2.4 | Patient B deletes Patient A case → EXPECT 404]
+REQUEST  : DELETE http://148.113.16.40:8880/api/v1/cases/d1da3499-87ef-4627-b1c1-c04056549d25
+HEADER   : Authorization: Bearer <token>
+STATUS   : 404
+RESPONSE : {"error":{"code":"CASE_NOT_FOUND","message":"Case not found","status":404,"details":{}}}
+RESULT   : PASS - 404 returned
+
+======================================================================
+[2.5 | Patient A list cases — only own data]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/cases
+HEADER   : Authorization: Bearer <token>
+STATUS   : 2xx OK
+RESPONSE : {"items":[{"id":"d1da3499-87ef-4627-b1c1-c04056549d25","case_number":9112,"display_id":"AI-9112","case_title":null,"consultation_type":"new_complaint","ai_status":"pending","clinical_status":"active","is_for_self":true,"dependent_name":null,"dependent_relationship":null,"consent_ai_analysis":true,"has_visible_lesion":true,"body_location":null,"symptom_progression":null,"symptom_tags":[],"case_summary":null,"is_bookmarked":false,"image_count":0,"patient_name":"Test PatientA","patient_avatar_url":null,"doctor_name":null,"doctor_specialization":null,"doctor_clinic_name":null,"doctor_avatar_url":null,"created_at":"2026-05-04T16:25:05.633107Z","updated_at":"2026-05-04T16:25:05.633107Z"},{"id":"a65e544f-6a4c-40dc-8232-5c8c1b5f758d","case_number":9111,"display_id":"AI-9111","case_title":null,"consultation_type":"new_complaint","ai_status":"pending","clinical_status":"active","is_for_self":true,"dependent_name":null,"dependent_relationship":null,"consent_ai_analysis":true,"has_visible_lesion":true,"body_location":null,"symptom_progression":null,"symptom_tags":[],"case_summary":null,"is_bookmarked":false,"image_count":0,"patient_name":"Test PatientA","patient_avatar_url":null,"doctor_name":null,"doctor_specialization":null,"doctor_clinic_name":null,"doctor_avatar_url":null,"created_at":"2026-05-04T16:22:04.237094Z","updated_at":"2026-05-04T16:22:04.237094Z"}],"total":2,"page":1,"page_size":20,"has_next":false}
+RESULT   : PASS - total=2, all belong to Patient A
+
+======================================================================
+[2.6 | Patient B list cases — zero (no cross-contamination)]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/cases
+HEADER   : Authorization: Bearer <token>
+STATUS   : 2xx OK
+RESPONSE : {"items":[],"total":0,"page":1,"page_size":20,"has_next":false}
+RESULT   : PASS - total=0 confirmed
+
+======================================================================
+[2.7 | Patient A reads own case — EXPECT 200]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/cases/d1da3499-87ef-4627-b1c1-c04056549d25
+HEADER   : Authorization: Bearer <token>
+STATUS   : 2xx OK
+RESPONSE : {"id":"d1da3499-87ef-4627-b1c1-c04056549d25","case_number":9112,"display_id":"AI-9112","case_title":null,"original_case_id":null,"patient_id":"fc3f8aa1-3af4-483f-868f-eebaa933403f","doctor_id":null,"consultation_type":"new_complaint","has_visible_lesion":true,"consent_ai_analysis":true,"consent_ai_analysis_at":"2026-05-04T16:25:05.634403Z","consent_research":false,"is_for_self":true,"dependent_name":null,"dependent_relationship":null,"dependent_dob":null,"dependent_gender":null,"ai_status":"pending","clinical_status":"active","body_location":null,"symptom_progression":null,"symptom_tags":[],"is_bookmarked":false,"presenting_complaint":"Rash on arm","case_summary":null,"celery_task_id":null,"question_round":0,"max_question_rounds":5,"image_count":0,"images":[],"patient_name":"Test PatientA","patient_age":36,"patient_gender":"female","patient_avatar_url":null,"doctor_name":null,"doctor_specialization":null,"doctor_clinic_name":null,"doctor_avatar_url":null,"visit_index":2,"total_visits":2,"created_at":"2026-05-04T16:25:05.633107Z","updated_at":"2026-05-04T16:25:05.633107Z"}
+RESULT   : PASS - owner can access own case

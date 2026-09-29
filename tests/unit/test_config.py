@@ -115,26 +115,26 @@ class TestValidation:
         """
         SECRET_KEY has no default, so Settings() without it must fail.
 
-        WHY monkeypatch.delenv?
-        -----------------------
-        pytest-env injects SECRET_KEY from pytest.ini into os.environ
-        before tests run. Pydantic BaseSettings reads os.environ, so
-        simply calling Settings(DATABASE_URL=...) won't fail — it finds
-        SECRET_KEY in the environment.
+        WHY monkeypatch.delenv + _env_file=None?
+        -----------------------------------------
+        Two sources can supply SECRET_KEY:
+        1. os.environ — monkeypatch.delenv removes it
+        2. The project .env file — pydantic-settings reads this by default
 
-        We must explicitly remove it from the environment for THIS test
-        so we can prove the validation fires. monkeypatch restores the
-        original value automatically after the test finishes.
+        We must neutralise both. Passing _env_file=None tells
+        pydantic-settings to skip the .env file for this call only,
+        ensuring the ValidationError actually fires.
+        monkeypatch restores the original env var after the test.
         """
         monkeypatch.delenv("SECRET_KEY", raising=False)
         with pytest.raises(ValidationError):
-            Settings(DATABASE_URL="postgresql+asyncpg://u:p@h/db")
+            Settings(DATABASE_URL="postgresql+asyncpg://u:p@h/db", _env_file=None)
 
     def test_missing_database_url_raises(self, monkeypatch):
         """DATABASE_URL has no default, so omitting it must fail."""
         monkeypatch.delenv("DATABASE_URL", raising=False)
         with pytest.raises(ValidationError):
-            Settings(SECRET_KEY="test-key")
+            Settings(SECRET_KEY="test-key", _env_file=None)
 
 
 class TestSingleton:

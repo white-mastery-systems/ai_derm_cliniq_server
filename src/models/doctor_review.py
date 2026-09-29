@@ -28,7 +28,7 @@ Stored as TEXT (JSON string) for maximum flexibility.
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, new_uuid
@@ -71,12 +71,31 @@ class DoctorReview(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # AI Diagnosis Validation — from "AI Diagnosis Correct?" Yes/No UI
+    # ------------------------------------------------------------------ #
+    is_ai_correct: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment="Doctor's verdict: True=AI was correct, False=AI was wrong",
+    )
+    selected_differentials: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON array of diagnosis names the doctor marked as correct (checkboxes)",
+    )
+    confidence_level: Mapped[str | None] = mapped_column(
+        String(20),
+        nullable=True,
+        comment="Doctor's confidence in confirmed diagnosis: low | high",
+    )
+
+    # ------------------------------------------------------------------ #
     # Review Content
     # ------------------------------------------------------------------ #
     confirmed_diagnosis: Mapped[str | None] = mapped_column(
-        String(500),
+        Text,
         nullable=True,
-        comment="Doctor's confirmed final diagnosis (may differ from AI's)",
+        comment="JSON array of confirmed diagnosis names — mirrors selected_differentials",
     )
     review_notes: Mapped[str | None] = mapped_column(
         Text,
@@ -90,10 +109,39 @@ class DoctorReview(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Doctor Q&A History — rounds of AI-generated clarifying questions
+    # ------------------------------------------------------------------ #
+    qa_history: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON array of {question, answer} pairs from doctor Q&A rounds",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Clinical Indicators — doctor-confirmed clinical signs from examination
+    # Shown as the 'Clinical Indicators' section on the Case Report screen
+    # e.g. ["History of topical steroid use", "Positive Nikolsky sign"]
+    # ------------------------------------------------------------------ #
+    clinical_indicators: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON array of clinical indicator strings confirmed by the doctor",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Diagnosis Type — clinical | histological | dermoscopic radio button
+    # ------------------------------------------------------------------ #
+    diagnosis_type: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="clinical | histological | dermoscopic",
+    )
+
+    # ------------------------------------------------------------------ #
     # Status & Timing
     # ------------------------------------------------------------------ #
     review_status: Mapped[ReviewStatus] = mapped_column(
-        Enum(ReviewStatus, name="review_status_enum", create_type=True),
+        Enum(ReviewStatus, name="review_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ReviewStatus.PENDING,
         index=True,

@@ -15,6 +15,15 @@ use an f-string to fill them before sending.
 from __future__ import annotations
 
 
+def _p(key: str, default: str) -> str:
+    try:
+        from src.ai.prompt_registry import get_prompt
+        v = get_prompt(key)
+        return v if v else default
+    except Exception:
+        return default
+
+
 class ImageAnalysisPrompts:
     """Factory for image-based dermatology prompts."""
 
@@ -31,15 +40,85 @@ class ImageAnalysisPrompts:
         Returns JSON: {"answer":"yes"} or {"answer":"no","reason":"..."}
         Used in: Celery task `inspect_images_task` (Layer 6)
         """
-        return """Determine whether the image(s) are legible and whether or not they allow for any meaningful dermatological observation.
+        return """You are reviewing an image submitted by a patient for a dermatology consultation.
+
+Decide whether the image is usable for skin analysis. Be LENIENT — accept the image if it shows any part of a human body or skin, even if the photo is slightly blurry, low resolution, poorly lit, or taken at an angle. Patients are not professional photographers.
+
+Only reject the image if it falls into one of these specific categories:
+- The image contains NO human skin or body part at all (e.g. a random object, plain background, text document)
+- The image is completely black, completely white, or fully corrupted/unreadable
+- The image is clearly a screenshot of a UI, cartoon, or digital graphic with no real skin present
+
+If in doubt, answer "yes".
 
 Give your answer in the json format as below:
-If the images are adequate for dermatological diagnosis: {"answer":"yes"}
-If the images are inadequate for dermatological diagnosis: {"answer":"no", "reason":"brief explanation of the issue(s) with the image(s)"}
+If the image is usable: {"answer":"yes"}
+If the image is completely unusable: {"answer":"no", "reason":"brief explanation"}
 """
 
     # ------------------------------------------------------------------
-    # 2. Visual description (no prior context)
+    # 2. Inspect + describe (combined gate — single call replaces two)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def inspect_and_describe() -> str:
+        """
+        Combined adequacy gate + visual description in one Gemini call.
+
+        Replaces running inspect_images() and get_description() sequentially.
+        Gemini checks the image quality first; if adequate it returns the full
+        lesion description in the same response. Saves one Gemini call (~5s).
+
+        Template vars: {personal_particulars}
+
+        Returns one of:
+          {"adequate": "no",  "reason": "<why rejected>"}
+          {"adequate": "yes", "type_of_lesion": ..., ... (full description schema)}
+
+        Used in: Celery `analyse_images_task` (merged initial analysis).
+        """
+        return """You are a dermatology assistant reviewing an image submitted by a patient.
+
+STEP 1 — Adequacy check:
+Decide if the image is usable for skin analysis. Be LENIENT — accept if it shows any part of human skin or body, even if slightly blurry, low resolution, poorly lit, or taken at an angle. Patients are not professional photographers.
+
+Only reject if:
+- No human skin or body part at all (random object, plain background, text document)
+- Completely black, completely white, or fully corrupted/unreadable
+- Clearly a screenshot of a UI, cartoon, or digital graphic with no real skin
+
+If in doubt, accept it.
+
+If the image is NOT adequate, return exactly:
+{{"adequate": "no", "reason": "<brief explanation>"}}
+
+STEP 2 — If adequate, describe the lesion:
+Provide a structured JSON of the visible lesion(s). Combine all images into one response.
+
+Personal particulars:
+{personal_particulars}
+
+If the image IS adequate, return this JSON (include adequate: yes):
+
+{{"adequate": "yes",
+ "type_of_lesion": "<describe the lesion type>",
+ "site": "<mention site of the lesion>",
+ "count": "<mention the number of lesions>",
+ "arrangement": "<describe the distribution>",
+ "size": "<approximate lesion size>",
+ "color_pattern": "<describe the color and pattern>",
+ "border": "<mention if well-defined or ill-defined>",
+ "surface_changes": "<describe scaling, crusting, ulceration, etc.>",
+ "presence_of_exudate_or_discharge": "<yes/no, and describe if present>",
+ "surrounding_skin_changes": "<mention any erythema, dryness, etc.>",
+ "secondary_changes": "<mention any secondary changes>",
+ "pattern_or_shape": "<describe any specific shape or distribution>",
+ "additional_notes": "<mention any extra details>",
+ "overall_description": "<provide a paragraph summarizing the lesion>"}}
+"""
+
+    # ------------------------------------------------------------------
+    # 3. Visual description (no prior context)
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -148,7 +227,8 @@ Ensure that your response follows this JSON format:
         Preliminary differential from image + demographics only.
         Run BEFORE any conversation context is collected.
 
-        Template vars: {personal_particulars}
+        Template vars: {personal_particulars}, {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: differential-diagnosis JSON schema.
         Used in: Celery `generate_differential_task` (initial pass).
         """
@@ -161,23 +241,27 @@ confidence in answer: high or medium or low
 Personal particulars:
 {personal_particulars}
 
+{follow_up_context}
+
 The JSON format should be strictly as follows:
 
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": "high",
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": "medium",
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "medium", "high", "very high". Do not use numbers.
 """
 
     # ------------------------------------------------------------------
@@ -217,18 +301,20 @@ The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": "high",
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": "medium",
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "medium", "high", "very high". Do not use numbers.
 
 Be sure not to include '/' in the diagnosis.
 """
@@ -275,18 +361,20 @@ The JSON format should be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": "high",
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": "medium",
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer":"<<one out of high, medium, low>>"
 }}
+
+IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "medium", "high", "very high". Do not use numbers.
 """
 
     # ------------------------------------------------------------------
@@ -296,37 +384,33 @@ The JSON format should be strictly as follows:
     @staticmethod
     def first_question() -> str:
         """
-        Generate 3 initial questions + answer options from the uploaded image.
+        Generate 1 initial question + answer options from the uploaded image.
         These are the FIRST questions shown to a patient after image upload.
 
+        Template vars: {follow_up_context}
+        follow_up_context is an empty string for new complaints.
         Returns: Questions JSON schema.
         Used in: Celery `generate_questions_task` (first pass).
         """
-        return """You are an intelligent dermatological assistant who is generating questions to ask to a patient based on the photograph they have uploaded.
-Generate 3 distinct questions to ask to the patient. Also provide as many descriptive answer choices for each question as possible that encompasses all likely patient responses.
+        return _p("patient_first_question", """You are an intelligent dermatological assistant who is generating a question to ask to a patient based on the photograph they have uploaded.
+Generate 1 distinct question to ask to the patient. Choose the single most important question that will best help narrow down the diagnosis. Also provide as many descriptive answer choices for the question as possible that encompasses all likely patient responses.
 Ask any other question other than "What brings you here" because that has already been asked before.
+{follow_up_context}
 
 Give your response in json format as:
 
 {{
   "Questions": [
     {{
-      "question": "<question1>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question2>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
-    }},
-    {{
-      "question": "<question3>",
-      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...]
+      "question": "<question>",
+      "answer_options": ["<answer1>", "<answer2>", "<answer3>", ...],
+      "reason": "<brief clinical reason why this question helps narrow the diagnosis>"
     }}
   ]
 }}
 
 Remember to reply strictly in the above json format. Do not provide any other string other than the json.
-"""
+""")
 
     # ------------------------------------------------------------------
     # 8. Prescription OCR extraction

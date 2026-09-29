@@ -267,7 +267,7 @@ class TestDoctorProfileModel:
 
 class TestCaseModel:
     """
-    SQL-level defaults (ai_status, clinical_status, consent_given, etc.) are
+    SQL-level defaults (ai_status, clinical_status, consent_ai_analysis, etc.) are
     applied at INSERT time — not at Python instantiation. Those are verified
     in integration tests. Here we test values that are set explicitly.
     """
@@ -277,7 +277,7 @@ class TestCaseModel:
             patient_id=new_uuid(),
             ai_status=AiStatus.PENDING,
             clinical_status=ClinicalStatus.ACTIVE,
-            consent_given=False,
+            consent_ai_analysis=False,
             is_for_self=True,
             has_visible_lesion=True,
             question_round=0,
@@ -300,8 +300,8 @@ class TestCaseModel:
         assert case.clinical_status == ClinicalStatus.ACTIVE
 
     def test_consent_given_set(self):
-        case = self._make_case(consent_given=False)
-        assert case.consent_given is False
+        case = self._make_case(consent_ai_analysis=False)
+        assert case.consent_ai_analysis is False
 
     def test_is_for_self_set(self):
         case = self._make_case(is_for_self=True)

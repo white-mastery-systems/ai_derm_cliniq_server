@@ -40,10 +40,14 @@ Once running, visit:
     http://localhost:8000/redoc  ← ReDoc (read-only, clean)
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -51,12 +55,80 @@ from slowapi.middleware import SlowAPIMiddleware
 
 from src.api import include_all_routers
 from src.config import settings
-from src.database.core import check_database_connection, engine
+from src.database.core import check_database_connection, check_redis_connection, engine
 from src.exceptions import register_exception_handlers
 from src.logger import get_logger, setup_logging
+from src.middleware import RequestIDMiddleware, TimingMiddleware
 from src.rate_limiting import limiter
 
 logger = get_logger(__name__)
+
+
+# ------------------------------------------------------------------ #
+# Admin Bootstrap
+# ------------------------------------------------------------------ #
+
+async def _bootstrap_admin() -> None:
+    """
+    Create the first admin account on startup if ADMIN_EMAIL + ADMIN_PASSWORD
+    are set in .env and no user with that email exists yet.
+
+    Admins are also doctors — a DoctorProfile row is created alongside the
+    User so the admin can scan QR codes and review cases like any doctor.
+
+    Idempotent — safe to run on every restart. If the User already exists
+    but has no DoctorProfile (e.g. created by an older version), the profile
+    is created on this run.
+    """
+    if not settings.ADMIN_EMAIL or not settings.ADMIN_PASSWORD:
+        logger.info("admin_bootstrap_skipped", reason="ADMIN_EMAIL or ADMIN_PASSWORD not set")
+        return
+
+    from src.auth.security import hash_password
+    from src.models.doctor_profile import DoctorProfile
+    from src.models.user import User, UserRole
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as db:
+        result = await db.execute(select(User).where(User.email == settings.ADMIN_EMAIL))
+        existing = result.scalar_one_or_none()
+
+        if existing is None:
+            # First run — create User + DoctorProfile together
+            hashed = await asyncio.to_thread(hash_password, settings.ADMIN_PASSWORD)
+            admin = User(
+                email=settings.ADMIN_EMAIL,
+                full_name="Admin",
+                role=UserRole.ADMIN,
+                password_hash=hashed,
+                is_active=True,
+                is_verified=True,
+            )
+            db.add(admin)
+            try:
+                await db.flush()  # get admin.id before creating profile
+                profile = DoctorProfile(user_id=admin.id)
+                db.add(profile)
+                await db.commit()
+                logger.info("admin_account_created", email=settings.ADMIN_EMAIL)
+            except IntegrityError:
+                await db.rollback()
+                logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="created by another worker")
+            return
+
+        # User already exists — ensure DoctorProfile exists (migration safety)
+        prof_result = await db.execute(
+            select(DoctorProfile).where(DoctorProfile.user_id == existing.id)
+        )
+        if prof_result.scalar_one_or_none() is None:
+            try:
+                db.add(DoctorProfile(user_id=existing.id))
+                await db.commit()
+                logger.info("admin_doctor_profile_created", email=settings.ADMIN_EMAIL)
+            except IntegrityError:
+                await db.rollback()
+        else:
+            logger.info("admin_bootstrap_skipped", email=settings.ADMIN_EMAIL, reason="already exists")
 
 
 # ------------------------------------------------------------------ #
@@ -87,7 +159,18 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         logger.critical("database_unreachable", url=settings.DATABASE_URL)
 
-    logger.info("app_ready", docs_url="http://localhost:8000/docs")
+    await _bootstrap_admin()
+
+    # Warm Redis prompt cache from PostgreSQL.
+    # This ensures Celery workers always see the latest overrides even after
+    # a Redis restart, because PostgreSQL is the source of truth.
+    from src.ai.prompt_registry import warm_redis_from_db
+    from sqlalchemy.ext.asyncio import async_sessionmaker as _sm
+    _factory = _sm(engine, expire_on_commit=False)
+    async with _factory() as _db:
+        await warm_redis_from_db(_db)
+
+    logger.info("app_ready", docs_url="/docs")
 
     yield  # ← Server is running and handling requests here
 
@@ -141,6 +224,14 @@ def create_app() -> FastAPI:
     app.add_middleware(SlowAPIMiddleware)
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+    # Timing — measures duration of every request, logs it, sets X-Process-Time header
+    # Must be added AFTER SlowAPIMiddleware so it wraps the rate-limit check too
+    app.add_middleware(TimingMiddleware)
+
+    # Request ID — generates X-Request-ID per request, binds it to all log lines
+    # Must be added LAST so it runs FIRST (outermost wrapper)
+    app.add_middleware(RequestIDMiddleware)
+
     # ------------------------------------------------------------------ #
     # Exception Handlers
     # ------------------------------------------------------------------ #
@@ -155,13 +246,18 @@ def create_app() -> FastAPI:
     # container is alive. No auth required.
     @app.get("/health", tags=["Health"], summary="Health check")
     async def health_check() -> dict:
-        db_ok = await check_database_connection()
+        db_ok, redis_ok = await asyncio.gather(
+            check_database_connection(),
+            check_redis_connection(),
+        )
+        all_ok = db_ok and redis_ok
         return {
-            "status": "healthy" if db_ok else "degraded",
+            "status": "healthy" if all_ok else "degraded",
             "app": settings.APP_NAME,
             "version": settings.APP_VERSION,
             "environment": settings.APP_ENV,
             "database": "ok" if db_ok else "unreachable",
+            "redis": "ok" if redis_ok else "unreachable",
         }
 
     return app

@@ -94,6 +94,12 @@ class TooManyImagesException(AppException):
     message = "Case already has the maximum number of images"
 
 
+class ImageQualityException(AppException):
+    status_code = 400
+    error_code = "IMAGE_QUALITY_FAILED"
+    message = "Image did not pass quality checks"
+
+
 # ------------------------------------------------------------------ #
 # 401 Unauthorized
 # ------------------------------------------------------------------ #
@@ -128,6 +134,12 @@ class InsufficientRoleException(AppException):
     status_code = 403
     error_code = "INSUFFICIENT_ROLE"
     message = "Your role does not allow this action"
+
+
+class DoctorPendingApprovalException(AppException):
+    status_code = 403
+    error_code = "DOCTOR_PENDING_APPROVAL"
+    message = "Your doctor account is pending admin approval. You will be notified once approved."
 
 
 # ------------------------------------------------------------------ #
@@ -193,6 +205,12 @@ class AIServiceException(AppException):
     status_code = 503
     error_code = "AI_SERVICE_UNAVAILABLE"
     message = "The AI service is temporarily unavailable"
+
+
+class AIProviderException(AppException):
+    status_code = 503
+    error_code = "AI_PROVIDER_ERROR"
+    message = "The AI provider returned an error or is not configured"
 
 
 class StorageException(AppException):

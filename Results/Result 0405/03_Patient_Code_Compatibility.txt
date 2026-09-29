@@ -1,0 +1,72 @@
+﻿TASK 3 — LEGACY PATIENT CODE BACKWARD COMPATIBILITY
+Tested On : 2026-05-04
+Server    : http://148.113.16.40:8880/api/v1
+======================================================================
+
+======================================================================
+[3.1 | Patient code returned at registration]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/auth/register/patient
+BODY     : {full_name, email, password}
+Patient A code : KEJ-8638-Z
+Patient B code : QXE-2803-G
+Format AAA-9999-Z : Patient A = VALID  |  Patient B = VALID
+Length = 10 chars : Patient A = PASS  |  Patient B = PASS
+Unique codes      : PASS - different codes
+RESULT   : PASS
+
+======================================================================
+[3.2 | Patient code visible in GET /users/me (patient_profile)]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/me
+HEADER   : Authorization: Bearer <token>
+STATUS   : 2xx OK
+RESPONSE : {"id":"fc3f8aa1-3af4-483f-868f-eebaa933403f","email":"testiso_patA@live.com","full_name":"Test PatientA","role":"patient","is_active":true,"is_verified":false,"patient_profile":{"patient_code":"KEJ-8638-Z","date_of_birth":"1990-01-01","gender":"female","phone":null,"avatar_url":null},"doctor_profile":null}
+RESULT   : PASS - code matches registration
+
+======================================================================
+[3.3 | Case-insensitive code lookup — lowercase input]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/by-code/kej-8638-z (as Patient B = wrong role)
+NOTE     : Patient cannot use this endpoint (403 expected) — lowercase test
+         : To fully test case-insensitivity, a doctor token is needed
+RESULT   : Lowercase format: 'kej-8638-z' would resolve to same patient server-side (.upper())
+
+======================================================================
+[3.4 | Patient hits by-code endpoint → EXPECT 403]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/by-code/KEJ-8638-Z
+HEADER   : Authorization: Bearer <token>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'doctor' role","status":403,"details":{}}}
+RESULT   : PASS - 403 INSUFFICIENT_ROLE
+
+======================================================================
+[3.5 | No token on by-code → EXPECT 401]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/by-code/KEJ-8638-Z
+STATUS   : 401
+RESPONSE : {"error":{"code":"UNAUTHORIZED","message":"Authorization header missing or not Bearer scheme","status":401,"details":{}}}
+RESULT   : PASS - 401 UNAUTHORIZED
+
+======================================================================
+[3.6 | Unknown code (patient token) → EXPECT 403 (role check before DB)]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/by-code/ZZZ-0000-Z
+HEADER   : Authorization: Bearer <token>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'doctor' role","status":403,"details":{}}}
+RESULT   : PASS - role gate fires before DB lookup
+
+======================================================================
+[3.7 | Malformed code (no dashes) → EXPECT 403 (role gate)]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/by-code/NOTACODE
+HEADER   : Authorization: Bearer <token>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'doctor' role","status":403,"details":{}}}
+RESULT   : PASS
+
+======================================================================
+[3.8 | Update profile — patient_code must remain unchanged]
+REQUEST  : PATCH http://148.113.16.40:8880/api/v1/users/me
+HEADER   : Authorization: Bearer <token>
+BODY     : {
+    "full_name":  "Updated Name A"
+}
+STATUS   : 2xx OK
+RESPONSE : {"id":"fc3f8aa1-3af4-483f-868f-eebaa933403f","email":"testiso_patA@live.com","full_name":"Updated Name A","role":"patient","is_active":true,"is_verified":false,"patient_profile":{"patient_code":"KEJ-8638-Z","date_of_birth":"1990-01-01","gender":"female","phone":null,"avatar_url":null},"doctor_profile":null}
+RESULT   : PASS - code unchanged after profile update

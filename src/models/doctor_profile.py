@@ -84,9 +84,9 @@ class DoctorProfile(TimestampMixin, Base):
         comment="Push notification preference from Doctor Profile screen",
     )
     avatar_url: Mapped[str | None] = mapped_column(
-        String(500),
+        String(2000),
         nullable=True,
-        comment="GCS path to profile photo",
+        comment="GCS signed URL for profile photo",
     )
 
     # ------------------------------------------------------------------ #

@@ -203,7 +203,7 @@ class TestCaseCRUD:
         fetched = result.scalar_one()
         assert fetched.ai_status == AiStatus.PENDING
         assert fetched.clinical_status == ClinicalStatus.ACTIVE
-        assert fetched.consent_given is False
+        assert fetched.consent_ai_analysis is False
 
     async def test_dual_status_are_independent(self, db_session: AsyncSession):
         """
@@ -270,17 +270,17 @@ class TestCaseCRUD:
         db_session.add(case)
         await db_session.flush()
 
-        assert not case.consent_given
+        assert not case.consent_ai_analysis
 
         now = datetime.now(tz=timezone.utc)
-        case.consent_given = True
-        case.consent_given_at = now
+        case.consent_ai_analysis = True
+        case.consent_ai_analysis_at = now
         await db_session.flush()
 
         result = await db_session.execute(select(Case).where(Case.id == case.id))
         fetched = result.scalar_one()
-        assert fetched.consent_given is True
-        assert fetched.consent_given_at is not None
+        assert fetched.consent_ai_analysis is True
+        assert fetched.consent_ai_analysis_at is not None
 
 
 # ================================================================== #
@@ -530,7 +530,7 @@ class TestSnomedMapping:
     async def test_snomed_insert(self, db_session: AsyncSession):
         mapping = SnomedMapping(
             id=new_uuid(),
-            diagnosis_text="Psoriasis",
+            diagnosis_text="__test_model_psoriasis__",
             snomed_code="9014002",
             snomed_term="Psoriasis (disorder)",
         )
@@ -538,14 +538,14 @@ class TestSnomedMapping:
         await db_session.flush()
 
         result = await db_session.execute(
-            select(SnomedMapping).where(SnomedMapping.diagnosis_text == "Psoriasis")
+            select(SnomedMapping).where(SnomedMapping.diagnosis_text == "__test_model_psoriasis__")
         )
         fetched = result.scalar_one()
         assert fetched.snomed_code == "9014002"
 
     async def test_diagnosis_text_unique(self, db_session: AsyncSession):
-        m1 = SnomedMapping(id=new_uuid(), diagnosis_text="Eczema")
-        m2 = SnomedMapping(id=new_uuid(), diagnosis_text="Eczema")
+        m1 = SnomedMapping(id=new_uuid(), diagnosis_text="__test_model_eczema__")
+        m2 = SnomedMapping(id=new_uuid(), diagnosis_text="__test_model_eczema__")
         db_session.add(m1)
         await db_session.flush()
 

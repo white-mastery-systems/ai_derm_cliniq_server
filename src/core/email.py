@@ -1,0 +1,641 @@
+"""
+core/email.py — Email Sender
+=============================
+
+Low-level email utility used by Celery tasks.
+Sends HTML emails via Gmail SMTP using Python's built-in smtplib.
+
+WHY smtplib (not a third-party library)?
+-----------------------------------------
+smtplib is part of the Python standard library — no extra dependency.
+We're already using it in the old app (email_utils.py). Jinja2 (already
+in requirements.txt) handles the HTML template.
+
+GRACEFUL DEGRADATION
+---------------------
+If GMAIL_USER or GMAIL_APP_PASSWORD is not set, send_email() logs a
+warning and returns without raising. This means:
+- Development / test environments work without email credentials
+- The QR generation flow succeeds even if email is misconfigured
+- No patient-facing error from a non-critical background step
+
+HOW TO GET A GMAIL APP PASSWORD
+---------------------------------
+1. Go to myaccount.google.com → Security → 2-Step Verification (enable it)
+2. Search "App passwords" → generate one for "Mail"
+3. Set GMAIL_USER=aidermcliniq@gmail.com and GMAIL_APP_PASSWORD=<16-char code>
+
+USAGE (from Celery tasks only)
+--------------------------------
+    from src.core.email import send_email, render_visit_email
+
+    html = render_visit_email(patient_name, case_id, patient_url, qr_bytes)
+    send_email(
+        to_email="patient@example.com",
+        subject="Your AiDerm Cliniq Visit Summary",
+        html_body=html,
+        attachments=[("visit_qr.png", qr_bytes, "image/png")],
+    )
+"""
+
+import asyncio
+import smtplib
+import ssl
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+from jinja2 import Template
+
+from src.config import settings
+from src.logger import get_logger
+
+logger = get_logger(__name__)
+
+# ------------------------------------------------------------------ #
+# HTML Email Template
+# ------------------------------------------------------------------ #
+
+_VISIT_EMAIL_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #f4f6f9; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #ffffff;
+               border-radius: 8px; overflow: hidden;
+               box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .header { background-color: #1a6b5a; padding: 30px 40px; }
+    .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }
+    .header p  { color: #a8d5ca; margin: 4px 0 0; font-size: 14px; }
+    .body { padding: 32px 40px; color: #333333; }
+    .body p { line-height: 1.6; margin: 0 0 16px; }
+    .case-box { background: #f0f9f6; border-left: 4px solid #1a6b5a;
+                padding: 16px 20px; border-radius: 4px; margin: 20px 0; }
+    .case-box .label { font-size: 12px; color: #888; text-transform: uppercase;
+                       letter-spacing: 0.5px; margin-bottom: 4px; }
+    .case-box .value { font-size: 20px; font-weight: 700; color: #1a6b5a;
+                       letter-spacing: 1px; }
+    .btn { display: inline-block; background-color: #1a6b5a; color: #ffffff !important;
+           text-decoration: none; padding: 12px 28px; border-radius: 6px;
+           font-size: 15px; font-weight: 600; margin: 8px 0; }
+    .divider { border: none; border-top: 1px solid #e8ecf0; margin: 24px 0; }
+    .qr-section { text-align: center; padding: 20px 0; }
+    .qr-section p { color: #555; font-size: 14px; }
+    .footer { background-color: #f4f6f9; padding: 20px 40px;
+              text-align: center; color: #999; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>AiDerm Cliniq</h1>
+      <p>AI-Powered Dermatology Consultation</p>
+    </div>
+    <div class="body">
+      <p>Dear <strong>{{ patient_name }}</strong>,</p>
+      <p>
+        Thank you for using AiDerm Cliniq. Your consultation has been submitted
+        successfully and our AI has completed its initial analysis.
+      </p>
+
+      <div class="case-box">
+        <div class="label">Your Case ID</div>
+        <div class="value">{{ display_id }}</div>
+      </div>
+
+      <hr class="divider">
+
+      <p><strong>Access Your Case</strong></p>
+      <p>
+        View your complete case summary — including uploaded images, AI analysis,
+        and any doctor notes — by clicking below:
+      </p>
+      <a href="{{ patient_url }}" class="btn">View My Case</a>
+      <p style="font-size:12px; color:#999;">
+        Or copy this link: <a href="{{ patient_url }}">{{ patient_url }}</a>
+      </p>
+
+      <hr class="divider">
+
+      <div class="qr-section">
+        <p><strong>Doctor QR Code</strong></p>
+        <p>
+          Show the attached QR code to your doctor during your consultation.
+          They can scan it to instantly access your case on their device.
+        </p>
+        <p style="color:#1a6b5a; font-weight:600;">
+          QR code is attached to this email as <em>visit_qr.png</em>
+        </p>
+      </div>
+
+      <hr class="divider">
+
+      <p style="font-size:13px; color:#777;">
+        This email was generated automatically. Please do not reply.
+        If you have questions, contact us at
+        <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+      </p>
+    </div>
+    <div class="footer">
+      &copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; All rights reserved
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+_PASSWORD_RESET_OTP_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .otp-box{background:#f0f9f6;border:2px dashed #1a6b5a;border-radius:8px;
+           text-align:center;padding:24px;margin:24px 0}
+  .otp-box .label{font-size:13px;color:#555;text-transform:uppercase;
+                  letter-spacing:1px;margin-bottom:8px}
+  .otp-box .code{font-size:40px;font-weight:700;color:#1a6b5a;letter-spacing:8px}
+  .warning{background:#fff8e1;border-left:4px solid #f59e0b;padding:12px 16px;
+           border-radius:4px;font-size:13px;color:#78350f;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Password Reset</h1></div>
+  <div class="body">
+    <p>Hi <strong>{{ name }}</strong>,</p>
+    <p>We received a request to reset your password. Enter the OTP code below in the app:</p>
+    <div class="otp-box">
+      <div class="label">Your OTP Code</div>
+      <div class="code">{{ otp }}</div>
+    </div>
+    <div class="warning">This code expires in <strong>15 minutes</strong> and can only be used once.
+    If you did not request a password reset, you can safely ignore this email.</div>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+_EMAIL_VERIFY_OTP_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .otp-box{background:#f0f9f6;border:2px dashed #1a6b5a;border-radius:8px;
+           text-align:center;padding:24px;margin:24px 0}
+  .otp-box .label{font-size:13px;color:#555;text-transform:uppercase;
+                  letter-spacing:1px;margin-bottom:8px}
+  .otp-box .code{font-size:40px;font-weight:700;color:#1a6b5a;letter-spacing:8px}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Verify Your Email</h1></div>
+  <div class="body">
+    <p>Hi <strong>{{ name }}</strong>,</p>
+    <p>Enter the OTP code below in the app to verify your email address:</p>
+    <div class="otp-box">
+      <div class="label">Your OTP Code</div>
+      <div class="code">{{ otp }}</div>
+    </div>
+    <p style="font-size:13px;color:#777">This code expires in <strong>30 minutes</strong>.</p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+_DOCTOR_REGISTRATION_OTP_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .header p{color:#a8d5ca;margin:4px 0 0;font-size:13px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .otp-box{background:#f0f9f6;border:2px dashed #1a6b5a;border-radius:8px;
+           text-align:center;padding:24px;margin:24px 0}
+  .otp-box .label{font-size:13px;color:#555;text-transform:uppercase;
+                  letter-spacing:1px;margin-bottom:8px}
+  .otp-box .code{font-size:40px;font-weight:700;color:#1a6b5a;letter-spacing:8px}
+  .info{background:#f0f9f6;border-left:4px solid #1a6b5a;padding:12px 16px;
+        border-radius:4px;font-size:13px;color:#1a4a3a;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header">
+    <h1>AiDerm Cliniq — Verify Your Email</h1>
+    <p>Doctor Registration</p>
+  </div>
+  <div class="body">
+    <p>Hi <strong>Dr. {{ name }}</strong>,</p>
+    <p>Thank you for registering as a doctor on AiDerm Cliniq. Enter the OTP code below to verify your email address:</p>
+    <div class="otp-box">
+      <div class="label">Your Verification Code</div>
+      <div class="code">{{ otp }}</div>
+    </div>
+    <div class="info">
+      This code expires in <strong>30 minutes</strong> and can only be used once.
+    </div>
+    <p>Once your email is verified, your account will be reviewed by our admin team before you can access the clinical dashboard.</p>
+    <p style="font-size:13px;color:#777">If you did not create this account, you can safely ignore this email.</p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+
+_DOCTOR_APPROVED_EMAIL_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#1a6b5a;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .badge{display:inline-block;background:#1a6b5a;color:#fff;padding:8px 20px;
+         border-radius:20px;font-weight:700;font-size:15px;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Account Approved</h1></div>
+  <div class="body">
+    <p>Dear <strong>Dr. {{ name }}</strong>,</p>
+    <p>Great news! Your doctor account on <strong>AiDerm Cliniq</strong> has been reviewed and approved by our admin team.</p>
+    <div><span class="badge">Account Approved</span></div>
+    <p>You can now log in to the app and start reviewing patient cases.</p>
+    <p>If you have any questions, contact us at
+      <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+_DOCTOR_REJECTED_EMAIL_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#7b1d1d;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .reason-box{background:#fff8e1;border-left:4px solid #e07b00;padding:12px 16px;
+              border-radius:4px;font-size:13px;color:#78350f;margin:16px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header"><h1>AiDerm Cliniq — Application Update</h1></div>
+  <div class="body">
+    <p>Dear <strong>Dr. {{ name }}</strong>,</p>
+    <p>After reviewing your doctor account application on <strong>AiDerm Cliniq</strong>, we are unable to approve your registration at this time.</p>
+    {% if reason %}<div class="reason-box"><strong>Reason:</strong> {{ reason }}</div>{% endif %}
+    <p>If you believe this is an error or would like to reapply, please contact us at
+      <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq</div>
+</div></body></html>
+"""
+
+
+_REPORT_EMAIL_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #f4f6f9; margin: 0; padding: 0; }
+    .wrapper { max-width: 600px; margin: 30px auto; background: #ffffff;
+               border-radius: 8px; overflow: hidden;
+               box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .header { background-color: #1a6b5a; padding: 30px 40px; }
+    .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }
+    .header p  { color: #a8d5ca; margin: 4px 0 0; font-size: 14px; }
+    .body { padding: 32px 40px; color: #333333; }
+    .body p { line-height: 1.6; margin: 0 0 16px; }
+    .case-box { background: #f0f9f6; border-left: 4px solid #1a6b5a;
+                padding: 16px 20px; border-radius: 4px; margin: 20px 0; }
+    .case-box .label { font-size: 12px; color: #888; text-transform: uppercase;
+                       letter-spacing: 0.5px; margin-bottom: 4px; }
+    .case-box .value { font-size: 20px; font-weight: 700; color: #1a6b5a;
+                       letter-spacing: 1px; }
+    .footer { background-color: #f4f6f9; padding: 20px 40px;
+              text-align: center; color: #999; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="header">
+      <h1>AiDerm Cliniq</h1>
+      <p>AI-Powered Dermatology Consultation</p>
+    </div>
+    <div class="body">
+      <p>Dear <strong>{{ patient_name }}</strong>,</p>
+      <p>Your clinical report is now ready. Please find it attached to this email as a PDF.</p>
+      <div class="case-box">
+        <div class="label">Your Case ID</div>
+        <div class="value">{{ display_id }}</div>
+      </div>
+      <p>The report includes your confirmed diagnosis, doctor notes, and treatment plan. Please save a copy for your records.</p>
+      <p>If you have any questions, contact your doctor or reach us at
+        <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+      </p>
+      <p style="font-size:13px; color:#777;">This email was generated automatically. Please do not reply.</p>
+    </div>
+    <div class="footer">
+      &copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; All rights reserved
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+
+def render_report_email(patient_name: str, display_id: str) -> str:
+    """Render the clinical report ready HTML email body."""
+    return Template(_REPORT_EMAIL_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+    )
+
+
+def render_doctor_approved_email(name: str) -> str:
+    """Render the doctor account approved HTML email."""
+    return Template(_DOCTOR_APPROVED_EMAIL_TEMPLATE).render(name=name)
+
+
+def render_doctor_rejected_email(name: str, reason: str | None = None) -> str:
+    """Render the doctor account rejected HTML email."""
+    return Template(_DOCTOR_REJECTED_EMAIL_TEMPLATE).render(name=name, reason=reason)
+
+
+def render_password_reset_otp_email(name: str, otp: str) -> str:
+    """Render the password reset OTP HTML email."""
+    return Template(_PASSWORD_RESET_OTP_TEMPLATE).render(name=name, otp=otp)
+
+
+def render_email_verify_otp_email(name: str, otp: str) -> str:
+    """Render the email verification OTP HTML email."""
+    return Template(_EMAIL_VERIFY_OTP_TEMPLATE).render(name=name, otp=otp)
+
+
+def render_doctor_registration_otp_email(name: str, otp: str) -> str:
+    """Render the doctor registration email verification OTP email."""
+    return Template(_DOCTOR_REGISTRATION_OTP_TEMPLATE).render(name=name, otp=otp)
+
+
+def render_visit_email(patient_name: str, display_id: str, patient_url: str) -> str:
+    """Render the visit summary HTML email body."""
+    return Template(_VISIT_EMAIL_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+        patient_url=patient_url,
+    )
+
+
+# ------------------------------------------------------------------ #
+# Red Flag Email Templates
+# ------------------------------------------------------------------ #
+
+_RED_FLAG_PATIENT_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#b91c1c;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .header p{color:#fecaca;margin:4px 0 0;font-size:13px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .alert-box{background:#fef2f2;border-left:4px solid #b91c1c;padding:16px 20px;
+             border-radius:4px;margin:20px 0}
+  .alert-box .label{font-size:12px;color:#991b1b;text-transform:uppercase;
+                    letter-spacing:0.5px;margin-bottom:4px;font-weight:700}
+  .alert-box .value{font-size:18px;font-weight:700;color:#b91c1c;letter-spacing:1px}
+  .flags-list{background:#fff7ed;border-left:4px solid #ea580c;padding:14px 20px;
+              border-radius:4px;margin:16px 0}
+  .flags-list ul{margin:8px 0 0;padding-left:20px;color:#7c2d12}
+  .flags-list ul li{margin-bottom:6px;font-size:14px}
+  .advice-box{background:#f0f9f6;border-left:4px solid #1a6b5a;padding:14px 20px;
+              border-radius:4px;margin:16px 0;font-size:14px;color:#1a4a3a}
+  .urgent{background:#b91c1c;color:#fff;padding:12px 24px;border-radius:6px;
+          font-weight:700;font-size:15px;display:inline-block;margin:12px 0}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header">
+    <h1>AiDerm Cliniq — Urgent Alert</h1>
+    <p>AI-Powered Dermatology Consultation</p>
+  </div>
+  <div class="body">
+    <p>Dear <strong>{{ patient_name }}</strong>,</p>
+    <p>Our AI system has reviewed your case and identified symptoms that may require <strong>urgent medical attention</strong>.</p>
+    <div class="alert-box">
+      <div class="label">Your Case ID</div>
+      <div class="value">{{ display_id }}</div>
+    </div>
+    {% if flags %}
+    <div class="flags-list">
+      <strong style="color:#7c2d12">Concerns identified:</strong>
+      <ul>{% for flag in flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if advice %}
+    <div class="advice-box">
+      <strong>Advice:</strong> {{ advice }}
+    </div>
+    {% endif %}
+    <div><span class="urgent">Please seek medical attention promptly</span></div>
+    <p style="font-size:13px;color:#777;margin-top:20px">
+      This is an automated alert from AiDerm Cliniq. If you have already sought medical care,
+      please disregard this message. For questions, contact
+      <a href="mailto:support@aidermcliniq.com">support@aidermcliniq.com</a>.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; All rights reserved</div>
+</div></body></html>
+"""
+
+_RED_FLAG_ADMIN_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>
+  body{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:0}
+  .wrapper{max-width:600px;margin:30px auto;background:#fff;border-radius:8px;
+           box-shadow:0 2px 8px rgba(0,0,0,.08);overflow:hidden}
+  .header{background:#7f1d1d;padding:28px 40px}
+  .header h1{color:#fff;margin:0;font-size:20px}
+  .header p{color:#fca5a5;margin:4px 0 0;font-size:13px}
+  .body{padding:32px 40px;color:#333;line-height:1.6}
+  .meta-row{display:flex;gap:16px;margin:20px 0}
+  .meta-box{flex:1;background:#fef2f2;border-radius:6px;padding:14px 16px}
+  .meta-box .label{font-size:11px;color:#991b1b;text-transform:uppercase;
+                   letter-spacing:0.5px;margin-bottom:4px}
+  .meta-box .value{font-size:16px;font-weight:700;color:#b91c1c}
+  .flags-list{background:#fff7ed;border-left:4px solid #ea580c;padding:14px 20px;
+              border-radius:4px;margin:16px 0}
+  .flags-list ul{margin:8px 0 0;padding-left:20px;color:#7c2d12}
+  .flags-list ul li{margin-bottom:6px;font-size:14px}
+  .advice-box{background:#f0f9f6;border-left:4px solid #1a6b5a;padding:14px 20px;
+              border-radius:4px;margin:16px 0;font-size:14px;color:#1a4a3a}
+  .footer{background:#f4f6f9;padding:16px 40px;text-align:center;color:#999;font-size:12px}
+</style></head><body>
+<div class="wrapper">
+  <div class="header">
+    <h1>Red Flag Alert — Urgent Review Required</h1>
+    <p>AiDerm Cliniq Admin Notification</p>
+  </div>
+  <div class="body">
+    <p>A patient case has been flagged as <strong>high-risk</strong> by the AI analysis engine and requires immediate clinical review.</p>
+    <div class="meta-row">
+      <div class="meta-box">
+        <div class="label">Case ID</div>
+        <div class="value">{{ display_id }}</div>
+      </div>
+      <div class="meta-box">
+        <div class="label">Patient</div>
+        <div class="value">{{ patient_name }}</div>
+      </div>
+    </div>
+    {% if flags %}
+    <div class="flags-list">
+      <strong style="color:#7c2d12">Red flags detected:</strong>
+      <ul>{% for flag in flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% if advice %}
+    <div class="advice-box">
+      <strong>AI Advice:</strong> {{ advice }}
+    </div>
+    {% endif %}
+    <p style="font-size:13px;color:#777;margin-top:20px">
+      Log in to the admin dashboard to review this case immediately.
+    </p>
+  </div>
+  <div class="footer">&copy; 2026 AiDerm Cliniq &nbsp;|&nbsp; Admin Alert</div>
+</div></body></html>
+"""
+
+
+def render_red_flag_patient_email(
+    patient_name: str,
+    display_id: str,
+    flags: list[str],
+    advice: str | None,
+) -> str:
+    """Render the urgent red flag alert email for the patient."""
+    return Template(_RED_FLAG_PATIENT_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+        flags=flags,
+        advice=advice,
+    )
+
+
+def render_red_flag_admin_email(
+    patient_name: str,
+    display_id: str,
+    flags: list[str],
+    advice: str | None,
+) -> str:
+    """Render the red flag alert email for admins."""
+    return Template(_RED_FLAG_ADMIN_TEMPLATE).render(
+        patient_name=patient_name,
+        display_id=display_id,
+        flags=flags,
+        advice=advice,
+    )
+
+
+# ------------------------------------------------------------------ #
+# SMTP Send
+# ------------------------------------------------------------------ #
+
+def send_email(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> bool:
+    """
+    Send an HTML email via Gmail SMTP.
+
+    Parameters
+    ----------
+    to_email    : recipient address
+    subject     : email subject line
+    html_body   : rendered HTML string
+    attachments : list of (filename, bytes_data, mime_type) tuples
+
+    Returns True on success, False on any failure (never raises).
+    """
+    if not settings.GMAIL_USER or not settings.GMAIL_APP_PASSWORD:
+        logger.warning(
+            "email_skipped_no_credentials",
+            to=to_email,
+            reason="GMAIL_USER or GMAIL_APP_PASSWORD not configured",
+        )
+        return False
+
+    msg = MIMEMultipart("mixed")
+    msg["From"] = settings.GMAIL_USER
+    msg["To"] = to_email
+    msg["Subject"] = subject
+
+    # HTML body
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    # Attachments
+    for filename, data, mime_type in (attachments or []):
+        main_type, sub_type = mime_type.split("/", 1)
+        part = MIMEBase(main_type, sub_type)
+        part.set_payload(data)
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+        msg.attach(part)
+
+    try:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+            server.login(settings.GMAIL_USER, settings.GMAIL_APP_PASSWORD)
+            server.sendmail(settings.GMAIL_USER, [to_email], msg.as_string())
+
+        logger.info("email_sent", to=to_email, subject=subject)
+        return True
+
+    except smtplib.SMTPAuthenticationError:
+        logger.error("email_auth_failed", to=to_email,
+                     hint="Check GMAIL_USER and GMAIL_APP_PASSWORD in .env")
+        return False
+    except smtplib.SMTPException as exc:
+        logger.error("email_smtp_error", to=to_email, error=str(exc))
+        return False
+    except Exception as exc:
+        logger.error("email_unexpected_error", to=to_email, error=str(exc))
+        return False
+
+
+async def send_email_async(
+    to_email: str,
+    subject: str,
+    html_body: str,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> bool:
+    """Non-blocking wrapper — runs send_email in a thread pool so it doesn't block the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: send_email(to_email, subject, html_body, attachments)
+    )

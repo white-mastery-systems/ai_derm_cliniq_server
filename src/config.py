@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     APP_NAME: str = "AiDerm Cliniq API"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = False
+    DEBUG: bool = True
 
     # ------------------------------------------------------------------ #
     # Security / JWT
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     # Redis (Celery broker + result backend + cache)
     # ------------------------------------------------------------------ #
-    REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_URL: str
 
     # ------------------------------------------------------------------ #
     # Google Cloud Storage
@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------ #
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
-    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8880/api/v1/auth/google/callback"
 
     # ------------------------------------------------------------------ #
     # AI Provider Keys
@@ -100,10 +100,20 @@ class Settings(BaseSettings):
     DEFAULT_LLM_PROVIDER: str = "gemini"
 
     # ------------------------------------------------------------------ #
+    # AI Model Names (overridable from admin panel at runtime via Redis)
+    # ------------------------------------------------------------------ #
+    # These are the DEFAULT model names loaded at startup from .env.
+    # The admin panel can override them at runtime — see src/ai/model_registry.py.
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    OPENAI_MODEL: str = "gpt-4o"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    # ------------------------------------------------------------------ #
     # Email (Gmail SMTP)
     # ------------------------------------------------------------------ #
     GMAIL_USER: str = ""
     GMAIL_APP_PASSWORD: str = ""
+    FRONTEND_URL: str = "https://aidermcliniq.com"   # Base URL embedded in visit emails
 
     # ------------------------------------------------------------------ #
     # CORS
@@ -115,6 +125,7 @@ class Settings(BaseSettings):
     # Rate Limiting
     # ------------------------------------------------------------------ #
     RATE_LIMIT_PER_MINUTE: int = 60
+    RATE_LIMIT_ENABLED: bool = False
 
     # ------------------------------------------------------------------ #
     # File Upload Constraints
@@ -122,6 +133,20 @@ class Settings(BaseSettings):
     MAX_IMAGE_SIZE_MB: int = 10
     MAX_IMAGES_PER_CASE: int = 10
     ALLOWED_IMAGE_TYPES: List[str] = ["image/jpeg", "image/png", "image/heic", "image/heif"]
+
+    # ------------------------------------------------------------------ #
+    # Admin Bootstrap
+    # ------------------------------------------------------------------ #
+    # Set these in .env to auto-create the first admin account on startup.
+    # If ADMIN_EMAIL already exists in the DB, bootstrap is skipped (idempotent).
+    # Leave empty to disable bootstrap.
+    ADMIN_EMAIL: str = ""
+    ADMIN_PASSWORD: str = ""
+
+    # ------------------------------------------------------------------ #
+    # Firebase / Push Notifications
+    # ------------------------------------------------------------------ #
+    FIREBASE_CREDENTIALS_PATH: str = "credentials/firebase_service_account.json"
 
     # ------------------------------------------------------------------ #
     # QR Token

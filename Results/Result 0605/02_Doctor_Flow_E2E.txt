@@ -1,0 +1,887 @@
+TASK 2 — FULL E2E DOCTOR FLOW
+Tested On : 2026-05-06
+Server    : https://54d1-115-97-59-234.ngrok-free.app/api/v1
+
+TEST STRATEGY
+─────────────────────────────────────────────────────────────────────
+1. Register fresh doctor account (pending approval)
+2. Admin approves doctor; walk every doctor-facing endpoint
+3. Patient 2 completes AI questionnaire → QR generated → doctor scans
+4. Visual findings, review, AI-assist, voice note, todos, entities,
+   report generation, studies
+
+SCHEMA CORRECTIONS (discovered during Task 1 & Task 2 v1)
+─────────────────────────────────────────────────────────────────────
+• OTP column          : verification_tokens.otp (plaintext, not otp_hash)
+• device-token field  : fcm_token (not device_token)
+• assessment depth    : rounds:int (not depth:str)
+• chat answers body   : [{question_index:int, answer:str}]
+• voice-note field    : audio (not file)
+• study submit        : multipart form (file, features, stability, technical_quality)
+• prompt PATCH/DELETE : uses actual key from prompts[].key, not top-level dict key
+• doctor reject       : requires JSON body {reason: str}
+
+======================================================================
+[SETUP | Admin login]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "dev@bdcode.in", "password": "***"}
+STATUS   : 200
+RESPONSE : {"access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkNDdmMWRiOC1hODcxLTQ3NTYtYTc1NS0yOWJjMmMwYTdkYWEiLCJyb2xlIjoiYWRtaW4iLCJ0eXBlIjoiYWNjZXNzIiwiaWF0IjoxNzc4MTU1Nzk1LCJleHAiOjE3NzgxNTkzOTV9.LLk09e-9xlzl7L8qs2mj4emHkYIlIvFYZW3PewRyVws", "refresh_token": "HBLCy-8mjOvlXNqDKHK_sLFLA2-LhvaT5hgjRx09PCo", "token_type": "bearer", "role": "admin", "user_id": "d47f1db8-a871-4756-a755-29bc2c0a7daa"}
+RESULT   : PASS — admin token obtained
+
+======================================================================
+[SETUP2 | Register Patient 2 (for QR scenario)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/register/patient
+BODY     : {"email": "qa_pat2_1778155795@example.com", "password": "***", "full_name": "QA Patient Two"}
+STATUS   : 201
+RESPONSE : {"user": {"id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "email": "qa_pat2_1778155795@example.com", "full_name": "QA Patient Two", "role": "patient", "is_active": true, "is_verified": false, "patient_code": "TNB-6586-C"}, "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyOGRiNjM2ZC1jOTk4LTQ4ZjItOTFiZC1kOTVmODRiMmM1YWUiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3NzgxNTU3OTYsImV4cCI6MTc3ODE1OTM5Nn0.PV5GLBZqnj_u08Qe4lpoldYc_Zsv7Oz7LUT8FXern4E", "refresh_token": "vfm5p8kkNdCQcr6329jFzFM2SaD30amOKVdSTJx9YOo", "token_type": "bearer"}
+RESULT   : PASS — Patient 2 ready
+
+======================================================================
+[SETUP3 | Patient 2 creates case (for QR scan)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases
+HEADER   : Authorization: Bearer <pat2_token>
+BODY     : {"consultation_type": "new_complaint", "has_visible_lesion": true, "is_for_self": true, "consent_ai_analysis": true, "consent_research": false, "body_location": "Back", "presenting_complaint": "Dark mole on back, changing size"}
+STATUS   : 201
+RESPONSE : {"id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "case_number": 9220, "display_id": "AI-9220", "case_title": null, "original_case_id": null, "patient_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "doctor_id": null, "consultation_type": "new_complaint", "has_visible_lesion": true, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:09:56.089060Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "pending", "clinical_status": "active", "body_location": "Back", "symp
+RESULT   : PASS — case_id=90069002-3a20-4b7f-8ac7-8e94960d1a39
+
+======================================================================
+[SETUP4 | Patient 2 uploads clinical image]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/images
+HEADER   : Authorization: Bearer <pat2_token>
+STATUS   : 201
+RESPONSE : {"id": "83e262f5-4967-4029-97de-4cbd597e2737", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 0, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/images/83e262f5-4967-4029-97de-4cbd597e2737.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T120957Z&X-Goog-Expires=1800&X-Goog-Sig
+RESULT   : PASS — image uploaded
+
+======================================================================
+[SETUP_AI1 | Patient 2 triggers AI analysis (POST /cases/{id}/ai/analyze)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/ai/analyze
+HEADER   : Authorization: Bearer <pat2_token>
+STATUS   : 202
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "task_id": "64acd1f8-6b1e-424f-85fc-ab75c86d3c89", "message": "Analysis started. Poll /status for progress."}
+RESULT   : PASS — AI unknown (async 202)
+NOTE     : Correct trigger (Task 1 F3); returns 202 async with task_id; /chat/session does not exist
+
+======================================================================
+[SETUP_AI2 | Poll Patient 2 AI completion (status=completed)]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/ai/status
+HEADER   : Authorization: Bearer <pat2_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "ai_status": "completed", "task_id": null, "error_message": null, "completed_at": "2026-05-07T12:10:02.495605Z", "recommended_rounds": 4}
+RESULT   : PASS — AI completed
+NOTE     : Elapsed: 8s
+
+======================================================================
+[SETUP5 | Patient 2 generates QR token]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/generate
+HEADER   : Authorization: Bearer <pat2_token>
+STATUS   : 201
+RESPONSE : {"token": "evkgJ7FycjZFjHyxPce3y4S7u0DzTdSUwpLOaCPrUDw", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "display_id": "AI-9220", "expires_at": "9999-12-31T00:00:00Z", "qr_url": "/api/v1/qr/scan/evkgJ7FycjZFjHyxPce3y4S7u0DzTdSUwpLOaCPrUDw"}
+RESULT   : PASS — token=evkgJ7FycjZFjHyxPce3y4S7u0DzTdSUwpLOaCPrUDw
+
+
+━━━ PHASE A — Doctor Registration & Approval ━━━
+
+======================================================================
+[A1 | POST /auth/register/doctor → 201 pending]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/register/doctor
+BODY     : {"email": "qa_doc_1778155795@clinic.com", "password": "DocPass@99", "full_name": "Dr QA Tester", "specialization": "dermatology", "license_number": "LIC-1778155795", "clinic_name": "QA Skin Clinic"}
+STATUS   : 201
+RESPONSE : {"user": {"id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "email": "qa_doc_1778155795@clinic.com", "full_name": "Dr QA Tester", "role": "doctor", "is_active": false, "is_verified": false, "patient_code": null}, "message": "Registration successful. Your account is pending admin approval. You will be able to log in once an admin verifies your account."}
+RESULT   : PASS — doctor registered pending
+
+======================================================================
+[A2 | POST /auth/login unapproved doctor → 401/403]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_doc_1778155795@clinic.com", "password": "***"}
+STATUS   : 401
+RESPONSE : {"error": {"code": "UNAUTHORIZED", "message": "Account is suspended", "status": 401, "details": {}}}
+RESULT   : PASS — unapproved doctor blocked
+
+======================================================================
+[A3 | POST /auth/register/doctor (2nd for reject test) → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/register/doctor
+BODY     : {"email": "qa_doc2_1778155795@clinic.com", "password": "DocPass@99", "full_name": "Dr Reject Test", "specialization": "general_practice", "license_number": "LIC2-1778155795", "clinic_name": "Reject Clinic"}
+STATUS   : 201
+RESPONSE : {"user": {"id": "92d44514-4dec-4e1e-bcf2-458e7834bc63", "email": "qa_doc2_1778155795@clinic.com", "full_name": "Dr Reject Test", "role": "doctor", "is_active": false, "is_verified": false, "patient_code": null}, "message": "Registration successful. Your account is pending admin approval. You will be able to log in once an admin verifies your account."}
+RESULT   : PASS — Dr2 registered
+
+======================================================================
+[A4 | GET /admin/doctors/pending → doctor appears]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/doctors/pending
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "92d44514-4dec-4e1e-bcf2-458e7834bc63", "email": "qa_doc2_1778155795@clinic.com", "full_name": "Dr Reject Test", "is_active": false, "is_verified": false, "created_at": "2026-05-07T12:10:06.901540Z", "specialization": "general_practice", "license_number": "LIC2-1778155795", "clinic_name": "Reject Clinic"}, {"id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "email": "qa_doc_1778155795@clinic.com", "full_name": "Dr QA Tester", "is_active": false, "is_verified": false, "created_at": "2026-05-07T12:10:06.355488Z", "specialization": "dermatology", "license_number": "LIC-1778155795", "
+RESULT   : PASS — pending doctors listed
+
+======================================================================
+[A5 | GET /admin/doctors → all doctors list]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/doctors
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "92d44514-4dec-4e1e-bcf2-458e7834bc63", "email": "qa_doc2_1778155795@clinic.com", "full_name": "Dr Reject Test", "is_active": false, "is_verified": false, "created_at": "2026-05-07T12:10:06.901540Z", "specialization": "general_practice", "license_number": "LIC2-1778155795", "clinic_name": "Reject Clinic"}, {"id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "email": "qa_doc_1778155795@clinic.com", "full_name": "Dr QA Tester", "is_active": false, "is_verified": false, "created_at": "2026-05-07T12:10:06.355488Z", "specialization": "dermatology", "license_number": "LIC-1778155795", "
+RESULT   : PASS — doctors listed
+
+======================================================================
+[A6 | POST /admin/doctors/{id}/approve → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/doctors/134bee75-ee95-4df9-a837-ba1b776c6e6b/approve
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "email": "qa_doc_1778155795@clinic.com", "full_name": "Dr QA Tester", "role": "doctor", "is_active": true, "is_verified": true, "created_at": "2026-05-07T12:10:06.355488Z", "patient_profile": null, "doctor_profile": {"specialization": "dermatology", "license_number": "LIC-1778155795", "clinic_name": "QA Skin Clinic"}}
+RESULT   : PASS — doctor approved
+
+======================================================================
+[A7 | POST /admin/doctors/{id}/reject → 204]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/doctors/92d44514-4dec-4e1e-bcf2-458e7834bc63/reject
+HEADER   : Authorization: Bearer <admin_token>
+BODY     : {"reason": "QA test rejection \u2014 administrative decision"}
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — doctor rejected
+
+======================================================================
+[A8 | POST /auth/login approved doctor → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_doc_1778155795@clinic.com", "password": "***"}
+STATUS   : 200
+RESPONSE : {"access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMzRiZWU3NS1lZTk1LTRkZjktYTgzNy1iYTFiNzc2YzZlNmIiLCJyb2xlIjoiZG9jdG9yIiwidHlwZSI6ImFjY2VzcyIsImlhdCI6MTc3ODE1NTgxMywiZXhwIjoxNzc4MTU5NDEzfQ.Q4vNxWN0jvfJ1zPHZheVqcXL9F5utYaIoGebJQQawUU", "refresh_token": "oZF9OwgQZ7P9nIbacE3L18N13-iMUTTZjKs_UhGUmgA", "token_type": "bearer", "role": "doctor", "user_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b"}
+RESULT   : PASS — doctor logged in
+
+
+━━━ PHASE B — Admin User Management ━━━
+
+======================================================================
+[B1 | GET /admin/users → paginated list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/users
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "email": "qa_doc_1778155795@clinic.com", "full_name": "Dr QA Tester", "role": "doctor", "is_active": true, "is_verified": true, "created_at": "2026-05-07T12:10:06.355488Z"}, {"id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "email": "qa_pat2_1778155795@example.com", "full_name": "QA Patient Two", "role": "patient", "is_active": true, "is_verified": false, "created_at": "2026-05-07T12:09:55.783960Z"}, {"id": "c3f19a87-4f0c-4019-ab16-4dfe7ba01fd7", "email": "qa_direct_1778155515@example.com", "full_name": "QA Direct Patient", "role": "patien
+RESULT   : PASS — users listed
+
+======================================================================
+[B2 | GET /admin/users?role=doctor → filtered → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/users?role=doctor
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "email": "qa_doc_1778155795@clinic.com", "full_name": "Dr QA Tester", "role": "doctor", "is_active": true, "is_verified": true, "created_at": "2026-05-07T12:10:06.355488Z"}, {"id": "65ac85be-24a1-4c5d-bc37-e6df8c8072fd", "email": "qa_doc_1778155515@clinic.com", "full_name": "Dr QA Tester", "role": "doctor", "is_active": true, "is_verified": true, "created_at": "2026-05-07T12:05:47.169794Z"}, {"id": "c146fda2-b352-43d2-9136-2ed2aa75ff04", "email": "qa_doc_1778088131@clinic.com", "full_name": "Dr QA Tester", "role": "doctor", "is_active":
+RESULT   : PASS — doctor filter works
+
+======================================================================
+[B3 | GET /admin/users/{user_id} → full detail → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/users/28db636d-c998-48f2-91bd-d95f84b2c5ae
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "email": "qa_pat2_1778155795@example.com", "full_name": "QA Patient Two", "role": "patient", "is_active": true, "is_verified": false, "created_at": "2026-05-07T12:09:55.783960Z", "patient_profile": {"patient_code": "TNB-6586-C", "date_of_birth": "1990-01-01", "gender": "male", "phone": null}, "doctor_profile": null}
+RESULT   : PASS — user detail returned
+
+======================================================================
+[B4 | PATCH /admin/users/{id} → suspend (is_active=false) → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/users/28db636d-c998-48f2-91bd-d95f84b2c5ae
+HEADER   : Authorization: Bearer <admin_token>
+BODY     : {"is_active": false}
+STATUS   : 200
+RESPONSE : {"id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "email": "qa_pat2_1778155795@example.com", "full_name": "QA Patient Two", "role": "patient", "is_active": false, "is_verified": false, "created_at": "2026-05-07T12:09:55.783960Z", "patient_profile": {"patient_code": "TNB-6586-C", "date_of_birth": "1990-01-01", "gender": "male", "phone": null}, "doctor_profile": null}
+RESULT   : PASS — user suspended
+
+======================================================================
+[B5 | PATCH /admin/users/{id} → reactivate (is_active=true) → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/users/28db636d-c998-48f2-91bd-d95f84b2c5ae
+HEADER   : Authorization: Bearer <admin_token>
+BODY     : {"is_active": true}
+STATUS   : 200
+RESPONSE : {"id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "email": "qa_pat2_1778155795@example.com", "full_name": "QA Patient Two", "role": "patient", "is_active": true, "is_verified": false, "created_at": "2026-05-07T12:09:55.783960Z", "patient_profile": {"patient_code": "TNB-6586-C", "date_of_birth": "1990-01-01", "gender": "male", "phone": null}, "doctor_profile": null}
+RESULT   : PASS — user reactivated
+
+======================================================================
+[B6 | POST /admin/users/{id}/resend-verification → 204]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/users/28db636d-c998-48f2-91bd-d95f84b2c5ae/resend-verification
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — verification resent
+
+======================================================================
+[B7 | GET /admin/cases → all cases across all patients → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/cases
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "patient_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "patient_name": "QA Patient Two", "doctor_id": null, "doctor_name": null, "ai_status": "completed", "clinical_status": "active", "consultation_type": "new_complaint", "created_at": "2026-05-07T12:09:56.075192Z"}, {"id": "a458fa87-94fa-40f5-9221-8bf06de192f2", "patient_id": "c3f19a87-4f0c-4019-ab16-4dfe7ba01fd7", "patient_name": "QA Direct Patient", "doctor_id": "65ac85be-24a1-4c5d-bc37-e6df8c8072fd", "doctor_name": "Dr QA Tester", "ai_status": "pending", "clinical_status": "active", 
+RESULT   : PASS — admin cases listed
+
+======================================================================
+[B8 | GET /admin/cases/{case_id} → full case detail → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "case_number": 9220, "patient_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "patient_name": "QA Patient Two", "doctor_id": null, "doctor_name": null, "consultation_type": "new_complaint", "has_visible_lesion": true, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "body_location": "Back", "presenting_complaint": "Dark mole on back, changing size", "case_summary": "1. **Age**: 36 2. **Sex**: male 3. **Chief Complaint**: Dark mole on back, changing size 4. **History**: Initial AI analysis complete. Q&A consultation in prog
+RESULT   : PASS — admin case detail returned
+
+======================================================================
+[B9 | GET /admin/stats → platform counts + invariant check]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/stats
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"total_users": 167, "total_patients": 119, "total_doctors": 45, "total_admins": 3, "total_cases": 210, "cases_ai_pending": 44, "cases_ai_processing": 2, "cases_ai_completed": 150, "cases_ai_failed": 14, "total_reports": 42}
+RESULT   : PASS — invariant: 119+45+3=167
+
+======================================================================
+[B10 | GET /admin/stats with doctor token → 403]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/stats
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 403
+RESPONSE : {"error": {"code": "INSUFFICIENT_ROLE", "message": "This endpoint requires the 'admin' role", "status": 403, "details": {}}}
+RESULT   : PASS — doctor cannot access admin stats
+
+
+━━━ PHASE C — Admin AI Prompt Overrides ━━━
+
+======================================================================
+[C1 | GET /admin/prompts → list all prompt keys → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/prompts
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"prompts": [{"key": "patient_first_question", "label": "Patient: First Question (image-based)", "value": null, "has_override": false}, {"key": "patient_questions_no_image", "label": "Patient: Questions Without Image", "value": null, "has_override": false}, {"key": "patient_follow_up_question", "label": "Patient: Follow-Up Question (rounds 1+)", "value": null, "has_override": false}, {"key": "patient_diagnosis_refinement", "label": "Patient: Diagnosis Refinement (after answers)", "value": null, "has_override": false}, {"key": "patient_case_summary", "label": "Patient: Final Case Summary", "val
+RESULT   : PASS — prompts listed
+NOTE     : first_key=patient_first_question; total=10 keys
+
+======================================================================
+[C2 | PATCH /admin/prompts/{key} → set override → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/prompts/patient_first_question
+HEADER   : Authorization: Bearer <admin_token>
+BODY     : {"value": "[QA OVERRIDE] Test prompt override for: patient_first_question"}
+STATUS   : 200
+RESPONSE : {"key": "patient_first_question", "label": "Patient: First Question (image-based)", "value": "[QA OVERRIDE] Test prompt override for: patient_first_question", "has_override": true}
+RESULT   : PASS — prompt override saved
+
+======================================================================
+[C3 | GET /admin/prompts after override → verify persisted]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/prompts
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : {"prompts": [{"key": "patient_first_question", "label": "Patient: First Question (image-based)", "value": "[QA OVERRIDE] Test prompt override for: patient_first_question", "has_override": true}, {"key": "patient_questions_no_image", "label": "Patient: Questions Without Image", "value": null, "has_override": false}, {"key": "patient_follow_up_question", "label": "Patient: Follow-Up Question (rounds 1+)", "value": null, "has_override": false}, {"key": "patient_diagnosis_refinement", "label": "Patient: Diagnosis Refinement (after answers)", "value": null, "has_override": false}, {"key": "patient_
+RESULT   : PASS — override visible in GET
+
+======================================================================
+[C4 | DELETE /admin/prompts/{key} → reset to default → 200]
+REQUEST  : DELETE https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/prompts/patient_first_question
+HEADER   : Authorization: Bearer <admin_token>
+STATUS   : 200
+RESPONSE : (no body)
+RESULT   : PASS — prompt reset
+
+======================================================================
+[C5 | GET /admin/prompts with doctor token → 403]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/admin/prompts
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 403
+RESPONSE : {"error": {"code": "INSUFFICIENT_ROLE", "message": "This endpoint requires the 'admin' role", "status": 403, "details": {}}}
+RESULT   : PASS — non-admin blocked
+
+
+━━━ PHASE D — Doctor Dashboard ━━━
+
+======================================================================
+[D1 | GET /cases/doctors/me/stats → dashboard stats → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/doctors/me/stats
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"today_cases": 0, "pending_review": 0, "in_progress": 0, "completed_today": 0, "total_assigned": 0}
+RESULT   : PASS — stats returned
+
+======================================================================
+[D2 | GET /cases → assigned cases list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases?page=1&page_size=10
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"items": [], "total": 0, "page": 1, "page_size": 10, "has_next": false}
+RESULT   : PASS — list returned
+
+======================================================================
+[D3 | GET /users/by-code/{code} → patient lookup → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/by-code/TNB-6586-C
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"user_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "full_name": "QA Patient Two", "patient_code": "TNB-6586-C", "date_of_birth": "1990-01-01", "gender": "male", "avatar_url": null}
+RESULT   : PASS — patient found by code
+NOTE     : Patient code: TNB-6586-C
+
+
+━━━ PHASE E — QR Scan → Case Assignment ━━━
+
+======================================================================
+[E1 | POST /qr/scan/{token} → doctor assigned → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/scan/evkgJ7FycjZFjHyxPce3y4S7u0DzTdSUwpLOaCPrUDw
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "patient_name": "QA Patient Two", "message": "QR code verified. You have been granted access to this case."}
+RESULT   : PASS — case assigned to doctor
+
+======================================================================
+[E2 | POST /qr/scan/{token} rescan same token → 410]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/scan/evkgJ7FycjZFjHyxPce3y4S7u0DzTdSUwpLOaCPrUDw
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 410
+RESPONSE : {"error": {"code": "QR_EXPIRED", "message": "This QR code has already been used.", "status": 410, "details": {}}}
+RESULT   : PASS — used token rejected
+
+======================================================================
+[E3 | GET /cases/{id} → doctor_id set → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "case_number": 9220, "display_id": "AI-9220", "case_title": "Acne Vulgaris (inflammatory type)", "original_case_id": null, "patient_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "consultation_type": "new_complaint", "has_visible_lesion": true, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:09:56.089060Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "comp
+RESULT   : PASS — doctor_id=134bee75-ee95-4df9-a837-ba1b776c6e6b
+
+======================================================================
+[E4 | POST /qr/by-display-id/{display_id} → access by AI-XXXX]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/by-display-id/AI-9220
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "patient_name": "QA Patient Two", "message": "Access granted via case ID."}
+RESULT   : PASS — case accessed by display ID
+NOTE     : display_id=AI-9220; 400/404/410 OK if already assigned or expired
+
+
+━━━ PHASE F — Doctor-Initiated Case ━━━
+
+======================================================================
+[F1 | POST /cases/doctor → create case for patient → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/doctor
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"patient_name": "QA Direct Patient", "patient_email": "qa_direct_1778155795@example.com", "consultation_type": "new_complaint", "has_visible_lesion": true, "body_location": "Leg"}
+STATUS   : 201
+RESPONSE : {"id": "3a9254c3-430a-45bf-970f-3eb5b2799747", "case_number": 9221, "display_id": "AI-9221", "case_title": null, "original_case_id": null, "patient_id": "81e553d1-6614-4383-ab02-fdd34c976681", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "consultation_type": "new_complaint", "has_visible_lesion": true, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:10:22.543679Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "pending", "clinical_status": "activ
+RESULT   : PASS — case_id=3a9254c3-430a-45bf-970f-3eb5b2799747
+
+======================================================================
+[F2 | POST /cases/{id}/images clinical (doctor) → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/3a9254c3-430a-45bf-970f-3eb5b2799747/images
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 201
+RESPONSE : {"id": "600add0c-27c5-40e4-a9db-3209908ec4cc", "case_id": "3a9254c3-430a-45bf-970f-3eb5b2799747", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 0, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/3a9254c3-430a-45bf-970f-3eb5b2799747/images/600add0c-27c5-40e4-a9db-3209908ec4cc.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T121023Z&X-Goog-Expires=1800&X-Goog-Sig
+RESULT   : PASS — image uploaded by doctor
+
+
+━━━ PHASE G — Visual Findings (Doctor AI) ━━━
+
+======================================================================
+[G1 | POST /cases/{id}/visual-findings/generate → 202]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/visual-findings/generate
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 202
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "task_id": "8414d96c-8509-4549-8671-c70330bdbbe3", "message": "Visual findings generation started. Poll GET /ai/status for progress."}
+RESULT   : PASS — visual findings triggered
+NOTE     : case=90069002-3a20-4b7f-8ac7-8e94960d1a39
+
+======================================================================
+[G2 | Poll GET /cases/{id}/ai/status → completed]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/ai/status
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "ai_status": "completed", "task_id": null, "error_message": null, "completed_at": "2026-05-07T12:10:25.491187Z", "recommended_rounds": 4}
+RESULT   : PASS — AI completed
+
+======================================================================
+[G3 | GET /cases/{id}/visual-findings → AI findings → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/visual-findings
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "ai_status": "completed", "clinical": {"type_of_lesion": "Inflammatory papules and pustules with some atrophic scars", "site": "Left cheek and jawline", "count": "Multiple (estimated >15 active lesions, plus numerous scars)", "arrangement": "Scattered, irregular distribution", "size": "Papules and pustules range from approximately 1-5 mm in diameter. Scars vary in size and depth.", "color_pattern": "Active lesions are erythematous (red) with some having central yellowish/whitish pustular heads. Scars appear as depressed areas, some hyperpigme
+RESULT   : PASS — visual findings returned
+
+======================================================================
+[G4 | PATCH /cases/{id}/visual-findings → doctor edits → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/visual-findings
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"observations": "Possible inflammatory changes noted in upper dermis"}
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "ai_status": "completed", "clinical": {"type_of_lesion": "Inflammatory papules and pustules with some atrophic scars", "site": "Left cheek and jawline", "count": "Multiple (estimated >15 active lesions, plus numerous scars)", "arrangement": "Scattered, irregular distribution", "size": "Papules and pustules range from approximately 1-5 mm in diameter. Scars vary in size and depth.", "color_pattern": "Active lesions are erythematous (red) with some having central yellowish/whitish pustular heads. Scars appear as depressed areas, some hyperpigme
+RESULT   : PASS — findings updated
+
+======================================================================
+[G5 | POST /cases/{id}/clinical-features → checklist → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/clinical-features
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"features": ["Erythema", "Scaling", "Telangiectasia"], "additional_observations": "Confirmed via dermoscopic examination"}
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "features": ["Erythema", "Scaling", "Telangiectasia"], "additional_observations": "Confirmed via dermoscopic examination", "message": "Saved 3 clinical features."}
+RESULT   : PASS — clinical features saved
+
+
+━━━ PHASE H — Doctor Review Creation ━━━
+
+======================================================================
+[H1 | GET /cases/{id}/review → 404 (or 200 if clinical-features auto-created it)]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"id": "e83983f4-2452-4a23-9b2b-76990b8a1f09", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "is_ai_correct": null, "selected_differentials": [], "confidence_level": null, "confirmed_diagnosis": [], "diagnosis_type": null, "review_notes": "Confirmed via dermoscopic examination", "treatment_plan_json": null, "qa_history": [], "clinical_indicators": ["Erythema", "Scaling", "Telangiectasia"], "review_status": "in_progress", "reviewed_at": null, "created_at": "2026-05-07T12:10:36.186025Z", "updated_at": "2026-05-07T12:10:36.186025Z"}
+RESULT   : PASS — 200 (review auto-created by POST /clinical-features in G5)
+NOTE     : POST /clinical-features may auto-create a review record as side effect
+
+======================================================================
+[H2 | PATCH /cases/{id}/review (update pre-existing) → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"is_ai_correct": true, "selected_differentials": ["Psoriasis vulgaris"], "confidence_level": "high", "confirmed_diagnosis": ["Psoriasis vulgaris"], "review_notes": "Initial QA review notes.", "review_status": "in_progress"}
+STATUS   : 200
+RESPONSE : {"id": "e83983f4-2452-4a23-9b2b-76990b8a1f09", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "is_ai_correct": true, "selected_differentials": ["Psoriasis vulgaris"], "confidence_level": "high", "confirmed_diagnosis": ["Psoriasis vulgaris"], "diagnosis_type": null, "review_notes": "Initial QA review notes.", "treatment_plan_json": null, "qa_history": [], "clinical_indicators": ["Erythema", "Scaling", "Telangiectasia"], "review_status": "in_progress", "reviewed_at": null, "created_at": "2026-05-07T12:10:36.186025Z", "updated_at": "2026-05
+RESULT   : PASS — review updated via PATCH
+NOTE     : Used PATCH because review was auto-created by POST /clinical-features
+
+======================================================================
+[H3 | POST /cases/{id}/review duplicate → 409]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 409
+RESPONSE : {"error": {"code": "CONFLICT", "message": "A review already exists for this case. Use PATCH to update it.", "status": 409, "details": {}}}
+RESULT   : PASS — 409 CONFLICT on duplicate
+
+======================================================================
+[H4 | GET /cases/{id}/review → review returned → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"id": "e83983f4-2452-4a23-9b2b-76990b8a1f09", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "is_ai_correct": true, "selected_differentials": ["Psoriasis vulgaris"], "confidence_level": "high", "confirmed_diagnosis": ["Psoriasis vulgaris"], "diagnosis_type": null, "review_notes": "Initial QA review notes.", "treatment_plan_json": null, "qa_history": [], "clinical_indicators": ["Erythema", "Scaling", "Telangiectasia"], "review_status": "in_progress", "reviewed_at": null, "created_at": "2026-05-07T12:10:36.186025Z", "updated_at": "2026-05
+RESULT   : PASS — review returned
+
+
+━━━ PHASE I — AI-Assist Endpoints (8 total) ━━━
+
+======================================================================
+[I1 | GET /review/ai/complaints with patient token → 403]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/complaints
+HEADER   : Authorization: Bearer <pat2_token>
+STATUS   : 403
+RESPONSE : {"error": {"code": "INSUFFICIENT_ROLE", "message": "This endpoint requires the 'doctor' role", "status": 403, "details": {}}}
+RESULT   : PASS — patient blocked from review AI
+
+======================================================================
+[I2 | GET /review/ai/complaints → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/complaints
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "complaints": ["Papules", "Pustules", "Erythematous", "Atrophic scars", "Post-inflammatory hyperpigmentation", "Purulent discharge", "Crusting", "Scattered distribution", "Multiple lesions (>10)", "Varied lesion size (1mm-5mm)", "Located on left cheek and jawline"]}
+RESULT   : PASS — AI response returned
+
+======================================================================
+[I3 | GET /review/ai/diagnosis → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/diagnosis
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "diagnosis_json": "{\n  \"most_probable_diagnosis\": {\n    \"diagnosis\": \"Acne Vulgaris\",\n    \"likelihood\": 95,\n    \"key_supporting_features\": \"Multiple erythematous papules and pustules on the left cheek and jawline, varying in size (1mm to 5mm), some with central yellowish/whitish heads. Presence of post-inflammatory hyperpigmentation and atrophic scarring indicates chronic and recurrent inflammation. The scattered arrangement and distribution are typical for acne. Age and sex (36-year-old male) are consistent with adult-onset or
+RESULT   : PASS — AI response returned
+
+======================================================================
+[I4 | GET /review/ai/questions → first question]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/questions
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "question": "Are there any associated symptoms such as itching, burning, or pain?", "answer_options": ["Itching", "Burning", "Pain", "None", "Other (please specify)"], "reason": "While the visual description is highly suggestive of acne vulgaris, exploring associated symptoms like itching or burning could help differentiate it from rosacea or folliculitis, which can sometimes present with these symptoms more prominently than typical acne.", "has_more": true}
+RESULT   : PASS — AI response returned
+
+======================================================================
+[I6 | GET /review/ai/summary → clinical summary]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/summary
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "summary_json": "{\n  \"summary\": {\n    \"presenting_complaint\": \"Multiple erythematous papules and pustules with some scarring on the left cheek and jawline, varying from 1mm to 5mm, against a lighter skin tone.\",\n    \"clinical_dialogue_summary\": \"No recorded clinical dialogue.\",\n    \"final_diagnosis\": \"Psoriasis vulgaris\",\n    \"key_supporting_features\": \"Erythema, scaling, and telangiectasia were confirmed, despite the initial visual description of acneiform lesions.\",\n    \"key_findings\": [\n      \"Erythema\",\n     
+RESULT   : PASS — AI response returned
+
+======================================================================
+[I7 | GET /review/ai/treatment-plan → treatment plan]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/treatment-plan
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "treatment_plan_json": "{\n  \"treatment_plan\": {\n    \"medications\": \"For a 36-year-old male with Psoriasis vulgaris, a stepwise approach is recommended, starting with topical therapies for localized disease. If the disease is widespread or not responsive to topicals, phototherapy or systemic agents may be considered.\\n\\n**Initial Topical Therapy:**\\n1.  **High-Potency Topical Corticosteroid:** Clobetasol propionate 0.05% cream or ointment. Apply a thin layer to affected areas twice daily for 2-4 weeks, then reduce to once daily or ev
+RESULT   : PASS — AI response returned
+
+======================================================================
+[I5 | POST /review/ai/questions/next → next question → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/ai/questions/next
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"qa_history": [{"question": "Are there any associated symptoms such as itching, burning, or pain?", "answer": "Noted clinically."}], "questions_left": 2}
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "question": "Are there any comedones present (blackheads or whiteheads)?", "answer_options": ["Yes, many open and closed comedones.", "Yes, predominantly open comedones (blackheads).", "Yes, predominantly closed comedones (whiteheads).", "Few scattered comedones.", "No, not visible."], "reason": "While the visual description details inflammatory lesions, confirming the presence and type of comedones (blackheads and whiteheads) is crucial as it is a hallmark feature of acne vulgaris and would strongly differentiate it from other inflammatory c
+RESULT   : PASS — next question returned
+
+======================================================================
+[I8 | POST /cases/{id}/review/voice-note → Whisper transcription]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review/voice-note
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "transcript": "you"}
+RESULT   : PASS — transcription returned
+NOTE     : Field name corrected: 'audio' (was 'file' in v1). Sent minimal 36-byte WAV.
+
+
+━━━ PHASE J — Complete Review & Case Status ━━━
+
+======================================================================
+[J1 | PATCH /cases/{id}/review → completed → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"review_status": "completed"}
+STATUS   : 200
+RESPONSE : {"id": "e83983f4-2452-4a23-9b2b-76990b8a1f09", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "is_ai_correct": true, "selected_differentials": ["Psoriasis vulgaris"], "confidence_level": "high", "confirmed_diagnosis": ["Psoriasis vulgaris"], "diagnosis_type": null, "review_notes": "Initial QA review notes.", "treatment_plan_json": null, "qa_history": [], "clinical_indicators": ["Erythema", "Scaling", "Telangiectasia"], "review_status": "completed", "reviewed_at": "2026-05-07T12:11:05.169919Z", "created_at": "2026-05-07T12:10:36.186025Z",
+RESULT   : PASS — completed, reviewed_at=2026-05-07T12:11:05.169919Z
+
+======================================================================
+[J2 | PATCH /cases/{id} → clinical_status=follow_up_available → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"clinical_status": "follow_up_available"}
+STATUS   : 200
+RESPONSE : {"id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "case_number": 9220, "display_id": "AI-9220", "case_title": "Psoriasis vulgaris", "original_case_id": null, "patient_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "consultation_type": "new_complaint", "has_visible_lesion": true, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:09:56.089060Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "completed", "clinic
+RESULT   : PASS — clinical status updated
+
+======================================================================
+[J3 | PATCH /cases/{id} clinical_status with patient token → 403/404]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39
+HEADER   : Authorization: Bearer <pat2_token>
+BODY     : {"clinical_status": "resolved"}
+STATUS   : 403
+RESPONSE : {"error": {"code": "FORBIDDEN", "message": "Only a doctor can change the clinical status", "status": 403, "details": {}}}
+RESULT   : PASS — patient blocked (403=role check, 404=case not theirs)
+NOTE     : 403 if patient owns case but wrong role; 404 if case belongs to different patient
+
+======================================================================
+[J4 | POST /cases/{id}/bookmark → is_bookmarked=true → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/bookmark
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "is_bookmarked": true}
+RESULT   : PASS — is_bookmarked=True
+
+======================================================================
+[J5 | POST /cases/{id}/bookmark again → toggle → is_bookmarked=false]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/bookmark
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "is_bookmarked": false}
+RESULT   : PASS — toggled to False
+
+======================================================================
+[J6 | GET /cases?bookmarked=true → bookmarked list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases?bookmarked=true
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"items": [], "total": 0, "page": 1, "page_size": 20, "has_next": false}
+RESULT   : PASS — bookmarked cases listed
+
+
+━━━ PHASE K — Todos ━━━
+
+======================================================================
+[K1 | POST /cases/{id}/todos → create → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/todos
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"title": "Order patch test", "description": "Rule out contact dermatitis."}
+STATUS   : 201
+RESPONSE : {"id": "9606a75f-daa3-41ec-bcf5-e7a173ed9e05", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "title": "Order patch test", "description": "Rule out contact dermatitis.", "due_date": null, "is_completed": false, "completed_at": null, "created_at": "2026-05-07T12:11:05.725180Z", "updated_at": "2026-05-07T12:11:05.725180Z"}
+RESULT   : PASS — todo_id=9606a75f-daa3-41ec-bcf5-e7a173ed9e05
+
+======================================================================
+[K2 | GET /cases/{id}/todos → list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/todos
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "total": 1, "items": [{"id": "9606a75f-daa3-41ec-bcf5-e7a173ed9e05", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "title": "Order patch test", "description": "Rule out contact dermatitis.", "due_date": null, "is_completed": false, "completed_at": null, "created_at": "2026-05-07T12:11:05.725180Z", "updated_at": "2026-05-07T12:11:05.725180Z"}]}
+RESULT   : PASS — todos listed
+
+======================================================================
+[K3 | PATCH todo → is_completed=true → completed_at set]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/todos/9606a75f-daa3-41ec-bcf5-e7a173ed9e05
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"is_completed": true}
+STATUS   : 200
+RESPONSE : {"id": "9606a75f-daa3-41ec-bcf5-e7a173ed9e05", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "title": "Order patch test", "description": "Rule out contact dermatitis.", "due_date": null, "is_completed": true, "completed_at": "2026-05-07T12:11:05.908058Z", "created_at": "2026-05-07T12:11:05.725180Z", "updated_at": "2026-05-07T12:11:05.725180Z"}
+RESULT   : PASS — completed_at=2026-05-07T12:11:05.908058Z
+
+======================================================================
+[K4 | PATCH todo → is_completed=false → completed_at cleared]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/todos/9606a75f-daa3-41ec-bcf5-e7a173ed9e05
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"is_completed": false}
+STATUS   : 200
+RESPONSE : {"id": "9606a75f-daa3-41ec-bcf5-e7a173ed9e05", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "title": "Order patch test", "description": "Rule out contact dermatitis.", "due_date": null, "is_completed": false, "completed_at": null, "created_at": "2026-05-07T12:11:05.725180Z", "updated_at": "2026-05-07T12:11:05.887074Z"}
+RESULT   : PASS — completed_at=None (None)
+
+======================================================================
+[K5 | DELETE /cases/{id}/todos/{id} → 204]
+REQUEST  : DELETE https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/todos/9606a75f-daa3-41ec-bcf5-e7a173ed9e05
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — todo deleted
+
+======================================================================
+[K6 | GET /cases/{id}/todos after delete → todo absent]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/todos
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "total": 0, "items": []}
+RESULT   : PASS — todo absent from list
+
+
+━━━ PHASE L — SNOMED Entities ━━━
+
+======================================================================
+[L1 | GET /cases/{id}/entities → SNOMED-coded entities → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/entities
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 500
+RESPONSE : {"error": {"code": "INTERNAL_ERROR", "message": "1 validation error for ClinicalEntity\nconfidence\n  Input should be a valid string [type=string_type, input_value=50, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.10/v/string_type", "status": 500, "details": {}}}
+RESULT   : FAIL — 500
+
+
+━━━ PHASE M — Report Generation & Stale Regen ━━━
+
+======================================================================
+[M1 | POST /cases/{id}/report → trigger → 202]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/report
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 202
+RESPONSE : {"message": "Report generation started. Poll GET /report to check when ready.", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "task_id": "46a0cb3a-5427-4b4d-b71e-816114ad7478"}
+RESULT   : PASS — report triggered
+
+======================================================================
+[M2 | Poll GET /cases/{id}/report → wait for 200 + gcs_path]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/report
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"id": "199614bb-90a1-4dc0-8a32-b5ba3a66b4c0", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "report_type": "doctor", "generated_at": "2026-05-07T12:11:11.766547Z", "download_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/reports/report_doctor.pdf?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T121113Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=4d92aff2368313fc757e0448b6dba70c568091591269f
+RESULT   : PASS — report ready after 6s
+
+======================================================================
+[M3 | GET /reports/ → global reports list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/reports/
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"reports": [{"id": "199614bb-90a1-4dc0-8a32-b5ba3a66b4c0", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "case_number": 9220, "patient_name": "QA Patient Two", "report_type": "doctor", "generated_at": "2026-05-07T12:11:11.766547Z", "download_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/reports/report_doctor.pdf?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T121113Z&X-Goog-Expires=1800&X-Goog-SignedHeaders
+RESULT   : PASS — reports listed
+
+======================================================================
+[M4 | PATCH /review → revise diagnosis → updated_at refreshed]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/review
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"confirmed_diagnosis": ["Eczema (revised)"], "review_status": "completed"}
+STATUS   : 200
+RESPONSE : {"id": "e83983f4-2452-4a23-9b2b-76990b8a1f09", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "doctor_id": "134bee75-ee95-4df9-a837-ba1b776c6e6b", "is_ai_correct": true, "selected_differentials": ["Psoriasis vulgaris"], "confidence_level": "high", "confirmed_diagnosis": ["Eczema (revised)"], "diagnosis_type": null, "review_notes": "Initial QA review notes.", "treatment_plan_json": null, "qa_history": [], "clinical_indicators": ["Erythema", "Scaling", "Telangiectasia"], "review_status": "completed", "reviewed_at": "2026-05-07T12:11:14.029394Z", "created_at": "2026-05-07T12:10:36.186025Z", "
+RESULT   : PASS — diagnosis revised
+
+======================================================================
+[M5 | POST /cases/{id}/report after revision → stale → 202 (not 409)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/90069002-3a20-4b7f-8ac7-8e94960d1a39/report
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 202
+RESPONSE : {"message": "Report generation started. Poll GET /report to check when ready.", "case_id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "task_id": "2c5e8e49-5d0d-43b3-a156-9cf0b65d6e48"}
+RESULT   : PASS — stale detected, regenerating
+
+
+━━━ PHASE N — Case Search ━━━
+
+======================================================================
+[N1 | GET /cases/search?q=QA+Patient → 200 [CORRECTED: GET not POST]]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/search?q=QA+Patient
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "90069002-3a20-4b7f-8ac7-8e94960d1a39", "case_number": 9220, "display_id": "AI-9220", "patient_id": "28db636d-c998-48f2-91bd-d95f84b2c5ae", "patient_name": "QA Patient Two", "consultation_type": "new_complaint", "ai_status": "completed", "clinical_status": "follow_up_available", "body_location": "Back", "presenting_complaint": "Dark mole on back, changing size", "image_count": 1, "created_at": "2026-05-07T12:09:56.075192Z"}], "total": 1, "page": 1, "page_size": 20, "has_next": false}
+RESULT   : PASS — search results returned
+NOTE     : Checklist had POST — live API is GET with query param
+
+
+━━━ PHASE O — Trichoscopic Studies ━━━
+
+======================================================================
+[O1 | GET /studies → active studies list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/studies
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : [{"id": "c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6", "title": "Trichoscopic Stability Model", "description": "Clinical labeling of Alopecia Areata dermoscopic imagery. Mark trichoscopic features present in each specimen to help build the AI stability model.", "is_active": true, "submission_count": 10}]
+RESULT   : PASS — 1 studies
+NOTE     : study_id=c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6
+
+======================================================================
+[O2 | GET /studies/{id}/specimens/next-code → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/studies/c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6/specimens/next-code
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : {"specimen_code": "AA-0011-B"}
+RESULT   : PASS — next code: AA-0011-B
+
+======================================================================
+[O3 | GET /studies/{id}/features → 8 features → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/studies/c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6/features
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 200
+RESPONSE : [{"key": "black_dots", "label": "Black Dots", "reference_image_url": "https://storage.googleapis.com/aiderm-cliniq-storage/studies/reference_images/black_dots.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T121114Z&X-Goog-Expires=7200&X-Goog-SignedHeaders=host&X-Goog-Signature=843a7f4a4a8b16f42424a70bf1f590d906540baa27c091b5d21e2abc626652e45536319407940a95fbe651fd1c9a929c9e38564a6e3781669e4c737463a3095c20fd495257e0f70ba480d588d829b243d5fbf27751c48a8060c48978b61d414
+RESULT   : PASS — 8 features returned
+
+======================================================================
+[O4 | POST /studies/{id}/submit → labelling → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/studies/c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6/submit
+HEADER   : Authorization: Bearer <doctor_token>
+STATUS   : 201
+RESPONSE : {"submission_id": "067b44ee-59fc-4ac4-98f3-04b945bbd24b", "specimen_code": "AA-0011-B", "report_url": "https://storage.googleapis.com/aiderm-cliniq-storage/studies/c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6/submissions/067b44ee-59fc-4ac4-98f3-04b945bbd24b_report.pdf?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T121116Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=a2a521ad528eb54f9a3abab693be82a2cfe5484fc8d9360343393d955dab604d906be3349b46f408db4f8d308a6c9
+RESULT   : PASS — study submitted
+NOTE     : Corrected to multipart form data (file + form fields). Was JSON in v1.
+
+======================================================================
+[O5 | POST /studies/{id}/submit invalid stability → 400/422]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/studies/c1a2b3c4-d5e6-f7a8-b9c0-d1e2f3a4b5c6/submit
+HEADER   : Authorization: Bearer <doctor_token>
+BODY     : {"stability": "INVALID_VALUE"}
+STATUS   : 400
+RESPONSE : {"error": {"code": "BAD_REQUEST", "message": "Invalid stability. Must be one of: regrowing, stable, unstable", "status": 400, "details": {}}}
+RESULT   : PASS — invalid stability rejected
+
+======================================================================
+[O6 | GET /studies with patient token → 403]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/studies
+HEADER   : Authorization: Bearer <pat2_token>
+STATUS   : 403
+RESPONSE : {"error": {"code": "INSUFFICIENT_ROLE", "message": "This endpoint requires the 'doctor' role", "status": 403, "details": {}}}
+RESULT   : PASS — patient cannot access studies
+
+
+━━━ PHASE P — Doctor Auth Cleanup ━━━
+
+======================================================================
+[P1 | POST /auth/logout → 204]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/logout
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — doctor logged out
+
+======================================================================
+[P2 | POST /auth/refresh revoked token → 401]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/refresh
+STATUS   : 401
+RESPONSE : {"error": {"code": "INVALID_TOKEN", "message": "Refresh token is invalid or has been revoked", "status": 401, "details": {}}}
+RESULT   : PASS — revoked token rejected
+
+
+======================================================================
+SUMMARY
+─────────────────────────────────────────────────────────────────────
+Setup:
+  SETUP    PASS  Admin login
+  SETUP2   PASS  Register Patient 2 (for QR scenario)
+  SETUP3   PASS  Patient 2 creates case (for QR scan)
+  SETUP4   PASS  Patient 2 uploads clinical image
+  SETUP_AI1 PASS  Patient 2 triggers AI analysis (POST /cases/{id}/ai/analyze)
+  SETUP_AI2 PASS  Poll Patient 2 AI completion (status=completed)
+  SETUP5   PASS  Patient 2 generates QR token
+
+Doctor Registration & Approval:
+  A1       PASS  POST /auth/register/doctor → 201 pending
+  A2       PASS  POST /auth/login unapproved doctor → 401/403
+  A3       PASS  POST /auth/register/doctor (2nd for reject test) → 201
+  A4       PASS  GET /admin/doctors/pending → doctor appears
+  A5       PASS  GET /admin/doctors → all doctors list
+  A6       PASS  POST /admin/doctors/{id}/approve → 200
+  A7       PASS  POST /admin/doctors/{id}/reject → 204
+  A8       PASS  POST /auth/login approved doctor → 200
+
+Admin User Management:
+  B1       PASS  GET /admin/users → paginated list → 200
+  B2       PASS  GET /admin/users?role=doctor → filtered → 200
+  B3       PASS  GET /admin/users/{user_id} → full detail → 200
+  B4       PASS  PATCH /admin/users/{id} → suspend (is_active=false) → 200
+  B5       PASS  PATCH /admin/users/{id} → reactivate (is_active=true) → 200
+  B6       PASS  POST /admin/users/{id}/resend-verification → 204
+  B7       PASS  GET /admin/cases → all cases across all patients → 200
+  B8       PASS  GET /admin/cases/{case_id} → full case detail → 200
+  B9       PASS  GET /admin/stats → platform counts + invariant check
+  B10      PASS  GET /admin/stats with doctor token → 403
+
+Admin AI Prompt Overrides:
+  C1       PASS  GET /admin/prompts → list all prompt keys → 200
+  C2       PASS  PATCH /admin/prompts/{key} → set override → 200
+  C3       PASS  GET /admin/prompts after override → verify persisted
+  C4       PASS  DELETE /admin/prompts/{key} → reset to default → 200
+  C5       PASS  GET /admin/prompts with doctor token → 403
+
+Doctor Dashboard:
+  D1       PASS  GET /cases/doctors/me/stats → dashboard stats → 200
+  D2       PASS  GET /cases → assigned cases list → 200
+  D3       PASS  GET /users/by-code/{code} → patient lookup → 200
+
+QR Scan & Assignment:
+  E1       PASS  POST /qr/scan/{token} → doctor assigned → 200
+  E2       PASS  POST /qr/scan/{token} rescan same token → 410
+  E3       PASS  GET /cases/{id} → doctor_id set → 200
+  E4       PASS  POST /qr/by-display-id/{display_id} → access by AI-XXXX
+
+Doctor-Initiated Case:
+  F1       PASS  POST /cases/doctor → create case for patient → 201
+  F2       PASS  POST /cases/{id}/images clinical (doctor) → 201
+
+Visual Findings (AI):
+  G1       PASS  POST /cases/{id}/visual-findings/generate → 202
+  G2       PASS  Poll GET /cases/{id}/ai/status → completed
+  G3       PASS  GET /cases/{id}/visual-findings → AI findings → 200
+  G4       PASS  PATCH /cases/{id}/visual-findings → doctor edits → 200
+  G5       PASS  POST /cases/{id}/clinical-features → checklist → 200
+
+Doctor Review:
+  H1       PASS  GET /cases/{id}/review → 404 (or 200 if clinical-features auto-created it)
+  H2       PASS  PATCH /cases/{id}/review (update pre-existing) → 200
+  H3       PASS  POST /cases/{id}/review duplicate → 409
+  H4       PASS  GET /cases/{id}/review → review returned → 200
+
+AI-Assist (8 endpoints):
+  I1       PASS  GET /review/ai/complaints with patient token → 403
+  I2       PASS  GET /review/ai/complaints → 200
+  I3       PASS  GET /review/ai/diagnosis → 200
+  I4       PASS  GET /review/ai/questions → first question
+  I6       PASS  GET /review/ai/summary → clinical summary
+  I7       PASS  GET /review/ai/treatment-plan → treatment plan
+  I5       PASS  POST /review/ai/questions/next → next question → 200
+  I8       PASS  POST /cases/{id}/review/voice-note → Whisper transcription
+
+Complete Review & Status:
+  J1       PASS  PATCH /cases/{id}/review → completed → 200
+  J2       PASS  PATCH /cases/{id} → clinical_status=follow_up_available → 200
+  J3       PASS  PATCH /cases/{id} clinical_status with patient token → 403/404
+  J4       PASS  POST /cases/{id}/bookmark → is_bookmarked=true → 200
+  J5       PASS  POST /cases/{id}/bookmark again → toggle → is_bookmarked=false
+  J6       PASS  GET /cases?bookmarked=true → bookmarked list → 200
+
+Todos:
+  K1       PASS  POST /cases/{id}/todos → create → 201
+  K2       PASS  GET /cases/{id}/todos → list → 200
+  K3       PASS  PATCH todo → is_completed=true → completed_at set
+  K4       PASS  PATCH todo → is_completed=false → completed_at cleared
+  K5       PASS  DELETE /cases/{id}/todos/{id} → 204
+  K6       PASS  GET /cases/{id}/todos after delete → todo absent
+
+SNOMED Entities:
+  L1       FAIL  GET /cases/{id}/entities → SNOMED-coded entities → 200
+
+Report Generation:
+  M1       PASS  POST /cases/{id}/report → trigger → 202
+  M2       PASS  Poll GET /cases/{id}/report → wait for 200 + gcs_path
+  M3       PASS  GET /reports/ → global reports list → 200
+  M4       PASS  PATCH /review → revise diagnosis → updated_at refreshed
+  M5       PASS  POST /cases/{id}/report after revision → stale → 202 (not 409)
+
+Case Search:
+  N1       PASS  GET /cases/search?q=QA+Patient → 200 [CORRECTED: GET not POST]
+
+Trichoscopic Studies:
+  O1       PASS  GET /studies → active studies list → 200
+  O2       PASS  GET /studies/{id}/specimens/next-code → 200
+  O3       PASS  GET /studies/{id}/features → 8 features → 200
+  O4       PASS  POST /studies/{id}/submit → labelling → 201
+  O5       PASS  POST /studies/{id}/submit invalid stability → 400/422
+  O6       PASS  GET /studies with patient token → 403
+
+Auth Cleanup:
+  P1       PASS  POST /auth/logout → 204
+  P2       PASS  POST /auth/refresh revoked token → 401
+
+Total: 82 PASS  1 FAIL  0 SKIP
+======================================================================

@@ -1,0 +1,1050 @@
+"""
+workers/tasks/analysis.py — AI Analysis Celery Task Chain
+==========================================================
+
+TASK CHAIN (ISS-001 guard — ONE sequential chain, never parallel)
+-----------------------------------------------------------------
+  inspect_images_task(case_id)
+      ↓ returns case_id if images are adequate; aborts chain if not
+  analyse_images_task(case_id)
+      ↓ returns {"case_id": ..., "description_json": ..., "diagnosis_json": ...}
+  save_results_task(result_dict)
+      → saves VisualDescription + DifferentialDiagnosis rows
+      → updates Case: ai_status=completed, case_summary
+
+The chain is triggered as:
+    chain(
+        inspect_images_task.s(case_id),
+        analyse_images_task.s(),
+        save_results_task.s(),
+    ).apply_async()
+
+GATE PATTERN (ISS-003 guard — abort on quality failure)
+--------------------------------------------------------
+If inspect_images_task finds the images inadequate, it:
+  1. Updates case.ai_status = FAILED and case.celery_task_id = None
+  2. Raises celery.exceptions.Ignore — stops the chain without marking
+     the task itself as failed (which would look like a worker crash)
+
+TIMEOUTS (ISS-008 guard — prevent hanging AI calls)
+----------------------------------------------------
+Each task declares time_limit (hard kill) and soft_time_limit (SIGTERM).
+The soft limit fires first → task can clean up DB state before dying.
+On soft_time_limit, SoftTimeLimitExceeded is raised inside the task.
+
+IDEMPOTENCY (ISS-009 guard — safe to call twice)
+------------------------------------------------
+The service layer checks ai_status == PENDING before enqueuing.
+But tasks also double-check at the start to handle the race where
+two requests arrive simultaneously before the status update commits.
+
+DB ACCESS IN TASKS
+------------------
+Celery workers are synchronous processes. We use asyncio.run() to
+execute our async SQLAlchemy queries inside each task. This creates
+a fresh event loop per task invocation, which is correct — each task
+is independent and long-lived connections in workers are problematic.
+"""
+
+import asyncio
+import functools
+import json
+
+from celery import chain
+from celery.exceptions import Ignore, SoftTimeLimitExceeded
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from src.ai.llm_router import call_llm, extract_json
+from src.ai.prompts.image_analysis_prompts import ImageAnalysisPrompts
+from src.ai.prompts.patient_consultation_prompts import PatientConsultationPrompts
+from src.config import settings
+from src.exceptions import AIProviderException, StorageException
+from src.logger import get_logger
+from src.models.base import new_uuid
+from src.models.case import AiStatus, Case, RedFlagStatus
+from src.models.case_image import CaseImage
+from src.models.differential_diagnosis import DifferentialDiagnosis
+from src.models.doctor_review import DoctorReview
+from src.models.patient_profile import PatientProfile
+from src.models.visual_description import VisualDescription
+from src.storage import gcs
+from src.workers.celery_app import celery_app
+
+logger = get_logger(__name__)
+
+# ------------------------------------------------------------------ #
+# DB helper — sync wrapper for async SQLAlchemy
+# ------------------------------------------------------------------ #
+
+def _make_engine():
+    """
+    Create a fresh async engine for use inside a Celery task.
+
+    WHY NullPool?
+    -------------
+    Celery workers are long-lived processes. Connection pools that
+    persist across task invocations can cause issues (stale connections,
+    fork-safety). NullPool creates a new connection for each use and
+    closes it immediately — safe for forked workers.
+    """
+    return create_async_engine(
+        settings.DATABASE_URL,
+        poolclass=NullPool,
+    )
+
+
+def _run_async(coro):
+    """Run an async coroutine synchronously inside a Celery task."""
+    return asyncio.run(coro)
+
+
+async def _get_case(session: AsyncSession, case_id: str) -> Case | None:
+    result = await session.execute(select(Case).where(Case.id == case_id))
+    return result.scalar_one_or_none()
+
+
+async def _get_case_images(session: AsyncSession, case_id: str) -> list[CaseImage]:
+    result = await session.execute(
+        select(CaseImage).where(CaseImage.case_id == case_id).order_by(CaseImage.upload_order)
+    )
+    return list(result.scalars().all())
+
+
+async def _get_patient_particulars(session: AsyncSession, patient_id: str) -> str:
+    """
+    Build a personal particulars string for the AI prompt.
+    Format: "Age: 34, Sex: Female" — or falls back to basic info.
+    """
+    result = await session.execute(
+        select(PatientProfile).where(PatientProfile.user_id == patient_id)
+    )
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        return "Age: unknown, Sex: unknown"
+
+    parts = []
+    if profile.date_of_birth:
+        from datetime import date
+        age = (date.today() - profile.date_of_birth).days // 365
+        parts.append(f"Age: {age}")
+    if profile.gender:
+        parts.append(f"Sex: {profile.gender}")
+    return ", ".join(parts) if parts else "Age: unknown, Sex: unknown"
+
+
+async def _get_follow_up_context(session: AsyncSession, case: Case) -> str:
+    """
+    Build a follow-up context block to inject into AI prompts.
+    Returns an empty string when this is a new complaint (no original_case_id).
+    When it IS a follow-up, returns a formatted block with previous diagnosis,
+    confirmed diagnosis, treatment, symptom progression, and trimmed summary.
+    """
+    if not case.original_case_id:
+        return ""
+
+    orig_result = await session.execute(select(Case).where(Case.id == case.original_case_id))
+    orig = orig_result.scalar_one_or_none()
+    if orig is None:
+        return ""
+
+    parts = ["This is a follow-up consultation. Previous visit context:"]
+
+    if orig.case_title:
+        parts.append(f"- Previous AI diagnosis: {orig.case_title}")
+
+    if case.symptom_progression:
+        parts.append(f"- Symptom progression since last visit: {case.symptom_progression}")
+
+    dr_result = await session.execute(
+        select(DoctorReview).where(DoctorReview.case_id == case.original_case_id)
+    )
+    dr = dr_result.scalar_one_or_none()
+    if dr:
+        if dr.confirmed_diagnosis:
+            try:
+                import json as _json
+                _cd_list = _json.loads(dr.confirmed_diagnosis)
+                _cd_str = ", ".join(_cd_list) if _cd_list else dr.confirmed_diagnosis
+            except (ValueError, TypeError):
+                _cd_str = dr.confirmed_diagnosis
+            parts.append(f"- Doctor's confirmed diagnosis: {_cd_str}")
+        if dr.treatment_plan_json:
+            import json as _json
+            try:
+                plan = _json.loads(dr.treatment_plan_json)
+                meds = plan.get("treatment_plan", {}).get("medications", [])
+                if meds:
+                    med_names = [m.get("medication", "") for m in meds if isinstance(m, dict)]
+                    med_str = ", ".join(m for m in med_names if m)
+                    if med_str:
+                        parts.append(f"- Previous treatment: {med_str}")
+            except Exception:
+                pass
+
+    if orig.case_summary:
+        trimmed = orig.case_summary[:400] + "..." if len(orig.case_summary) > 400 else orig.case_summary
+        parts.append(f"- Previous case summary: {trimmed}")
+
+    return "\n".join(parts)
+
+
+async def _fail_case(session: AsyncSession, case_id: str, reason: str) -> None:
+    """Mark the case as FAILED with a clear error recorded in case_summary."""
+    case = await _get_case(session, case_id)
+    if case:
+        case.ai_status = AiStatus.FAILED
+        case.celery_task_id = None
+        case.case_summary = f"Analysis failed: {reason}"
+        await session.commit()
+    logger.warning("case_analysis_failed", case_id=case_id, reason=reason)
+
+
+# ------------------------------------------------------------------ #
+# Task 1 — Inspect Images
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="src.workers.tasks.analysis.inspect_images_task",
+    time_limit=120,
+    soft_time_limit=100,
+    max_retries=2,
+    default_retry_delay=10,
+)
+def inspect_images_task(self, case_id: str) -> str:
+    """
+    Gate task: verify uploaded images are adequate for dermatological analysis.
+
+    Returns case_id to pass down the chain.
+    Raises Ignore (stopping the chain) if images are inadequate or missing.
+
+    Steps:
+    1. Fetch case + images from DB
+    2. Idempotency check: abort if already processing or completed
+    3. Download image bytes from GCS
+    4. Call Gemini with inspect_images() prompt
+    5. Parse response: {"answer":"yes"} or {"answer":"no","reason":"..."}
+    6. On "no": mark case FAILED, raise Ignore
+    7. On "yes": return case_id
+    """
+    logger.info("inspect_images_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None:
+                logger.error("inspect_images_task_case_not_found", case_id=case_id)
+                raise Ignore()
+
+            # Idempotency: only run if currently processing
+            if case.ai_status not in (AiStatus.PROCESSING,):
+                logger.warning(
+                    "inspect_images_task_unexpected_status",
+                    case_id=case_id,
+                    status=case.ai_status,
+                )
+                raise Ignore()
+
+            images = await _get_case_images(session, case_id)
+            if not images:
+                await _fail_case(session, case_id, "No images uploaded for this case")
+                raise Ignore()
+
+        # Download image bytes (outside session — no DB needed)
+        image_bytes = []
+        for img in images:
+            try:
+                data = gcs.download_bytes(img.gcs_path)
+                image_bytes.append(data)
+            except StorageException as exc:
+                async with factory() as session:
+                    await _fail_case(session, case_id, f"Could not download image: {exc}")
+                raise Ignore() from exc
+
+        # Call LLM inspect gate (with automatic fallback)
+        try:
+            prompt = ImageAnalysisPrompts.inspect_images()
+            response_text = call_llm(prompt, images=image_bytes, json_mode=True)
+            result = extract_json(response_text)
+        except AIProviderException as exc:
+            async with factory() as session:
+                await _fail_case(session, case_id, f"AI provider error: {exc}")
+            raise Ignore() from exc
+
+        if result.get("answer") != "yes":
+            reason = result.get("reason", "Images are not adequate for analysis")
+            async with factory() as session:
+                await _fail_case(session, case_id, reason)
+            raise Ignore()
+
+        logger.info("inspect_images_task_ok", case_id=case_id)
+        await engine.dispose()
+        return case_id
+
+    try:
+        return _run_async(_run())
+    except Ignore:
+        raise
+    except SoftTimeLimitExceeded:
+        _run_async(_fail_task_on_timeout(case_id, "inspect_images"))
+        raise Ignore()
+    except (AIProviderException, StorageException) as exc:
+        logger.error("inspect_images_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("inspect_images_task_unexpected_error", case_id=case_id)
+        raise
+
+
+# ------------------------------------------------------------------ #
+# Task 2 — Analyse Images
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="src.workers.tasks.analysis.analyse_images_task",
+    time_limit=180,
+    soft_time_limit=160,
+    max_retries=1,
+    default_retry_delay=15,
+)
+def analyse_images_task(self, case_id: str) -> dict:
+    """
+    Core analysis task: gate check + visual description + first differential.
+
+    Replaces the old inspect_images_task → analyse_images_task two-step:
+    - Downloads image once (was downloaded twice before)
+    - Runs inspect+describe and differential IN PARALLEL (asyncio.gather)
+    - Inspect gate is merged into the describe call (inspect_and_describe prompt)
+
+    Steps:
+    1. Fetch case, images, patient profile from DB
+    2. Download image bytes from GCS (once)
+    3. Parallel: [inspect_and_describe(), generate_first_differential()]
+    4. If image inadequate → fail case, abort
+    5. Return {"case_id": ..., "description_json": ..., "diagnosis_json": ...}
+    """
+    logger.info("analyse_images_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None or case.ai_status != AiStatus.PROCESSING:
+                raise Ignore()
+
+            images = await _get_case_images(session, case_id)
+            if not images:
+                async with factory() as session:
+                    await _fail_case(session, case_id, "No images uploaded for this case")
+                raise Ignore()
+
+            personal_particulars = await _get_patient_particulars(session, case.patient_id)
+            follow_up_context = await _get_follow_up_context(session, case)
+
+        # Download image bytes once (previously downloaded separately in inspect + analyse)
+        image_bytes = []
+        for img in images:
+            try:
+                image_bytes.append(gcs.download_bytes(img.gcs_path))
+            except StorageException as exc:
+                async with factory() as session:
+                    await _fail_case(session, case_id, f"Could not download image: {exc}")
+                raise Ignore() from exc
+
+        desc_prompt = ImageAnalysisPrompts.inspect_and_describe().format(
+            personal_particulars=personal_particulars
+        )
+        diag_prompt = ImageAnalysisPrompts.generate_first_differential().format(
+            personal_particulars=personal_particulars,
+            follow_up_context=follow_up_context,
+        )
+
+        # Run both calls in parallel — each is a blocking sync call so we
+        # push them onto the thread pool and await together.
+        loop = asyncio.get_running_loop()
+        desc_fut = loop.run_in_executor(
+            None, functools.partial(call_llm, desc_prompt, image_bytes, True)
+        )
+        diag_fut = loop.run_in_executor(
+            None, functools.partial(call_llm, diag_prompt, image_bytes, True)
+        )
+        desc_text, diag_text = await asyncio.gather(desc_fut, diag_fut, return_exceptions=True)
+
+        # Handle describe/gate result first
+        if isinstance(desc_text, Exception):
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Description AI call failed: {desc_text}")
+            raise Ignore()
+
+        try:
+            description_json = extract_json(desc_text)
+        except AIProviderException as exc:
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Description parse failed: {exc}")
+            raise Ignore() from exc
+
+        # Gate check — image inadequate
+        if description_json.get("adequate") == "no":
+            reason = description_json.get("reason", "Images are not adequate for analysis")
+            async with factory() as session:
+                await _fail_case(session, case_id, reason)
+            raise Ignore()
+
+        # Remove the gate field before saving — save_results_task doesn't need it
+        description_json.pop("adequate", None)
+
+        # Handle differential result
+        if isinstance(diag_text, Exception):
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Differential AI call failed: {diag_text}")
+            raise Ignore()
+
+        try:
+            diagnosis_json = extract_json(diag_text)
+        except AIProviderException as exc:
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Differential parse failed: {exc}")
+            raise Ignore() from exc
+
+        logger.info("analyse_images_task_ok", case_id=case_id)
+        await engine.dispose()
+        return {
+            "case_id": case_id,
+            "description_json": json.dumps(description_json),
+            "diagnosis_json": json.dumps(diagnosis_json),
+        }
+
+    try:
+        return _run_async(_run())
+    except Ignore:
+        raise
+    except SoftTimeLimitExceeded:
+        _run_async(_fail_task_on_timeout(case_id, "analyse_images"))
+        raise Ignore()
+    except (AIProviderException, StorageException) as exc:
+        logger.error("analyse_images_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("analyse_images_task_unexpected_error", case_id=case_id)
+        raise
+
+
+# ------------------------------------------------------------------ #
+# Task 3 — Save Results
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="src.workers.tasks.analysis.save_results_task",
+    time_limit=60,
+    soft_time_limit=50,
+    max_retries=3,
+    default_retry_delay=5,
+)
+def save_results_task(self, analysis_result: dict) -> None:
+    """
+    Persist AI results to DB and mark case as completed.
+
+    Receives analysis_result dict from analyse_images_task (via chain):
+    {
+        "case_id": str,
+        "description_json": str,   # JSON string
+        "diagnosis_json": str,     # JSON string
+    }
+
+    Steps:
+    1. Parse description_json → extract key fields for quick display
+    2. Parse diagnosis_json → extract most_probable_diagnosis + confidence
+    3. Insert VisualDescription row (round_number=0)
+    4. Insert DifferentialDiagnosis row (round_number=0, is_final=True)
+    5. Update Case: ai_status=COMPLETED, case_summary, celery_task_id=None
+    """
+    case_id = analysis_result.get("case_id", "unknown")
+    logger.info("save_results_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        description_json_str = analysis_result["description_json"]
+        diagnosis_json_str = analysis_result["diagnosis_json"]
+
+        # Parse for extracted fields
+        try:
+            desc = json.loads(description_json_str)
+        except (json.JSONDecodeError, TypeError):
+            desc = {}
+
+        try:
+            diag = json.loads(diagnosis_json_str)
+        except (json.JSONDecodeError, TypeError):
+            diag = {}
+
+        most_probable = diag.get("most_probable_diagnosis", {})
+        most_probable_name = (
+            most_probable.get("diagnosis") if isinstance(most_probable, dict) else None
+        )
+        confidence = diag.get("confidence in answer") or diag.get("confidence")
+
+        # Parse key_supporting_features into short symptom tag chips
+        # e.g. "Dry, itchy patches; Redness; Chronic course" → ["Dry, itchy patches", "Redness", "Chronic course"]
+        raw_features: str = (
+            most_probable.get("key_supporting_features", "") if isinstance(most_probable, dict) else ""
+        ) or ""
+        symptom_tags: list[str] = []
+        if raw_features:
+            # Split on semicolon first, then comma if no semicolons found
+            if ";" in raw_features:
+                parts = [p.strip() for p in raw_features.split(";")]
+            else:
+                parts = [p.strip() for p in raw_features.split(",")]
+            # Keep only non-empty tags under 60 chars
+            symptom_tags = [p for p in parts if p and len(p) <= 60][:8]
+
+        overall_description = desc.get("overall_description")
+        type_of_lesion = desc.get("type_of_lesion")
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None:
+                logger.error("save_results_task_case_not_found", case_id=case_id)
+                return
+
+            # VisualDescription row — only for image-based cases.
+            # No-lesion path passes description_json="{}" (no image → no description).
+            # Skipping the row means _get_latest_visual_desc returns the readable
+            # "No visual description available." fallback instead of the raw "{}".
+            if desc:  # desc is {} for no-lesion; non-empty dict for image path
+                visual = VisualDescription(
+                    id=new_uuid(),
+                    case_id=case_id,
+                    round_number=0,
+                    description_json=description_json_str,
+                    overall_description=overall_description,
+                )
+                session.add(visual)
+
+            # DifferentialDiagnosis row
+            differential = DifferentialDiagnosis(
+                id=new_uuid(),
+                case_id=case_id,
+                round_number=0,
+                is_final=True,
+                diagnosis_json=diagnosis_json_str,
+                most_probable_diagnosis=most_probable_name,
+                confidence=str(confidence) if confidence else None,
+            )
+            session.add(differential)
+
+            # Ask AI how many questions this case needs (recommendation for patient)
+            recommended_rounds = 5  # safe default if call fails
+            try:
+                rounds_prompt = PatientConsultationPrompts.question_numbers().format(
+                    diagnoses=diagnosis_json_str
+                )
+                rounds_text = call_llm(rounds_prompt, json_mode=True)
+                rounds_data = extract_json(rounds_text)
+                raw = rounds_data.get("no_of_questions")
+                if isinstance(raw, int) and 1 <= raw <= 15:
+                    recommended_rounds = max(raw, 5)
+            except Exception:
+                pass  # non-critical — default is fine
+
+            # Build numbered case summary matching the standard Flutter format
+            profile_result = await session.execute(
+                select(PatientProfile).where(PatientProfile.user_id == case.patient_id)
+            )
+            profile = profile_result.scalar_one_or_none()
+            age_str = "Not provided"
+            sex_str = "Not provided"
+            if profile:
+                if profile.date_of_birth:
+                    from datetime import date as _date
+                    age_str = str((_date.today() - profile.date_of_birth).days // 365)
+                if profile.gender:
+                    sex_str = profile.gender
+            chief_complaint = case.presenting_complaint or "Not provided"
+            photo_analysis = overall_description or "No photograph analysis available."
+            mpd_str = (
+                f"{most_probable_name} ({confidence})"
+                if confidence and most_probable_name
+                else most_probable_name or "Not determined"
+            )
+            diff_raw = diag.get("differential_diagnosis", [])
+            if isinstance(diff_raw, dict):
+                diff_str = ", ".join(f"{k} ({v})" for k, v in diff_raw.items()) if diff_raw else "Not available"
+            elif isinstance(diff_raw, list):
+                _parts = []
+                for item in diff_raw:
+                    if isinstance(item, dict):
+                        _n = item.get("diagnosis", "")
+                        _l = item.get("likelihood", item.get("confidence", ""))
+                        _parts.append(f"{_n} ({_l})" if _l else _n)
+                    else:
+                        _parts.append(str(item))
+                diff_str = ", ".join(_parts) if _parts else "Not available"
+            else:
+                diff_str = "Not available"
+            case_summary = (
+                f"1. **Age**: {age_str} "
+                f"2. **Sex**: {sex_str} "
+                f"3. **Chief Complaint**: {chief_complaint} "
+                f"4. **History**: Initial AI analysis complete. Q&A consultation in progress. "
+                f"5. **Photograph Analysis**: {photo_analysis} "
+                f"6. **Most Probable Diagnosis**: {mpd_str} "
+                f"7. **Differential Diagnosis**: {diff_str}"
+            )
+
+            # Build dynamic systemic symptom options from the differential
+            from src.ai.symptom_mapper import map_symptoms_from_differential
+            diff_names: list[str] = []
+            for item in (diff_raw if isinstance(diff_raw, list) else []):
+                if isinstance(item, dict):
+                    n = item.get("diagnosis") or item.get("name", "")
+                    if n:
+                        diff_names.append(n)
+                elif isinstance(item, str):
+                    diff_names.append(item)
+            systemic_options = map_symptoms_from_differential(
+                most_probable=most_probable_name,
+                differentials=diff_names,
+            )
+
+            # Update case
+            from datetime import datetime, timezone as _tz
+            case.ai_status = AiStatus.COMPLETED
+            case.ai_completed_at = datetime.now(tz=_tz.utc)
+            case.celery_task_id = None
+            case.case_summary = case_summary
+            case.case_title = most_probable_name
+            case.symptom_tags = json.dumps(symptom_tags) if symptom_tags else None
+            case.max_question_rounds = recommended_rounds  # AI recommendation
+            case.systemic_symptom_options = json.dumps(systemic_options)
+
+            _patient_id = case.patient_id
+            _case_number = case.case_number
+
+            await session.commit()
+
+            # Mirror case files to legacy GCS folder structure (best-effort, exact old app format)
+            try:
+                from datetime import date as _date2
+                from src.models.case_image import CaseImage as _CaseImage
+                from src.entities.snomed import lookup_snomed as _lookup_snomed
+                from src.storage.legacy_sync import (
+                    get_legacy_prefix,
+                    build_chat_history_txt,
+                    build_differential_txt,
+                    build_snomed_txt,
+                    build_study_metadata,
+                    mirror_bytes,
+                    mirror_text,
+                    mirror_json,
+                )
+                if most_probable_name:
+                    legacy_prefix = await get_legacy_prefix(session, case, most_probable_name)
+                    if legacy_prefix:
+                        # 1. Mirror images as uploaded_image_N.ext
+                        imgs_result = await session.execute(
+                            select(_CaseImage)
+                            .where(_CaseImage.case_id == case_id)
+                            .order_by(_CaseImage.upload_order)
+                        )
+                        imgs = list(imgs_result.scalars().all())
+                        logger.info("legacy_mirror_images", case_id=case_id, total=len(imgs))
+                        for idx, img in enumerate(imgs, start=1):
+                            try:
+                                img_bytes = gcs.download_bytes(img.gcs_path)
+                                ext = (img.mime_type or "image/jpeg").split("/")[-1]
+                                if ext == "jpeg":
+                                    ext = "jpg"
+                                mirror_bytes(
+                                    legacy_prefix,
+                                    f"uploaded_image_{idx}.{ext}",
+                                    img_bytes,
+                                    img.mime_type or "image/jpeg",
+                                )
+                                logger.info("legacy_mirror_image_ok", case_id=case_id, idx=idx, path=img.gcs_path)
+                            except Exception as _img_exc:
+                                logger.warning("legacy_mirror_image_failed", case_id=case_id, idx=idx, path=img.gcs_path, error=str(_img_exc))
+
+                        # 2. chat_history.txt — age, sex, visual description
+                        age_str = "Unknown"
+                        sex_str = "Unknown"
+                        if case.dependent_id:
+                            try:
+                                if case.dependent_dob:
+                                    age_str = str((_date2.today() - case.dependent_dob).days // 365)
+                                sex_str = case.dependent_gender or "Unknown"
+                            except Exception:
+                                pass
+                        elif profile:
+                            if profile.date_of_birth:
+                                age_str = str((_date2.today() - profile.date_of_birth).days // 365)
+                            sex_str = profile.gender or "Unknown"
+                        mirror_text(
+                            legacy_prefix,
+                            "chat_history.txt",
+                            build_chat_history_txt(age_str, sex_str, desc),
+                        )
+
+                        # 3. differential_diagnoses.txt
+                        mirror_text(
+                            legacy_prefix,
+                            "differential_diagnoses.txt",
+                            build_differential_txt(diag),
+                        )
+
+                        # 4. snomed_diagnosis.txt
+                        snomed_entries = []
+                        for _diag_item in [{"diagnosis": most_probable_name}] + (
+                            [d for d in (diag.get("differential_diagnoses") or [])
+                             if isinstance(d, dict) and d.get("diagnosis")]
+                        ):
+                            _name = _diag_item.get("diagnosis") or _diag_item.get("name", "")
+                            if _name:
+                                _code, _term = _lookup_snomed(_name)
+                                snomed_entries.append({
+                                    "diagnosis": _name,
+                                    "snomed_term": _term or "None",
+                                })
+                        if snomed_entries:
+                            mirror_text(
+                                legacy_prefix,
+                                "snomed_diagnosis.txt",
+                                build_snomed_txt(snomed_entries),
+                            )
+
+                        # 5. study_metadata.json
+                        from src.models.differential_diagnosis import DifferentialDiagnosis as _DD2
+                        _dd_count_result = await session.execute(
+                            select(func.count(_DD2.id)).where(_DD2.case_id == case_id)
+                        )
+                        _n_diffs = _dd_count_result.scalar() or 1
+                        _llm_model = getattr(settings, "DEFAULT_LLM_MODEL", None) or settings.DEFAULT_LLM_PROVIDER
+                        _ts = (case.created_at or datetime.now(tz=_tz.utc)).isoformat()
+                        mirror_json(
+                            legacy_prefix,
+                            "study_metadata.json",
+                            build_study_metadata(
+                                prefix=legacy_prefix,
+                                llm_provider=_llm_model,
+                                total_questions=case.max_question_rounds or 0,
+                                n_differentials=_n_diffs,
+                                timestamp=_ts,
+                            ),
+                        )
+            except Exception:
+                pass
+
+        display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
+        if recommended_rounds == 0:
+            # No Q&A rounds — consultation is already complete, notify now.
+            # For cases with Q&A, _finalize_case fires this after all rounds are done.
+            try:
+                from src.workers.tasks.notifications import notify_patient_ai_complete
+                notify_patient_ai_complete.delay(
+                    patient_id=_patient_id,
+                    case_id=case_id,
+                    display_id=display_id,
+                )
+            except Exception as exc:
+                logger.warning("notify_patient_ai_complete_enqueue_failed", case_id=case_id, error=str(exc))
+
+        logger.info(
+            "save_results_task_ok",
+            case_id=case_id,
+            diagnosis=most_probable_name,
+            confidence=confidence,
+        )
+        await engine.dispose()
+
+    try:
+        _run_async(_run())
+    except SoftTimeLimitExceeded:
+        _run_async(_fail_task_on_timeout(case_id, "save_results"))
+        raise Ignore()
+    except (AIProviderException, StorageException) as exc:
+        logger.error("save_results_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("save_results_task_unexpected_error", case_id=case_id)
+        raise
+
+
+# ------------------------------------------------------------------ #
+# Red Flag Check Task
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="src.workers.tasks.analysis.red_flag_check_task",
+    time_limit=60,
+    soft_time_limit=50,
+    max_retries=1,
+    default_retry_delay=10,
+)
+def red_flag_check_task(self, case_id: str, selected_symptoms: list[str] | None = None) -> None:
+    """
+    Systemic / red flag check — runs after all Q&A rounds complete.
+
+    Checks the patient's complaint and Q&A answers for urgent symptoms
+    (rapidly-changing mole, systemic fever, chest pain, etc.).
+
+    Updates case:
+      red_flag_status = CLEAR   — no urgent symptoms detected
+      red_flag_status = FLAGGED — urgent symptoms found; saves flags + advice
+    """
+    from src.models.message import Message, MessageRole
+
+    logger.info("red_flag_check_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None or case.red_flag_status != RedFlagStatus.CHECKING:
+                raise Ignore()
+
+            # Gather complaint and all patient answers
+            msgs_result = await session.execute(
+                select(Message)
+                .where(Message.case_id == case_id, Message.role == MessageRole.PATIENT)
+                .order_by(Message.round_number, Message.question_index)
+            )
+            patient_answers = [m.content for m in msgs_result.scalars().all()]
+
+            complaint = case.presenting_complaint or ""
+            answers_text = "\n".join(f"- {a}" for a in patient_answers)
+
+        # Build patient-reported symptoms string, stripping "None of the above"
+        clean_symptoms = [
+            s for s in (selected_symptoms or [])
+            if s.strip().lower() != "none of the above"
+        ]
+        symptoms_text = "\n".join(f"- {s}" for s in clean_symptoms)
+
+        try:
+            prompt = PatientConsultationPrompts.red_flag_check(
+                complaint=complaint,
+                answers=answers_text,
+                patient_reported_symptoms=symptoms_text,
+            )
+            raw = call_llm(prompt, json_mode=True)
+            result = extract_json(raw)
+        except Exception as exc:
+            logger.error("red_flag_check_llm_failed", case_id=case_id, error=str(exc))
+            async with factory() as session:
+                case = await _get_case(session, case_id)
+                if case:
+                    case.red_flag_status = RedFlagStatus.NOT_CHECKED
+                    await session.commit()
+            raise Ignore() from exc
+
+        flags: list[str] = result.get("flags", [])
+        advice: str | None = result.get("advice")
+        has_flags = bool(flags)
+
+        _case_number = None
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None:
+                return
+            case.red_flag_status = RedFlagStatus.FLAGGED if has_flags else RedFlagStatus.CLEAR
+            case.red_flags = json.dumps(flags)
+            case.red_flag_advice = advice
+            if has_flags:
+                from datetime import datetime, timezone as _tz
+                now = datetime.now(tz=_tz.utc)
+                case.red_flagged_at = now
+
+                from src.models.audit_log import AuditEventType, CaseAuditLog
+                session.add(CaseAuditLog(
+                    case_id=case_id,
+                    event_type=AuditEventType.RED_FLAG_TRIGGERED,
+                    actor_id=None,
+                    actor_role="system",
+                    event_data=json.dumps({"flags": flags, "advice": advice}),
+                    created_at=now,
+                ))
+            _case_number = case.case_number
+            await session.commit()
+
+        if has_flags:
+            display_id = f"AI-{_case_number}" if _case_number else case_id[:8].upper()
+            try:
+                from src.workers.tasks.notifications import notify_admins_red_flag
+                notify_admins_red_flag.delay(case_id=case_id, display_id=display_id)
+            except Exception as exc:
+                logger.warning("notify_admins_red_flag_enqueue_failed", case_id=case_id, error=str(exc))
+            try:
+                from src.workers.tasks.email import send_red_flag_emails_task
+                send_red_flag_emails_task.delay(
+                    case_id=case_id,
+                    display_id=display_id,
+                    flags=flags,
+                    advice=advice,
+                )
+            except Exception as exc:
+                logger.warning("red_flag_email_enqueue_failed", case_id=case_id, error=str(exc))
+
+        logger.info(
+            "red_flag_check_complete",
+            case_id=case_id,
+            flagged=has_flags,
+            flags=flags,
+        )
+        await engine.dispose()
+
+    try:
+        _run_async(_run())
+    except SoftTimeLimitExceeded:
+        logger.error("red_flag_check_timeout", case_id=case_id)
+        raise Ignore()
+    except (AIProviderException, StorageException) as exc:
+        logger.error("red_flag_check_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("red_flag_check_task_unexpected_error", case_id=case_id)
+        raise
+
+
+# ------------------------------------------------------------------ #
+# Timeout helper
+# ------------------------------------------------------------------ #
+
+async def _fail_task_on_timeout(case_id: str, task_name: str) -> None:
+    """Called from soft_time_limit handler to mark case as failed."""
+    engine = _make_engine()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory() as session:
+        await _fail_case(session, case_id, f"{task_name} timed out")
+    await engine.dispose()
+
+
+# ------------------------------------------------------------------ #
+# Task — Analyse Complaint (no visible lesion path)
+# ------------------------------------------------------------------ #
+
+@celery_app.task(
+    bind=True,
+    name="src.workers.tasks.analysis.analyse_complaint_task",
+    time_limit=180,
+    soft_time_limit=160,
+    max_retries=1,
+    default_retry_delay=15,
+)
+def analyse_complaint_task(self, case_id: str) -> dict:
+    """
+    Complaint-only analysis for cases where has_visible_lesion=False.
+
+    No images are downloaded. The differential is generated purely from
+    the patient's presenting_complaint text using generate_differential_from_complaints().
+
+    Returns the same dict shape as analyse_images_task so that save_results_task
+    can handle both paths identically:
+      {"case_id": ..., "description_json": "{}", "diagnosis_json": ...}
+    """
+    logger.info("analyse_complaint_task_start", case_id=case_id)
+
+    async def _run():
+        engine = _make_engine()
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        async with factory() as session:
+            case = await _get_case(session, case_id)
+            if case is None or case.ai_status != AiStatus.PROCESSING:
+                raise Ignore()
+
+            personal_particulars = await _get_patient_particulars(session, case.patient_id)
+            complaint = case.presenting_complaint or "No specific complaint provided."
+            follow_up_context = await _get_follow_up_context(session, case)
+
+        # Parse age / sex out of personal_particulars for prompt template vars
+        age, sex = "unknown", "unknown"
+        for part in personal_particulars.split(","):
+            part = part.strip()
+            if part.startswith("Age:"):
+                age = part.split(":", 1)[1].strip()
+            elif part.startswith("Sex:"):
+                sex = part.split(":", 1)[1].strip()
+
+        try:
+            diag_prompt = PatientConsultationPrompts.generate_differential_from_complaints().format(
+                age=age,
+                sex=sex,
+                complaints=complaint,
+                prescription="None",
+                follow_up_context=follow_up_context,
+            )
+            diag_text = call_llm(diag_prompt, json_mode=True)
+            diagnosis_json = extract_json(diag_text)
+        except AIProviderException as exc:
+            async with factory() as session:
+                await _fail_case(session, case_id, f"Complaint differential AI call failed: {exc}")
+            raise Ignore() from exc
+
+        logger.info("analyse_complaint_task_ok", case_id=case_id)
+        await engine.dispose()
+        return {
+            "case_id": case_id,
+            "description_json": "{}",   # No visual description for no-lesion cases
+            "diagnosis_json": json.dumps(diagnosis_json),
+        }
+
+    try:
+        return _run_async(_run())
+    except Ignore:
+        raise
+    except SoftTimeLimitExceeded:
+        _run_async(_fail_task_on_timeout(case_id, "analyse_complaint"))
+        raise Ignore()
+    except (AIProviderException, StorageException) as exc:
+        logger.error("analyse_complaint_task_error", case_id=case_id, error=str(exc))
+        raise self.retry(exc=exc)
+    except Exception:
+        logger.exception("analyse_complaint_task_unexpected_error", case_id=case_id)
+        raise
+
+
+# ------------------------------------------------------------------ #
+# Chain factory — called from service layer
+# ------------------------------------------------------------------ #
+
+def build_analysis_chain(case_id: str, has_visible_lesion: bool = True):
+    """
+    Build the Celery task chain for one case.
+
+    Returns a Celery Signature (not yet applied).
+    The caller does .apply_async() to actually enqueue.
+
+    Visible lesion chain (has_visible_lesion=True):
+        inspect_images_task(case_id)
+        → analyse_images_task(case_id)
+        → save_results_task(result_dict)
+
+    No visible lesion chain (has_visible_lesion=False):
+        analyse_complaint_task(case_id)
+        → save_results_task(result_dict)
+    """
+    if has_visible_lesion:
+        # inspect_images_task removed — gate check is now merged into
+        # analyse_images_task (inspect_and_describe prompt) and runs in
+        # parallel with the differential call. Image downloaded once.
+        return chain(
+            analyse_images_task.s(case_id),
+            save_results_task.s(),
+        )
+    return chain(
+        analyse_complaint_task.s(case_id),
+        save_results_task.s(),
+    )

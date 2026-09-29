@@ -1,0 +1,134 @@
+﻿TASK 4 — SECURITY BOUNDARY TESTING
+Tested On : 2026-05-04
+Server    : http://148.113.16.40:8880/api/v1
+======================================================================
+
+======================================================================
+[4.1 | No auth token on protected route → EXPECT 401]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/me
+STATUS   : 401
+RESPONSE : {"error":{"code":"UNAUTHORIZED","message":"Authorization header missing or not Bearer scheme","status":401,"details":{}}}
+RESULT   : PASS
+
+======================================================================
+[4.2 | Garbage JWT string → EXPECT 401]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/me
+HEADER   : Authorization : <value hidden>
+STATUS   : 401
+RESPONSE : {"error":{"code":"INVALID_TOKEN","message":"Token is invalid, expired, or has been tampered with","status":401,"details":{}}}
+RESULT   : PASS
+
+======================================================================
+[4.3 | Non-Bearer scheme (Token ...) → EXPECT 401]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/me
+HEADER   : Authorization : <value hidden>
+STATUS   : 401
+RESPONSE : {"error":{"code":"UNAUTHORIZED","message":"Authorization header missing or not Bearer scheme","status":401,"details":{}}}
+RESULT   : PASS
+
+======================================================================
+[4.4 | Empty Bearer value → EXPECT 401]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/me
+HEADER   : Authorization : <value hidden>
+STATUS   : 401
+RESPONSE : {"error":{"code":"UNAUTHORIZED","message":"Authorization header missing or not Bearer scheme","status":401,"details":{}}}
+RESULT   : PASS
+
+======================================================================
+[4.5 | Patient token on admin/users → EXPECT 403]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/admin/users
+HEADER   : Authorization : <value hidden>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'admin' role","status":403,"details":{}}}
+RESULT   : PASS - INSUFFICIENT_ROLE
+
+======================================================================
+[4.6 | Patient token on admin/cases → EXPECT 403]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/admin/cases
+HEADER   : Authorization : <value hidden>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'admin' role","status":403,"details":{}}}
+RESULT   : PASS - INSUFFICIENT_ROLE
+
+======================================================================
+[4.7 | Patient token on doctor stats → EXPECT 403]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/cases/doctors/me/stats
+HEADER   : Authorization : <value hidden>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'doctor' role","status":403,"details":{}}}
+RESULT   : PASS - INSUFFICIENT_ROLE
+
+======================================================================
+[4.8 | Patient token on doctor-only by-code → EXPECT 403]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/users/by-code/ABC-1234-Z
+HEADER   : Authorization : <value hidden>
+STATUS   : 403
+RESPONSE : {"error":{"code":"INSUFFICIENT_ROLE","message":"This endpoint requires the 'doctor' role","status":403,"details":{}}}
+RESULT   : PASS - INSUFFICIENT_ROLE
+
+======================================================================
+[4.9 | Role injection (role=admin in body) → EXPECT patient role assigned]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/auth/register/patient
+BODY     : {
+    "email":  "roletest_live@test.com",
+    "full_name":  "Role Inject",
+    "password":  "TestPass1",
+    "role":  "admin"
+}
+STATUS   : 2xx OK
+RESPONSE : {"user":{"id":"79f75b90-4898-49a1-aa49-2a44480587e9","email":"roletest_live@test.com","full_name":"Role Inject","role":"patient","is_active":true,"is_verified":false,"patient_code":"GWD-5606-Y"},"access_token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3OWY3NWI5MC00ODk4LTQ5YTEtYWE0OS0yYTQ0NDgwNTg3ZTkiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3Nzc5MTIwMTUsImV4cCI6MTc3NzkxNTYxNX0.C3EzMzq3ivUj4P3aw5A9ZrQSevEx4A1hil9uxKZAWHY","refresh_token":"2AM1LpP5LqvhoLt99utODR96cH47gr0RxlK1uLNBfXw","token_type":"bearer"}
+RESULT   : PASS - role field ignored, assigned patient
+
+======================================================================
+[4.10 | Wrong password → EXPECT 401]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/auth/login
+BODY     : {
+    "password":  "WRONG999",
+    "email":  "testiso_patA@live.com"
+}
+STATUS   : 401
+RESPONSE : {"error":{"code":"INVALID_CREDENTIALS","message":"Incorrect email or password","status":401,"details":{}}}
+RESULT   : PASS - INVALID_CREDENTIALS
+
+======================================================================
+[4.11 | Non-existent email → EXPECT 401]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/auth/login
+BODY     : {
+    "password":  "TestPass1",
+    "email":  "nobody_xyz@nowhere.com"
+}
+STATUS   : 401
+RESPONSE : {"error":{"code":"INVALID_CREDENTIALS","message":"Incorrect email or password","status":401,"details":{}}}
+RESULT   : PASS - INVALID_CREDENTIALS (same message, no leak)
+
+======================================================================
+[4.12 | Unauthorized case access (Patient B→A's case) → EXPECT 404 not 403]
+REQUEST  : GET http://148.113.16.40:8880/api/v1/cases/a65e544f-6a4c-40dc-8232-5c8c1b5f758d
+HEADER   : Authorization : <value hidden>
+STATUS   : 404
+RESPONSE : {"error":{"code":"CASE_NOT_FOUND","message":"Case not found","status":404,"details":{}}}
+RESULT   : PASS - 404 (enumeration safe)
+SAFE MSG : YES - error body does not reveal ownership
+
+======================================================================
+[4.13a | Register user first time → EXPECT 201]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/auth/register/patient
+BODY     : {
+    "email":  "dup_live@test.com",
+    "full_name":  "Dup Patient",
+    "password":  "TestPass1"
+}
+STATUS   : 2xx OK
+RESPONSE : {"user":{"id":"0f7e00b5-688c-4a34-8c31-ec3d71050a62","email":"dup_live@test.com","full_name":"Dup Patient","role":"patient","is_active":true,"is_verified":false,"patient_code":"JSH-9092-Q"},"access_token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwZjdlMDBiNS02ODhjLTRhMzQtOGMzMS1lYzNkNzEwNTBhNjIiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3Nzc5MTIwMTYsImV4cCI6MTc3NzkxNTYxNn0.K9bNtP7rRPLk8rJdMg-oowm5oXVrzdTz26Yy2aehUPk","refresh_token":"gD1PjG4ke8AwegNJsWYnM4h2qzQYGf0JX3UzlM9Gfys","token_type":"bearer"}
+
+======================================================================
+[4.13b | Register same email again → EXPECT 409/400 conflict]
+REQUEST  : POST http://148.113.16.40:8880/api/v1/auth/register/patient
+BODY     : {
+    "email":  "dup_live@test.com",
+    "full_name":  "Dup Patient",
+    "password":  "TestPass1"
+}
+STATUS   : 409
+RESPONSE : {"error":{"code":"EMAIL_ALREADY_REGISTERED","message":"An account with this email already exists","status":409,"details":{}}}
+RESULT   : PASS - duplicate email rejected (409)

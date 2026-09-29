@@ -39,22 +39,38 @@ Affects the AI question flow (follow-up has shorter questioning).
 
 CONSENT GATE
 ------------
-consent_given MUST be True before any image can be uploaded.
+consent_ai_analysis MUST be True before any image can be uploaded.
+Both consent fields are submitted at case creation — there is no separate
+consent endpoint. consent_ai_analysis is required; consent_research is optional.
 This is enforced in the upload endpoint — not just the UI.
 """
 
 import enum
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Sequence, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.models.base import Base, TimestampMixin, new_uuid
+
+# PostgreSQL sequence for human-readable case numbers shown as "AI-{n}" in the UI
+_case_number_seq = Sequence("case_number_seq", start=9001)
 
 
 class ConsultationType(str, enum.Enum):
     NEW_COMPLAINT = "new_complaint"
     FOLLOW_UP = "follow_up"
+
+
+class RedFlagStatus(str, enum.Enum):
+    """
+    Tracks the systemic / red flag check that runs after Q&A completes.
+    The check looks for urgent symptoms in the patient's answers and complaint.
+    """
+    NOT_CHECKED = "not_checked"  # Default — check not yet triggered
+    CHECKING = "checking"        # Celery task running
+    CLEAR = "clear"              # No red flags found
+    FLAGGED = "flagged"          # Urgent symptoms detected
 
 
 class AiStatus(str, enum.Enum):
@@ -103,8 +119,28 @@ class Case(TimestampMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
 
     # ------------------------------------------------------------------ #
+    # Display Number — "AI-9021" shown on case cards
+    # ------------------------------------------------------------------ #
+    case_number: Mapped[int | None] = mapped_column(
+        Integer,
+        _case_number_seq,
+        server_default=_case_number_seq.next_value(),
+        nullable=True,
+        unique=True,
+        index=True,
+        comment="Sequential display number, shown as AI-{n} in the UI",
+    )
+
+    # ------------------------------------------------------------------ #
     # Ownership
     # ------------------------------------------------------------------ #
+    original_case_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("cases.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        comment="For follow-up cases — references the original case being followed up",
+    )
     patient_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -119,15 +155,26 @@ class Case(TimestampMixin, Base):
         index=True,
         comment="Assigned doctor. NULL until doctor scans the QR.",
     )
+    assigned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when a doctor was assigned (QR scan / manual assign)",
+    )
 
     # ------------------------------------------------------------------ #
     # Consultation Metadata — set at case creation
     # ------------------------------------------------------------------ #
     consultation_type: Mapped[ConsultationType] = mapped_column(
-        Enum(ConsultationType, name="consultation_type_enum", create_type=True),
+        Enum(ConsultationType, name="consultation_type_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ConsultationType.NEW_COMPLAINT,
         comment="new_complaint | follow_up — patient selects at start",
+    )
+    case_type: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        default=None,
+        comment="diagnose | null — set to 'diagnose' for cases created via POST /cases/doctor",
     )
     has_visible_lesion: Mapped[bool] = mapped_column(
         Boolean,
@@ -137,18 +184,24 @@ class Case(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
-    # Consent Gate — enforced in backend, not just UI
+    # Consent Gate — both fields set at case creation, not a separate call
     # ------------------------------------------------------------------ #
-    consent_given: Mapped[bool] = mapped_column(
+    consent_ai_analysis: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
         nullable=False,
-        comment="Must be True before any image upload is accepted",
+        comment="Required. Must be True before any image upload is accepted.",
     )
-    consent_given_at: Mapped[datetime | None] = mapped_column(
+    consent_ai_analysis_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
-        comment="Timestamp when patient confirmed consent",
+        comment="Timestamp when patient confirmed AI analysis consent",
+    )
+    consent_research: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="Optional. Patient allows anonymized data for academic research.",
     )
 
     # ------------------------------------------------------------------ #
@@ -159,6 +212,14 @@ class Case(TimestampMixin, Base):
         default=True,
         nullable=False,
         comment="False when patient consults on behalf of a family member",
+    )
+    # FK to saved Dependent profile (set when patient picks an existing dependent)
+    # Inline columns below are always populated regardless, so queries never need to join.
+    dependent_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("dependents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     dependent_name: Mapped[str | None] = mapped_column(
         String(255),
@@ -182,21 +243,62 @@ class Case(TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------ #
+    # Body Location — shown as FACE / HAND / BACK etc. tag in case list
+    # ------------------------------------------------------------------ #
+    body_location: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Body area of the lesion e.g. face, hand, back, arm, leg, neck, chest, other",
+    )
+
+    # Follow-up symptom progression — shown as "Follow-up status: Better/Same/Worse"
+    # on the Case Summary screen. Only meaningful when consultation_type = follow_up.
+    symptom_progression: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Patient-reported symptom change for follow-up cases: better | same | worse",
+    )
+
+    # ------------------------------------------------------------------ #
     # Dual Status System — NEVER merge these two fields
     # ------------------------------------------------------------------ #
     ai_status: Mapped[AiStatus] = mapped_column(
-        Enum(AiStatus, name="ai_status_enum", create_type=True),
+        Enum(AiStatus, name="ai_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=AiStatus.PENDING,
         index=True,
         comment="Celery pipeline state. Set by workers only.",
     )
+    ai_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when ai_status changed to COMPLETED",
+    )
     clinical_status: Mapped[ClinicalStatus] = mapped_column(
-        Enum(ClinicalStatus, name="clinical_status_enum", create_type=True),
+        Enum(ClinicalStatus, name="clinical_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=ClinicalStatus.ACTIVE,
         index=True,
         comment="Doctor-set status. Shown as badge in patient History screen.",
+    )
+    clinical_status_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when clinical_status was last changed by a doctor",
+    )
+
+    # ------------------------------------------------------------------ #
+    # AI-populated display fields — set by save_results_task when AI completes
+    # ------------------------------------------------------------------ #
+    case_title: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Most probable diagnosis name — shown as card title in case list (e.g. 'Eczema on hands')",
+    )
+    symptom_tags: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON array of short symptom keywords parsed from key_supporting_features (e.g. ['Redness','Itching','Dry skin'])",
     )
 
     # ------------------------------------------------------------------ #
@@ -211,6 +313,80 @@ class Case(TimestampMixin, Base):
         Text,
         nullable=True,
         comment="AI-generated case summary shown to patient before QR code",
+    )
+    patient_treatment_plan: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON: patient-friendly treatment plan generated on first request, cached for subsequent calls",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Doctor Diagnose Flow — visual findings from 3-image AI analysis
+    # ------------------------------------------------------------------ #
+    visual_findings: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment=(
+            "JSON: {clinical:{...}, dermoscopy:{...}, pathology:{...}} — "
+            "populated by generate_visual_findings_task after doctor uploads images"
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Red Flag Check — runs after Q&A, before case summary
+    # ------------------------------------------------------------------ #
+    red_flag_status: Mapped[RedFlagStatus] = mapped_column(
+        Enum(RedFlagStatus, name="red_flag_status_enum", create_type=True, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=RedFlagStatus.NOT_CHECKED,
+        comment="Status of the systemic / red flag check (Figma Basic Patient Flow step 8)",
+    )
+    red_flags: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON list of flagged conditions detected by the AI red flag check",
+    )
+    red_flag_advice: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="AI-generated advice shown to patient when red flags are detected",
+    )
+    red_flagged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when red_flag_status changed to FLAGGED",
+    )
+    systemic_symptom_options: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        comment="JSON list of {id, label} symptom options for the Systemic Check screen, generated from the AI differential",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Bookmark — doctor marks case as important for quick retrieval
+    # ------------------------------------------------------------------ #
+    is_bookmarked: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+        comment="Doctor-set flag. True = appears in the Important Cases list.",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Soft Delete — set True instead of issuing DELETE (preserves audit trail)
+    # ------------------------------------------------------------------ #
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        index=True,
+        comment="Soft-delete flag. Deleted cases are hidden from all queries but never removed from the DB.",
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when the case was soft-deleted",
     )
 
     # ------------------------------------------------------------------ #
@@ -241,6 +417,11 @@ class Case(TimestampMixin, Base):
         "User",
         foreign_keys=[patient_id],
         back_populates="patient_cases",
+    )
+    dependent: Mapped["Dependent | None"] = relationship(  # noqa: F821  # type: ignore[name-defined]
+        "Dependent",
+        foreign_keys=[dependent_id],
+        back_populates="cases",
     )
     doctor: Mapped["User | None"] = relationship(  # noqa: F821
         "User",
@@ -287,6 +468,12 @@ class Case(TimestampMixin, Base):
         "QRToken",
         back_populates="case",
         cascade="all, delete-orphan",
+    )
+    todos: Mapped[list["Todo"]] = relationship(  # noqa: F821
+        "Todo",
+        back_populates="case",
+        cascade="all, delete-orphan",
+        order_by="Todo.created_at",
     )
 
     def __repr__(self) -> str:

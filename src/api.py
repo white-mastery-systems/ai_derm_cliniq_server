@@ -44,38 +44,58 @@ def include_all_routers(app: FastAPI) -> None:
     from src.users.controller import router as users_router
     app.include_router(users_router, prefix="/api/v1/users", tags=["Users"])
 
+    # Dependents — /api/v1/users/me/dependents
+    from src.dependents.controller import router as dependents_router
+    app.include_router(dependents_router, prefix="/api/v1/users/me/dependents", tags=["Dependents"])
+
     # ------------------------------------------------------------------ #
     # The routers below will be uncommented as each layer is built.
     # ------------------------------------------------------------------ #
 
     # Cases — /api/v1/cases
-    # from src.cases.controller import router as cases_router
-    # app.include_router(cases_router, prefix="/api/v1/cases", tags=["Cases"])
+    from src.cases.controller import router as cases_router
+    app.include_router(cases_router, prefix="/api/v1/cases", tags=["Cases"])
 
-    # Images — nested under cases
-    # from src.images.controller import router as images_router
-    # app.include_router(images_router, prefix="/api/v1/cases", tags=["Images"])
+    # Images — /api/v1/cases/{case_id}/images
+    from src.images.controller import router as images_router
+    app.include_router(images_router, prefix="/api/v1/cases/{case_id}/images", tags=["Images"])
 
     # Conversations — /api/v1/cases/{case_id}/chat
-    # from src.conversations.controller import router as conv_router
-    # app.include_router(conv_router, prefix="/api/v1/cases", tags=["Conversations"])
+    from src.conversations.controller import router as conv_router
+    app.include_router(conv_router, prefix="/api/v1/cases/{case_id}/chat", tags=["Conversations"])
 
     # AI Analysis — /api/v1/cases/{case_id}/ai
-    # from src.ai.controller import router as ai_router
-    # app.include_router(ai_router, prefix="/api/v1/cases", tags=["AI Analysis"])
+    from src.ai.controller import router as ai_router
+    app.include_router(ai_router, prefix="/api/v1/cases/{case_id}/ai", tags=["AI Analysis"])
 
     # Doctor Review — /api/v1/cases/{case_id}/review
-    # from src.doctor_review.controller import router as review_router
-    # app.include_router(review_router, prefix="/api/v1/cases", tags=["Doctor Review"])
-
-    # Reports — /api/v1/cases/{case_id}/report
-    # from src.reports.controller import router as reports_router
-    # app.include_router(reports_router, prefix="/api/v1/cases", tags=["Reports"])
+    from src.doctor_review.controller import router as review_router
+    app.include_router(review_router, prefix="/api/v1/cases/{case_id}", tags=["Doctor Review"])
 
     # QR Codes — /api/v1/qr
-    # from src.qr.controller import router as qr_router
-    # app.include_router(qr_router, prefix="/api/v1/qr", tags=["QR Codes"])
+    from src.qr.controller import router as qr_router
+    app.include_router(qr_router, prefix="/api/v1/qr", tags=["QR Codes"])
+
+    # Reports — /api/v1/cases/{case_id}/report
+    from src.reports.controller import router as reports_router
+    app.include_router(reports_router, prefix="/api/v1/cases/{case_id}", tags=["Reports"])
+
+    # Reports list — /api/v1/reports
+    from src.reports.controller import list_router as reports_list_router
+    app.include_router(reports_list_router, prefix="/api/v1/reports", tags=["Reports"])
+
+    # Todos — /api/v1/cases/{case_id}/todos
+    from src.todos.controller import router as todos_router
+    app.include_router(todos_router, prefix="/api/v1/cases/{case_id}/todos", tags=["Todos"])
+
+    # Entities (SNOMED) — /api/v1/cases/{case_id}/entities
+    from src.entities.controller import router as entities_router
+    app.include_router(entities_router, prefix="/api/v1/cases/{case_id}", tags=["Entities"])
 
     # Admin — /api/v1/admin
-    # from src.admin.controller import router as admin_router
-    # app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
+    from src.admin.controller import router as admin_router
+    app.include_router(admin_router, prefix="/api/v1/admin", tags=["Admin"])
+
+    # Studies — /api/v1/studies
+    from src.studies.controller import router as studies_router
+    app.include_router(studies_router, prefix="/api/v1/studies", tags=["Studies"])

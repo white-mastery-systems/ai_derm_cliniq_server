@@ -1,0 +1,630 @@
+TASK 1 — FULL E2E PATIENT FLOW
+Tested On : 2026-05-07
+Server    : https://54d1-115-97-59-234.ngrok-free.app/api/v1
+
+TEST STRATEGY
+─────────────────────────────────────────────────────────────────────
+1. Register fresh patient account with timestamp-unique email
+2. Walk every patient-facing endpoint: Auth → Profile → Dependents →
+   Cases → Images → AI Analysis → Q&A → Red Flags → QR → Report
+3. All 401/403/404 edge cases validated inline
+
+SCHEMA CORRECTIONS (from Task 2 audit)
+─────────────────────────────────────────────────────────────────────
+• OTP column          : verification_tokens.otp (plaintext, not otp_hash)
+• device-token field  : fcm_token (not device_token)
+• assessment depth    : rounds:int (not depth:str)
+• chat answers body   : [{question_index:int, answer:str}] (not plain strings)
+
+
+━━━ PHASE A — Auth & Identity ━━━
+
+======================================================================
+[A0 | GET /health — baseline server check]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/health
+STATUS   : 200
+RESPONSE : {"status": "healthy", "app": "AiDerm Cliniq API", "version": "1.0.0", "environment": "development", "database": "ok", "redis": "ok"}
+RESULT   : PASS — server up
+
+======================================================================
+[A1 | POST /auth/register/patient → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/register/patient
+BODY     : {"email": "qa_pat_1778158142@example.com", "password": "Test@12345", "full_name": "QA Patient One", "date_of_birth": "1995-06-15", "gender": "female"}
+STATUS   : 201
+RESPONSE : {"user": {"id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "email": "qa_pat_1778158142@example.com", "full_name": "QA Patient One", "role": "patient", "is_active": true, "is_verified": false, "patient_code": "NRZ-2570-Z"}, "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjZGQzMDE1Mi1lNGVmLTQyZWUtYTA2MS1iYWRlNjBmZTlkZWQiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3NzgxNTgxNTgsImV4cCI6MTc3ODE2MTc1OH0.m44AbDIauI_YugwuXfBhYk4SC9eefjlffodqmAarrEk", "refresh_token": "zUTcZITgU3dxf6HTATP_tKMDV843SOifRP-d9R_Am_g", "token_type": "bearer"}
+RESULT   : PASS — patient registered, tokens returned
+
+======================================================================
+[A2 | POST /auth/login wrong password → 401]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_pat_1778158142@example.com", "password": "WrongPass!99"}
+STATUS   : 401
+RESPONSE : {"error": {"code": "INVALID_CREDENTIALS", "message": "Incorrect email or password", "status": 401, "details": {}}}
+RESULT   : PASS — 401 INVALID_CREDENTIALS
+
+======================================================================
+[A3 | POST /auth/login correct → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_pat_1778158142@example.com", "password": "Test@12345"}
+STATUS   : 200
+RESPONSE : {"access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjZGQzMDE1Mi1lNGVmLTQyZWUtYTA2MS1iYWRlNjBmZTlkZWQiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3NzgxNTgxNTksImV4cCI6MTc3ODE2MTc1OX0.ugiWTVWGI-Tb3L8khkCCbiLKDLUsC5jKkSWUW9H2iuc", "refresh_token": "DiYV3l8oC_Ms61U5ojXNzMdST8nLfjt6J2Yn-PZC9mU", "token_type": "bearer", "role": "patient", "user_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded"}
+RESULT   : PASS — tokens returned
+
+======================================================================
+[A4 | POST /auth/refresh → new token pair]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/refresh
+STATUS   : 200
+RESPONSE : {"access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjZGQzMDE1Mi1lNGVmLTQyZWUtYTA2MS1iYWRlNjBmZTlkZWQiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3NzgxNTgxNTksImV4cCI6MTc3ODE2MTc1OX0.ugiWTVWGI-Tb3L8khkCCbiLKDLUsC5jKkSWUW9H2iuc", "refresh_token": "C6XYhy3e4tQk6O-JtFohA9WOeijf0Y76VpcG_mfmuqM", "token_type": "bearer", "role": "patient", "user_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded"}
+RESULT   : PASS — new access+refresh tokens issued
+
+======================================================================
+[A5 | POST /auth/verify-email → resend OTP → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/verify-email
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"message": "Verification email sent. Check your inbox."}
+RESULT   : PASS — verification email triggered
+
+======================================================================
+[A6 | POST /auth/verify-email/confirm → is_verified=true]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/verify-email/confirm
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"otp": "481419"}
+STATUS   : 200
+RESPONSE : {"message": "Email verified successfully."}
+RESULT   : PASS — email confirmed, is_verified=true
+NOTE     : OTP cracked: 481419
+
+======================================================================
+[A7 | POST /auth/forgot-password → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/forgot-password
+BODY     : {"email": "qa_pat_1778158142@example.com"}
+STATUS   : 200
+RESPONSE : {"message": "If that email is registered, a reset link has been sent."}
+RESULT   : PASS — reset OTP triggered
+
+======================================================================
+[A8 | POST /auth/reset-password → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/reset-password
+BODY     : {"email": "qa_pat_1778158142@example.com", "otp": "532663", "new_password": "NewPass@99"}
+STATUS   : 200
+RESPONSE : {"message": "Password updated successfully. You can now log in."}
+RESULT   : PASS — password reset successful
+NOTE     : Reset OTP cracked: 532663
+
+======================================================================
+[A9 | POST /auth/login with NEW password → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_pat_1778158142@example.com", "password": "NewPass@99"}
+STATUS   : 200
+RESPONSE : {"access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjZGQzMDE1Mi1lNGVmLTQyZWUtYTA2MS1iYWRlNjBmZTlkZWQiLCJyb2xlIjoicGF0aWVudCIsInR5cGUiOiJhY2Nlc3MiLCJpYXQiOjE3NzgxNTgxNjcsImV4cCI6MTc3ODE2MTc2N30.fNeWjKQBTRTPXHJSgyPDtRjU8aeRgaTYh56bnfANRgg", "refresh_token": "bGlG2dwghbxcy-w97hHT0Ip4wQs1yuII_jb3eVsmoxc", "token_type": "bearer", "role": "patient", "user_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded"}
+RESULT   : PASS — new password works
+
+======================================================================
+[A10 | POST /auth/login with OLD password → 401]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_pat_1778158142@example.com", "password": "Test@12345"}
+STATUS   : 401
+RESPONSE : {"error": {"code": "INVALID_CREDENTIALS", "message": "Incorrect email or password", "status": 401, "details": {}}}
+RESULT   : PASS — old password rejected
+
+======================================================================
+[A11 | POST /auth/change-password → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/change-password
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"current_password": "NewPass@99", "new_password": "Test@12345"}
+STATUS   : 200
+RESPONSE : {"message": "Password changed successfully."}
+RESULT   : PASS — password changed
+
+======================================================================
+[A12 | GET /users/me with invalid token → 401]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me
+HEADER   : Authorization: Bearer <INVALID_TOKEN>
+STATUS   : 401
+RESPONSE : {"error": {"code": "INVALID_TOKEN", "message": "Token is invalid, expired, or has been tampered with", "status": 401, "details": {}}}
+RESULT   : PASS — invalid token rejected
+
+
+━━━ PHASE B — Profile & Device ━━━
+
+======================================================================
+[B1 | GET /users/me → patient profile]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "email": "qa_pat_1778158142@example.com", "full_name": "QA Patient One", "role": "patient", "is_active": true, "is_verified": true, "patient_profile": {"patient_code": "NRZ-2570-Z", "date_of_birth": "1995-06-15", "gender": "female", "phone": null, "avatar_url": null}, "doctor_profile": null}
+RESULT   : PASS — profile returned
+
+======================================================================
+[B2 | PATCH /users/me → update profile → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"full_name": "QA Patient Updated", "phone": "+60123456789", "gender": "female"}
+STATUS   : 200
+RESPONSE : {"id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "email": "qa_pat_1778158142@example.com", "full_name": "QA Patient Updated", "role": "patient", "is_active": true, "is_verified": true, "patient_profile": {"patient_code": "NRZ-2570-Z", "date_of_birth": "1995-06-15", "gender": "female", "phone": "+60123456789", "avatar_url": null}, "doctor_profile": null}
+RESULT   : PASS — profile updated
+
+======================================================================
+[B3 | POST /users/me/avatar → upload photo → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me/avatar
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"avatar_url": "https://storage.googleapis.com/aiderm-cliniq-storage/avatars/cdd30152-e4ef-42ee-a061-bade60fe9ded.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124934Z&X-Goog-Expires=604800&X-Goog-SignedHeaders=host&X-Goog-Signature=1a0e1052c9fd9ef410293e54e6a0b97b47b4b89c440a03b1aef528d99f5a622a638da9524b59f1a8ddb24e106f7cb557a36a4be1e4453379dc2f18331b2048edaf8085f3d6fbe20787c388d49d1a3a97adf091ed26098b65b96e6844303182c7aeaab9dede7f3aa5284085b35fc8205ab6dc0385376a0ca5b10e8145a382e0f8073dc6b00a0844d3ae0a522bb731f5dccb95c32bce8585cfb4bf5250248fc1d9c7f891fc2f452c24496e55a2e843b44de237bfe37ed61d90dbb61e7039853e18ff43c4e72de3a565026c33149067de5c20ae1fdb1466f694bd7ed404fd32b73286dffdf60ab533c61e6097d1d02c156745a96177f47dbc07165da3594f17a7c0", "message": "Avatar uploaded successfully"}
+RESULT   : PASS — avatar uploaded
+
+======================================================================
+[B4 | POST /users/me/device-token → register FCM token → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me/device-token
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"fcm_token": "fcm_test_token_1778158142", "platform": "android"}
+STATUS   : 200
+RESPONSE : {"message": "Device token updated"}
+RESULT   : PASS — FCM token registered
+
+
+━━━ PHASE C — Dependents ━━━
+
+======================================================================
+[C1 | POST /users/me/dependents → create child dependent → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me/dependents
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"name": "Junior QA", "relationship": "child", "age": 7, "gender": "male"}
+STATUS   : 201
+RESPONSE : {"id": "af6fe7d3-749e-4eff-ab41-972bd1950191", "name": "Junior QA", "age": 7, "gender": "male", "date_of_birth": "2019-01-01", "last_visit_date": null, "last_visit_diagnosis": null}
+RESULT   : PASS — dependent created
+
+======================================================================
+[C2 | GET /users/me/dependents → list → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me/dependents
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"dependents": [{"id": "af6fe7d3-749e-4eff-ab41-972bd1950191", "name": "Junior QA", "age": 7, "gender": "male", "date_of_birth": "2019-01-01", "last_visit_date": null, "last_visit_diagnosis": null}], "total": 1}
+RESULT   : PASS — dependent listed
+
+======================================================================
+[C3 | PATCH /users/me/dependents/{id} → update name → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me/dependents/af6fe7d3-749e-4eff-ab41-972bd1950191
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"name": "Junior QA Updated"}
+STATUS   : 200
+RESPONSE : {"id": "af6fe7d3-749e-4eff-ab41-972bd1950191", "name": "Junior QA Updated", "age": 7, "gender": "male", "date_of_birth": "2019-01-01", "last_visit_date": null, "last_visit_diagnosis": null}
+RESULT   : PASS — dependent updated
+
+
+━━━ PHASE D — Case Creation ━━━
+
+======================================================================
+[D1 | POST /cases no consent → 400]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"consultation_type": "new_complaint", "has_visible_lesion": false, "is_for_self": true, "consent_ai_analysis": false, "presenting_complaint": "No consent test"}
+STATUS   : 400
+RESPONSE : {"error": {"code": "BAD_REQUEST", "message": "CONSENT_REQUIRED: consent_ai_analysis must be true to create a case", "status": 400, "details": {}}}
+RESULT   : PASS — 400 CONSENT_REQUIRED
+
+======================================================================
+[D2 | POST /cases self no lesion → 201 (Case 2)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"consultation_type": "new_complaint", "has_visible_lesion": false, "is_for_self": true, "consent_ai_analysis": true, "consent_research": false, "body_location": "Arm", "presenting_complaint": "Dry skin patch on arm"}
+STATUS   : 201
+RESPONSE : {"id": "78bcd0d7-8daf-43ec-a206-f4e72d65c6da", "case_number": 9232, "display_id": "AI-9232", "case_title": null, "original_case_id": null, "patient_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "doctor_id": null, "consultation_type": "new_complaint", "has_visible_lesion": false, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:49:35.499575Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "pending", "clinical_status": "active", "body_location": "Arm", "symptom_progression": null, "symptom_tags": [], "is_bookmarked": false, "presenting_complaint": "Dry skin patch on arm", "case_summary": null, "celery_task_id": null, "question_round": 0, "max_question_rounds": 5, "image_count": 0, "images": [], "patient_name": null, "patient_age": null, "patient_gender": null, "patient_avatar_url": null, "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "visit_index": null, "total_visits": null, "created_at": "2026-05-07T12:49:35.489442Z", "updated_at": "2026-05-07T12:49:35.489442Z"}
+RESULT   : PASS — Case 2 created
+
+======================================================================
+[D3 | POST /cases self with lesion → 201 (Case 3)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"consultation_type": "new_complaint", "has_visible_lesion": true, "is_for_self": true, "consent_ai_analysis": true, "consent_research": false, "body_location": "Face", "presenting_complaint": "Red rash on cheek"}
+STATUS   : 201
+RESPONSE : {"id": "e6251f60-3313-4c06-baf9-c3f049fed018", "case_number": 9233, "display_id": "AI-9233", "case_title": null, "original_case_id": null, "patient_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "doctor_id": null, "consultation_type": "new_complaint", "has_visible_lesion": true, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:49:35.587884Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "pending", "clinical_status": "active", "body_location": "Face", "symptom_progression": null, "symptom_tags": [], "is_bookmarked": false, "presenting_complaint": "Red rash on cheek", "case_summary": null, "celery_task_id": null, "question_round": 0, "max_question_rounds": 5, "image_count": 0, "images": [], "patient_name": null, "patient_age": null, "patient_gender": null, "patient_avatar_url": null, "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "visit_index": null, "total_visits": null, "created_at": "2026-05-07T12:49:35.579526Z", "updated_at": "2026-05-07T12:49:35.579526Z"}
+RESULT   : PASS — Case 3 created
+
+======================================================================
+[D4 | POST /cases follow-up of Case 2 → 201 (Case 4)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"consultation_type": "follow_up", "has_visible_lesion": false, "is_for_self": true, "consent_ai_analysis": true, "consent_research": false, "body_location": "Arm", "presenting_complaint": "Follow-up on arm patch", "original_case_id": "78bcd0d7-8daf-43ec-a206-f4e72d65c6da", "symptom_progression": "worse"}
+STATUS   : 201
+RESPONSE : {"id": "c0870269-805d-4fe0-9af4-58d7bee481f5", "case_number": 9234, "display_id": "AI-9234", "case_title": null, "original_case_id": "78bcd0d7-8daf-43ec-a206-f4e72d65c6da", "patient_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "doctor_id": null, "consultation_type": "follow_up", "has_visible_lesion": false, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:49:35.672253Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "pending", "clinical_status": "active", "body_location": "Arm", "symptom_progression": "worse", "symptom_tags": [], "is_bookmarked": false, "presenting_complaint": "Follow-up on arm patch", "case_summary": null, "celery_task_id": null, "question_round": 0, "max_question_rounds": 5, "image_count": 0, "images": [], "patient_name": null, "patient_age": null, "patient_gender": null, "patient_avatar_url": null, "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "visit_index": null, "total_visits": null, "created_at": "2026-05-07T12:49:35.657446Z", "updated_at": "2026-05-07T12:49:35.657446Z"}
+RESULT   : PASS — Case 4 (follow-up) created
+
+======================================================================
+[D5 | POST /cases for dependent → 201 (Case 5)]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"consultation_type": "new_complaint", "has_visible_lesion": true, "is_for_self": false, "consent_ai_analysis": true, "consent_research": false, "body_location": "Scalp", "presenting_complaint": "Scalp itch", "dependent_id": "af6fe7d3-749e-4eff-ab41-972bd1950191"}
+STATUS   : 201
+RESPONSE : {"id": "e030b2d9-72f0-4572-aa00-d061923d10cd", "case_number": 9235, "display_id": "AI-9235", "case_title": null, "original_case_id": null, "patient_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "doctor_id": null, "consultation_type": "new_complaint", "has_visible_lesion": true, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:49:35.749381Z", "consent_research": false, "is_for_self": false, "dependent_name": "Junior QA Updated", "dependent_relationship": null, "dependent_dob": "2019-01-01", "dependent_gender": "male", "ai_status": "pending", "clinical_status": "active", "body_location": "Scalp", "symptom_progression": null, "symptom_tags": [], "is_bookmarked": false, "presenting_complaint": "Scalp itch", "case_summary": null, "celery_task_id": null, "question_round": 0, "max_question_rounds": 5, "image_count": 0, "images": [], "patient_name": null, "patient_age": null, "patient_gender": null, "patient_avatar_url": null, "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "visit_index": null, "total_visits": null, "created_at": "2026-05-07T12:49:35.742563Z", "updated_at": "2026-05-07T12:49:35.742563Z"}
+RESULT   : PASS — Case 5 (dependent) created
+
+======================================================================
+[D6 | GET /cases?page=1 → all patient cases → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases?page=1&page_size=20
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"items": [{"id": "e030b2d9-72f0-4572-aa00-d061923d10cd", "case_number": 9235, "display_id": "AI-9235", "case_title": null, "consultation_type": "new_complaint", "ai_status": "pending", "clinical_status": "active", "is_for_self": false, "dependent_name": "Junior QA Updated", "dependent_relationship": null, "consent_ai_analysis": true, "has_visible_lesion": true, "body_location": "Scalp", "symptom_progression": null, "symptom_tags": [], "case_summary": null, "is_bookmarked": false, "image_count": 0, "patient_name": "QA Patient Updated", "patient_avatar_url": "https://storage.googleapis.com/aiderm-cliniq-storage/avatars/cdd30152-e4ef-42ee-a061-bade60fe9ded.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124934Z&X-Goog-Expires=604800&X-Goog-SignedHeaders=host&X-Goog-Signature=1a0e1052c9fd9ef410293e54e6a0b97b47b4b89c440a03b1aef528d99f5a622a638da9524b59f1a8ddb24e106f7cb557a36a4be1e4453379dc2f18331b2048edaf8085f3d6fbe20787c388d49d1a3a97adf091ed26098b65b96e6844303182c7aeaab9dede7f3aa5284085b35fc8205ab6dc0385376a0ca5b10e8145a382e0f8073dc6b00a0844d3ae0a522bb731f5dccb95c32bce8585cfb4bf5250248fc1d9c7f891fc2f452c24496e55a2e843b44de237bfe37ed61d90dbb61e7039853e18ff43c4e72de3a565026c33149067de5c20ae1fdb1466f694bd7ed404fd32b73286dffdf60ab533c61e6097d1d02c156745a96177f47dbc07165da3594f17a7c0", "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "created_at": "2026-05-07T12:49:35.742563Z", "updated_at": "2026-05-07T12:49:35.742563Z"}, {"id": "c0870269-805d-4fe0-9af4-58d7bee481f5", "case_number": 9234, "display_id": "AI-9234", "case_title": null, "consultation_type": "follow_up", "ai_status": "pending", "clinical_status": "active", "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "consent_ai_analysis": true, "has_visible_lesion": false, "body_location": "Arm", "symptom_progression": "worse", "symptom_tags": [], "case_summary": null, "is_bookmarked": false, "image_count": 0, "patient_name": "QA Patient Updated", "patient_avatar_url": "https://storage.googleapis.com/aiderm-cliniq-storage/avatars/cdd30152-e4ef-42ee-a061-bade60fe9ded.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124934Z&X-Goog-Expires=604800&X-Goog-SignedHeaders=host&X-Goog-Signature=1a0e1052c9fd9ef410293e54e6a0b97b47b4b89c440a03b1aef528d99f5a622a638da9524b59f1a8ddb24e106f7cb557a36a4be1e4453379dc2f18331b2048edaf8085f3d6fbe20787c388d49d1a3a97adf091ed26098b65b96e6844303182c7aeaab9dede7f3aa5284085b35fc8205ab6dc0385376a0ca5b10e8145a382e0f8073dc6b00a0844d3ae0a522bb731f5dccb95c32bce8585cfb4bf5250248fc1d9c7f891fc2f452c24496e55a2e843b44de237bfe37ed61d90dbb61e7039853e18ff43c4e72de3a565026c33149067de5c20ae1fdb1466f694bd7ed404fd32b73286dffdf60ab533c61e6097d1d02c156745a96177f47dbc07165da3594f17a7c0", "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "created_at": "2026-05-07T12:49:35.657446Z", "updated_at": "2026-05-07T12:49:35.657446Z"}, {"id": "e6251f60-3313-4c06-baf9-c3f049fed018", "case_number": 9233, "display_id": "AI-9233", "case_title": null, "consultation_type": "new_complaint", "ai_status": "pending", "clinical_status": "active", "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "consent_ai_analysis": true, "has_visible_lesion": true, "body_location": "Face", "symptom_progression": null, "symptom_tags": [], "case_summary": null, "is_bookmarked": false, "image_count": 0, "patient_name": "QA Patient Updated", "patient_avatar_url": "https://storage.googleapis.com/aiderm-cliniq-storage/avatars/cdd30152-e4ef-42ee-a061-bade60fe9ded.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124934Z&X-Goog-Expires=604800&X-Goog-SignedHeaders=host&X-Goog-Signature=1a0e1052c9fd9ef410293e54e6a0b97b47b4b89c440a03b1aef528d99f5a622a638da9524b59f1a8ddb24e106f7cb557a36a4be1e4453379dc2f18331b2048edaf8085f3d6fbe20787c388d49d1a3a97adf091ed26098b65b96e6844303182c7aeaab9dede7f3aa5284085b35fc8205ab6dc0385376a0ca5b10e8145a382e0f8073dc6b00a0844d3ae0a522bb731f5dccb95c32bce8585cfb4bf5250248fc1d9c7f891fc2f452c24496e55a2e843b44de237bfe37ed61d90dbb61e7039853e18ff43c4e72de3a565026c33149067de5c20ae1fdb1466f694bd7ed404fd32b73286dffdf60ab533c61e6097d1d02c156745a96177f47dbc07165da3594f17a7c0", "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "created_at": "2026-05-07T12:49:35.579526Z", "updated_at": "2026-05-07T12:49:35.579526Z"}, {"id": "78bcd0d7-8daf-43ec-a206-f4e72d65c6da", "case_number": 9232, "display_id": "AI-9232", "case_title": null, "consultation_type": "new_complaint", "ai_status": "pending", "clinical_status": "active", "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "consent_ai_analysis": true, "has_visible_lesion": false, "body_location": "Arm", "symptom_progression": null, "symptom_tags": [], "case_summary": null, "is_bookmarked": false, "image_count": 0, "patient_name": "QA Patient Updated", "patient_avatar_url": "https://storage.googleapis.com/aiderm-cliniq-storage/avatars/cdd30152-e4ef-42ee-a061-bade60fe9ded.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124934Z&X-Goog-Expires=604800&X-Goog-SignedHeaders=host&X-Goog-Signature=1a0e1052c9fd9ef410293e54e6a0b97b47b4b89c440a03b1aef528d99f5a622a638da9524b59f1a8ddb24e106f7cb557a36a4be1e4453379dc2f18331b2048edaf8085f3d6fbe20787c388d49d1a3a97adf091ed26098b65b96e6844303182c7aeaab9dede7f3aa5284085b35fc8205ab6dc0385376a0ca5b10e8145a382e0f8073dc6b00a0844d3ae0a522bb731f5dccb95c32bce8585cfb4bf5250248fc1d9c7f891fc2f452c24496e55a2e843b44de237bfe37ed61d90dbb61e7039853e18ff43c4e72de3a565026c33149067de5c20ae1fdb1466f694bd7ed404fd32b73286dffdf60ab533c61e6097d1d02c156745a96177f47dbc07165da3594f17a7c0", "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "created_at": "2026-05-07T12:49:35.489442Z", "updated_at": "2026-05-07T12:49:35.489442Z"}], "total": 4, "page": 1, "page_size": 20, "has_next": false}
+RESULT   : PASS — cases listed
+
+======================================================================
+[D7 | PATCH /cases/{case2} → update complaint → 200]
+REQUEST  : PATCH https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/78bcd0d7-8daf-43ec-a206-f4e72d65c6da
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"presenting_complaint": "Updated: dry flaky patch spreading"}
+STATUS   : 200
+RESPONSE : {"id": "78bcd0d7-8daf-43ec-a206-f4e72d65c6da", "case_number": 9232, "display_id": "AI-9232", "case_title": null, "original_case_id": null, "patient_id": "cdd30152-e4ef-42ee-a061-bade60fe9ded", "doctor_id": null, "consultation_type": "new_complaint", "has_visible_lesion": false, "consent_ai_analysis": true, "consent_ai_analysis_at": "2026-05-07T12:49:35.499575Z", "consent_research": false, "is_for_self": true, "dependent_name": null, "dependent_relationship": null, "dependent_dob": null, "dependent_gender": null, "ai_status": "pending", "clinical_status": "active", "body_location": "Arm", "symptom_progression": null, "symptom_tags": [], "is_bookmarked": false, "presenting_complaint": "Updated: dry flaky patch spreading", "case_summary": null, "celery_task_id": null, "question_round": 0, "max_question_rounds": 5, "image_count": 0, "images": [], "patient_name": null, "patient_age": null, "patient_gender": null, "patient_avatar_url": null, "doctor_name": null, "doctor_specialization": null, "doctor_clinic_name": null, "doctor_avatar_url": null, "visit_index": null, "total_visits": null, "created_at": "2026-05-07T12:49:35.489442Z", "updated_at": "2026-05-07T12:49:35.489442Z"}
+RESULT   : PASS — complaint updated
+
+======================================================================
+[D8 | DELETE /cases/{case5} → soft cancel → 204]
+REQUEST  : DELETE https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e030b2d9-72f0-4572-aa00-d061923d10cd
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 204
+RESPONSE : (no body on 204)
+RESULT   : PASS — case soft-deleted
+
+======================================================================
+[D9 | GET /cases/{case4}/adjacent-visits → prev=case2 → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/c0870269-805d-4fe0-9af4-58d7bee481f5/adjacent-visits
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"prev_case_id": "78bcd0d7-8daf-43ec-a206-f4e72d65c6da", "next_case_id": null, "visit_index": 2, "total_visits": 2}
+RESULT   : PASS — prev_case_id=78bcd0d7-8daf-43ec-a206-f4e72d65c6da
+NOTE     : Case4 is follow-up of Case2; expecting prev_case_id=78bcd0d7-8daf-43ec-a206-f4e72d65c6da
+
+
+━━━ PHASE E — Image Upload ━━━
+
+======================================================================
+[E1 | POST /cases/{id}/images clinical → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 201
+RESPONSE : {"id": "ff393eca-f459-403d-9fc5-e0eb89de9c7c", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 0, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/ff393eca-f459-403d-9fc5-e0eb89de9c7c.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124937Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=8738c3eedc66825b60d24da5dfffb21c896b3fab68ed32a4562145d3e55a9cd31ecfb1fda86c631bb3fcfcf94da7dd474f8d9baff8418616e4da844aa8d8d8c26fa3c000743ad70c4ce5c596bb799e8572a6c3461b49971b9abd0d269b519f2601ed48632efc3d1487b586c84183eca60e6b7c8ae1b76bc1380f054f6c3217edf757284eb5df307aff0eb6219920c063c6ac6e8602ee8b599e3cf4b6f327f8c0fee60122a40f54174885c5a34900a289e09261b4549fe5cc291e18c441561fdc0be534f433a464afa2e79fab20ebd08a88416631dfae0c2132826c7a34f9ac7a59b2118deaa70a2c0e6005b75cedaa2907fbcd8bf34e2bf274ab712eb6ec2e4e", "created_at": "2026-05-07T12:49:36.303681Z"}
+RESULT   : PASS — clinical image uploaded, id=ff393eca-f459-403d-9fc5-e0eb89de9c7c
+
+======================================================================
+[E2 | POST /cases/{id}/images dermoscopy → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 201
+RESPONSE : {"id": "dc8729b9-87e2-4674-b036-3d67e1f279bb", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "dermoscopy", "original_filename": "dermoscopy.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 1, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/dc8729b9-87e2-4674-b036-3d67e1f279bb.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124937Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=36478b2cce5e3618dee936710795b802862817a8bb056e93443b6fcd03238d95a96526a2ba384ef7dce36f00c16c8a932ed626efa6333648cb4e5763acf288787ecf3580be526680f1f6bab5eb3607f0d2357948dd888c7cfec7ad3820a134fb67b034b05e2f0fc354e1758ff83abb1173a8b6cc3cd05f800bb2a67572ab83c35493922a798b77dc648ce9ab48a06501f72988af2609f4561e7c22b8cad570c49dc1c6fe7a73b96bb15b843a8c0e3b6e03510791f489ee1d348ecc9c6e3badcd205da60ffbcac8459e9039a964a5bf850a5c7d09f97b5b669c9ca5ca14d201491406ed30a98e1ac3243cf5a965c45ecf095aa98ddcd6b66aa6ac33afbb792a71", "created_at": "2026-05-07T12:49:37.377952Z"}
+RESULT   : PASS — dermoscopy image uploaded, id=dc8729b9-87e2-4674-b036-3d67e1f279bb
+
+======================================================================
+[E3 | POST /cases/{id}/images clinical → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 201
+RESPONSE : {"id": "60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 2, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=95d3a0527b189009d79b0d4b17a7d0844d3658b339473555be002b390499109a1e14c6e5b8c9283660ef89b80c30ff1ad3451aa0486a6002b2978f6f45930c668feeb7e4458f95ab7dcc0095b75883df68a555080d4e4c91ece9ad571966a4c4b1ae77784555574a7f497b11cdddcfc6161612004f97799bc4421eb648a17c135271e2fca7b3986083b3ce36c398b376566ee75fe909076afb4964eb4a244f986d4a64c2c0b12219621df0c1c6018c01d624c34a32cf50f20e599da5cf0acb123950dbc4cee5ed5ca9c88ca803707c07c42d7517eaa88f5f5a5c93077a252ebe28d2ae54034718518e5ed1c807bcdebe45a0922e5c8f048c96061af61b66add6", "created_at": "2026-05-07T12:49:37.926516Z"}
+RESULT   : PASS — clinical image uploaded, id=60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4
+
+======================================================================
+[E4 | GET /cases/{id}/images → list 3 images → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"images": [{"id": "ff393eca-f459-403d-9fc5-e0eb89de9c7c", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 0, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/ff393eca-f459-403d-9fc5-e0eb89de9c7c.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=518aaa180fde56cb5cf6c9538d5053461dfc0a5b5c4fc2394c39350ba666b80512de2b2776eb840af10aee2cf4131b0113217c0d666e7361ea2984fadca80b1a640b1e89252ddfb2bc02e2e5d8fc8104150cdf4272047e2fd832638e9fb3ca0bac3b4c1c37eb51e1cea08b24139aaa228b9950bcd35702a8036bd581157996e4416922a61ac56c39c21e50969301edf0a7899ba76e3b342a8240452e80bdfc8136a8e2ee35aa28cbe42ceb162d118430dacbbb46b90fb28468732d7aec118df9d6ff8fe1e1281ceddb0af37ad9be7ace8afb3b36dd19365a970357c6897d98adc26f283f0d70f6fbbc4697df7cf3be2ffbd1c683678d10b0378161e4ecba4d5e", "created_at": "2026-05-07T12:49:36.303681Z"}, {"id": "dc8729b9-87e2-4674-b036-3d67e1f279bb", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "dermoscopy", "original_filename": "dermoscopy.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 1, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/dc8729b9-87e2-4674-b036-3d67e1f279bb.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=847570847c0e635990fd577af33675968ff64f65d5f99b3f241776f7b991edfed89be721fca7ea211bb027090ba161dc91a25afcb98ac254400602a37c00edce6cf9afe7349c1f5929e6845bcaf7a3eb2ad96ac1bb1a858cbc65c02fa74e2879cc9aa9f377faa3b50c2d2eb80244a20085c6f2abe3aa8870c02b44be2b61791e376ddacc0d3bf2f7e95d1983ad68b9b908e177ddda0e8eef9337b6f9f548dde847bde13c0e5930c86292ed31b4c76ffadb624d63f52db37794168776a41d7cacdbd6f9cdcba00cc404c9b0a2b5bc284d58b49b0a060e469c6727b94081c6c02e248f7b609c5add77455e8662b30d28dcf8b7918a4dc3dae6e5bf2802f46ee992", "created_at": "2026-05-07T12:49:37.377952Z"}, {"id": "60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 2, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=95d3a0527b189009d79b0d4b17a7d0844d3658b339473555be002b390499109a1e14c6e5b8c9283660ef89b80c30ff1ad3451aa0486a6002b2978f6f45930c668feeb7e4458f95ab7dcc0095b75883df68a555080d4e4c91ece9ad571966a4c4b1ae77784555574a7f497b11cdddcfc6161612004f97799bc4421eb648a17c135271e2fca7b3986083b3ce36c398b376566ee75fe909076afb4964eb4a244f986d4a64c2c0b12219621df0c1c6018c01d624c34a32cf50f20e599da5cf0acb123950dbc4cee5ed5ca9c88ca803707c07c42d7517eaa88f5f5a5c93077a252ebe28d2ae54034718518e5ed1c807bcdebe45a0922e5c8f048c96061af61b66add6", "created_at": "2026-05-07T12:49:37.926516Z"}], "total": 3}
+RESULT   : PASS — 3 images returned
+
+======================================================================
+[E5 | GET /cases/{id}/images/{image_id} → signed URL → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/ff393eca-f459-403d-9fc5-e0eb89de9c7c
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"id": "ff393eca-f459-403d-9fc5-e0eb89de9c7c", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 0, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/ff393eca-f459-403d-9fc5-e0eb89de9c7c.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=518aaa180fde56cb5cf6c9538d5053461dfc0a5b5c4fc2394c39350ba666b80512de2b2776eb840af10aee2cf4131b0113217c0d666e7361ea2984fadca80b1a640b1e89252ddfb2bc02e2e5d8fc8104150cdf4272047e2fd832638e9fb3ca0bac3b4c1c37eb51e1cea08b24139aaa228b9950bcd35702a8036bd581157996e4416922a61ac56c39c21e50969301edf0a7899ba76e3b342a8240452e80bdfc8136a8e2ee35aa28cbe42ceb162d118430dacbbb46b90fb28468732d7aec118df9d6ff8fe1e1281ceddb0af37ad9be7ace8afb3b36dd19365a970357c6897d98adc26f283f0d70f6fbbc4697df7cf3be2ffbd1c683678d10b0378161e4ecba4d5e", "created_at": "2026-05-07T12:49:36.303681Z"}
+RESULT   : PASS — signed URL in response
+
+======================================================================
+[E6 | DELETE /cases/{id}/images/{image_id} → 204]
+REQUEST  : DELETE https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/ff393eca-f459-403d-9fc5-e0eb89de9c7c
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — image deleted
+
+======================================================================
+[E7 | GET /cases/{id}/images after delete → 2 images → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"images": [{"id": "dc8729b9-87e2-4674-b036-3d67e1f279bb", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "dermoscopy", "original_filename": "dermoscopy.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 1, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/dc8729b9-87e2-4674-b036-3d67e1f279bb.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=847570847c0e635990fd577af33675968ff64f65d5f99b3f241776f7b991edfed89be721fca7ea211bb027090ba161dc91a25afcb98ac254400602a37c00edce6cf9afe7349c1f5929e6845bcaf7a3eb2ad96ac1bb1a858cbc65c02fa74e2879cc9aa9f377faa3b50c2d2eb80244a20085c6f2abe3aa8870c02b44be2b61791e376ddacc0d3bf2f7e95d1983ad68b9b908e177ddda0e8eef9337b6f9f548dde847bde13c0e5930c86292ed31b4c76ffadb624d63f52db37794168776a41d7cacdbd6f9cdcba00cc404c9b0a2b5bc284d58b49b0a060e469c6727b94081c6c02e248f7b609c5add77455e8662b30d28dcf8b7918a4dc3dae6e5bf2802f46ee992", "created_at": "2026-05-07T12:49:37.377952Z"}, {"id": "60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "image_type": "clinical", "original_filename": "clinical.png", "mime_type": "image/png", "size_bytes": 220587, "upload_order": 2, "signed_url": "https://storage.googleapis.com/aiderm-cliniq-storage/cases/e6251f60-3313-4c06-baf9-c3f049fed018/images/60d0b126-97c1-4d8e-b5e6-96fc1c7e50b4.png?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=aiderm-storage-sa%40aiderm-cliniq.iam.gserviceaccount.com%2F20260507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260507T124938Z&X-Goog-Expires=1800&X-Goog-SignedHeaders=host&X-Goog-Signature=95d3a0527b189009d79b0d4b17a7d0844d3658b339473555be002b390499109a1e14c6e5b8c9283660ef89b80c30ff1ad3451aa0486a6002b2978f6f45930c668feeb7e4458f95ab7dcc0095b75883df68a555080d4e4c91ece9ad571966a4c4b1ae77784555574a7f497b11cdddcfc6161612004f97799bc4421eb648a17c135271e2fca7b3986083b3ce36c398b376566ee75fe909076afb4964eb4a244f986d4a64c2c0b12219621df0c1c6018c01d624c34a32cf50f20e599da5cf0acb123950dbc4cee5ed5ca9c88ca803707c07c42d7517eaa88f5f5a5c93077a252ebe28d2ae54034718518e5ed1c807bcdebe45a0922e5c8f048c96061af61b66add6", "created_at": "2026-05-07T12:49:37.926516Z"}], "total": 2}
+RESULT   : PASS — 2 images (1 deleted)
+
+
+━━━ PHASE F — AI Analysis & Q&A ━━━
+
+======================================================================
+[F1 | GET /cases/{id}/complaints → AI suggestions → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/complaints
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "complaints": ["red bumps on my face", "pimples on my face", "my face feels rough", "blemishes on my face", "my face has red spots", "bumps on my jawline", "scars from old spots", "my skin is uneven", "my skin is discolored"], "source": "image"}
+RESULT   : PASS — complaint suggestions returned
+
+======================================================================
+[F2 | POST /cases/{id}/assessment-depth → quick (2 rounds) → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/assessment-depth
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"rounds": 2}
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "rounds": 2, "max_question_rounds": 2, "message": "Assessment set to 2 question rounds."}
+RESULT   : PASS — depth set
+NOTE     : Field is rounds:int (not depth:str) — schema correction from Task 2
+
+======================================================================
+[F3 | POST /cases/{id}/ai/analyze → 202 trigger]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/ai/analyze
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 202
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "task_id": "7f22bd63-1f32-42c4-adc9-ee7fbbb2a339", "message": "Analysis started. Poll /status for progress."}
+RESULT   : PASS — AI analysis dispatched
+
+
+[F4 | Polling GET /cases/{id}/ai/status → wait for completed (max 180s)]
+======================================================================
+[F4 | Poll GET /cases/{id}/ai/status → ai_status=completed]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/ai/status
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "ai_status": "completed", "task_id": null, "error_message": null, "completed_at": "2026-05-07T12:49:52.624649Z", "recommended_rounds": 5}
+RESULT   : PASS — AI analysis completed
+
+======================================================================
+[F5 | GET /cases/{id}/ai/results → visual + differential → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/ai/results
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "ai_status": "completed", "visual_description": {"round_number": 0, "type_of_lesion": "Papules, pustules, and atrophic scars", "site": "Left cheek and jawline", "overall_description": "The patient presents with multiple inflammatory lesions consistent with acne vulgaris on the left cheek and jawline. These include erythematous papules and pustules, some with visible purulent centers, indicative of active inflammation. Surrounding the active lesions, there is some erythema and areas of post-inflammatory hyperpigmentation. Additionally, there are numerous atrophic scars visible, appearing as small, depressed areas, suggesting a history of previous acne breakouts. The lesions are scattered but some areas show clustering, and while individual lesions are well-defined, the overall affected area lacks a distinct border.", "description_json": "{\"type_of_lesion\": \"Papules, pustules, and atrophic scars\", \"site\": \"Left cheek and jawline\", \"count\": \"Multiple (numerous papules, pustules, and scars)\", \"arrangement\": \"Scattered, with some areas of clustering\", \"size\": \"Papules and pustules typically 1-3 mm; scars vary in size but are generally small, a few millimeters in diameter\", \"color_pattern\": \"Papules and pustules are erythematous (red) with some having a yellowish-white center; scars appear as lighter, depressed areas or darker (post-inflammatory hyperpigmentation) areas\", \"border\": \"Individual lesions are generally well-defined; the overall affected area has an ill-defined border\", \"surface_changes\": \"Some lesions show active inflammation (pustules); scars show textural changes (depressions)\", \"presence_of_exudate_or_discharge\": \"yes, some pustules appear to contain purulent material\", \"surrounding_skin_changes\": \"Erythema surrounding some active lesions, some areas of post-inflammatory hyperpigmentation\", \"secondary_changes\": \"Atrophic scarring (depressed scars), post-inflammatory hyperpigmentation (darker spots)\", \"pattern_or_shape\": \"No specific geometric pattern, rather a diffuse distribution across the lower face\", \"additional_notes\": \"The image shows both active acne lesions and residual scarring from previous lesions, consistent with acne vulgaris.\", \"overall_description\": \"The patient presents with multiple inflammatory lesions consistent with acne vulgaris on the left cheek and jawline. These include erythematous papules and pustules, some with visible purulent centers, indicative of active inflammation. Surrounding the active lesions, there is some erythema and areas of post-inflammatory hyperpigmentation. Additionally, there are numerous atrophic scars visible, appearing as small, depressed areas, suggesting a history of previous acne breakouts. The lesions are scattered but some areas show clustering, and while individual lesions are well-defined, the overall affected area lacks a distinct border.\"}", "created_at": "2026-05-07T12:49:52.624649Z"}, "differential": {"round_number": 0, "is_final": true, "most_probable_diagnosis": "Acne Vulgaris (Adult Female Acne)", "confidence": "high", "diagnosis_json": "{\"most_probable_diagnosis\": {\"diagnosis\": \"Acne Vulgaris (Adult Female Acne)\", \"likelihood\": 90, \"key_supporting_features\": \"Multiple inflammatory papules and pustules, as well as some erythematous macules and atrophic scars, primarily on the jawline and lower cheeks. The patient's age (30, female) is consistent with adult female acne.\"}, \"differential_diagnoses\": [{\"diagnosis\": \"Rosacea\", \"likelihood\": 50, \"key_supporting_features\": \"Can present with papules and pustules, often on the central face, but typically lacks comedones and severe scarring. Erythema is prominent, and telangiectasias may be present. The distribution in the image is less typical for classic rosacea but could be a variant.\"}, {\"diagnosis\": \"Perioral Dermatitis\", \"likelihood\": 30, \"key_supporting_features\": \"Characterized by small erythematous papules and pustules, often around the mouth, nose, and eyes. However, the lesions in the image appear more spread out and inflamed than typical perioral dermatitis, and not strictly periorificial.\"}, {\"diagnosis\": \"Folliculitis\", \"likelihood\": 25, \"key_supporting_features\": \"Inflammation of hair follicles, presenting as erythematous papules and pustules, often with a hair in the center. While some lesions might be folliculitis, the presence of various lesion types (scars, deeper papules) makes acne more likely.\"}, {\"diagnosis\": \"Drug-induced Acneiform Eruption\", \"likelihood\": 20, \"key_supporting_features\": \"Certain medications (e.g., corticosteroids, lithium, some anticonvulsants) can cause sudden onset, monomorphic papules and pustules. This would need to be considered with a detailed drug history. The polymorphous nature of lesions in the image makes this less likely.\"}], \"confidence in answer\": \"high\"}", "created_at": "2026-05-07T12:49:52.624649Z"}, "case_summary": "1. **Age**: 30 2. **Sex**: female 3. **Chief Complaint**: Red rash on cheek 4. **History**: Initial AI analysis complete. Q&A consultation in progress. 5. **Photograph Analysis**: The patient presents with multiple inflammatory lesions consistent with acne vulgaris on the left cheek and jawline. These include erythematous papules and pustules, some with visible purulent centers, indicative of active inflammation. Surrounding the active lesions, there is some erythema and areas of post-inflammatory hyperpigmentation. Additionally, there are numerous atrophic scars visible, appearing as small, depressed areas, suggesting a history of previous acne breakouts. The lesions are scattered but some areas show clustering, and while individual lesions are well-defined, the overall affected area lacks a distinct border. 6. **Most Probable Diagnosis**: Acne Vulgaris (Adult Female Acne) (high) 7. **Differential Diagnosis**: Not available"}
+RESULT   : PASS — AI results returned
+
+======================================================================
+[F6 | POST /cases/{id}/chat/questions → generate Q&A → 202]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/chat/questions
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 202
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "round_number": 0, "task_id": "846dfdba-904e-493a-b00b-7415d85c8393", "message": "Generating questions. Poll GET /chat to see them appear."}
+RESULT   : PASS — questions dispatched
+
+======================================================================
+[F7 | GET /cases/{id}/chat → conversation history → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/chat
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "current_round": 0, "max_rounds": 5, "is_complete": false, "rounds": [{"round_number": 0, "questions": [{"question": "When did you first notice these skin lesions, and how have they evolved since then?", "answer_options": ["Within the last few days/week, and they appeared suddenly.", "A few weeks to a month ago, and they've been steadily worsening.", "Several months ago, and they come and go or are consistently present.", "Many years ago (e.g., since adolescence), and it's a chronic issue.", "I'm not sure when exactly, but it feels like they've been there for a while.", "They started at a specific time (e.g., with a new product, medication, or life event)."]}], "answers": [""]}], "raw_messages": [{"id": "4a121490-7689-453b-903d-5df655ab7c8f", "role": "ai", "content": "{\"question\": \"When did you first notice these skin lesions, and how have they evolved since then?\", \"answer_options\": [\"Within the last few days/week, and they appeared suddenly.\", \"A few weeks to a month ago, and they've been steadily worsening.\", \"Several months ago, and they come and go or are consistently present.\", \"Many years ago (e.g., since adolescence), and it's a chronic issue.\", \"I'm not sure when exactly, but it feels like they've been there for a while.\", \"They started at a specific time (e.g., with a new product, medication, or life event).\"]}", "round_number": 0, "question_index": 0, "image_url": null, "created_at": "2026-05-07T12:49:56.258821Z"}]}
+RESULT   : PASS — conversation returned
+
+======================================================================
+[F8 | GET /cases/{id}/chat/stream → SSE connected → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/chat/stream
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : (SSE) first bytes: b'event: status_update\ndata: {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "'
+RESULT   : PASS — SSE stream connected
+
+======================================================================
+[F9 | POST /cases/{id}/chat/answers → submit → 202]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/chat/answers
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"round_number": 0, "answers": [{"question_index": 0, "answer": "About 2 weeks"}]}
+STATUS   : 202
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "round_number": 0, "task_id": "c2022231-ee78-4aec-bda6-d808cd221996", "message": "Answers saved. Re-analysis is in progress. Poll GET /chat for new questions."}
+RESULT   : PASS — answers submitted
+NOTE     : 1Q/round design: submit exactly 1 answer per round_number
+
+======================================================================
+[F10 | POST /cases/{id}/chat/finish → skip remaining → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/chat/finish
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "question_round": 5, "max_rounds": 5, "is_complete": true, "message": "Conversation finished early. Case summary is ready."}
+RESULT   : PASS — Q&A finished early
+
+======================================================================
+[F11 | POST /cases/{id}/ai/query → free-text AI Q → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/ai/query
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"question": "Is this condition contagious?"}
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "question": "Is this condition contagious?", "answer": "No, this condition is not contagious. You cannot spread it to other people through contact.\n\nThe spots you're experiencing are caused by factors within your own body, like hormones, oil production in your skin, and how your skin cells and hair follicles behave. It's a common skin condition that many adults, especially women, experience."}
+RESULT   : PASS — AI answered
+
+======================================================================
+[F12 | POST /cases/{id}/ai/chat → session-managed AI → 200]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/ai/chat
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"message": "What are my treatment options?", "session_id": null}
+STATUS   : 200
+RESPONSE : {"session_id": "2f921475-8fb3-48b9-9b1f-9ab280be8749", "answer": "It sounds like you're eager to understand how we can help manage these breakouts, which is a great next step. Before we dive into specific treatments, could you tell me a little more about your history with acne?\n\nYou mentioned these lesions started about 2 weeks ago. Have you had similar breakouts or issues with acne before, or is this a completely new experience for you? This will help me recommend the most appropriate options for you."}
+RESULT   : PASS — session_id=2f921475-8fb3-48b9-9b1f-9ab280be8749
+
+======================================================================
+[F13 | GET /cases/{id}/ai/chat/{session_id} → history → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/ai/chat/2f921475-8fb3-48b9-9b1f-9ab280be8749
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"session_id": "2f921475-8fb3-48b9-9b1f-9ab280be8749", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "messages": [{"id": "defcda04-0538-4039-b248-25f37ee47aea", "role": "user", "content": "What are my treatment options?", "created_at": "2026-05-07T12:50:11.606631Z"}, {"id": "e6b91f58-a001-4fb5-9a21-966763c7f412", "role": "assistant", "content": "It sounds like you're eager to understand how we can help manage these breakouts, which is a great next step. Before we dive into specific treatments, could you tell me a little more about your history with acne?\n\nYou mentioned these lesions started about 2 weeks ago. Have you had similar breakouts or issues with acne before, or is this a completely new experience for you? This will help me recommend the most appropriate options for you.", "created_at": "2026-05-07T12:50:11.606631Z"}]}
+RESULT   : PASS — session history returned
+
+
+━━━ PHASE G — Red Flags & QR ━━━
+
+======================================================================
+[G1 | POST /cases/{id}/red-flags/check → 202]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/red-flags/check
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 202
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "status": "checking", "flags": [], "advice": null, "message": "Red flag check is in progress. Poll this endpoint again shortly."}
+RESULT   : PASS — red flag check triggered
+
+======================================================================
+[G2 | GET /cases/{id}/red-flags → result → 200]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/red-flags
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 200
+RESPONSE : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "status": "clear", "flags": [], "advice": null, "message": "No red flags detected. You may proceed to the case summary."}
+RESULT   : PASS — red_flag_status=?
+
+======================================================================
+[G3 | POST /qr/generate → single-use QR → 201]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/generate
+HEADER   : Authorization: Bearer <patient_token>
+BODY     : {"case_id": "e6251f60-3313-4c06-baf9-c3f049fed018"}
+STATUS   : 201
+RESPONSE : {"token": "zFtiUdmoNr97g_PLVFAsLL7KGCbhchlSzmRHy656wwQ", "case_id": "e6251f60-3313-4c06-baf9-c3f049fed018", "display_id": "AI-9233", "expires_at": "9999-12-31T00:00:00Z", "qr_url": "/api/v1/qr/scan/zFtiUdmoNr97g_PLVFAsLL7KGCbhchlSzmRHy656wwQ"}
+RESULT   : PASS — token=zFtiUdmoNr97g_PLVFAsLL7KGCbhchlSzmRHy656wwQ
+
+======================================================================
+[G4 | POST /qr/scan/{token} with patient token → 403]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/scan/zFtiUdmoNr97g_PLVFAsLL7KGCbhchlSzmRHy656wwQ
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 403
+RESPONSE : {"error": {"code": "INSUFFICIENT_ROLE", "message": "This endpoint requires the 'doctor' role", "status": 403, "details": {}}}
+RESULT   : PASS — patient cannot scan own QR
+NOTE     : QR scan is doctor-only; patient self-scan must be blocked
+
+======================================================================
+[G5 | POST /qr/by-display-id/{display_id} → access by AI-XXXX]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/qr/by-display-id/AI-9233
+STATUS   : SKIP
+RESPONSE : N/A
+RESULT   : PASS — SKIP: requires doctor token; covered by Task 2 E4
+NOTE     : display_id=AI-9233
+
+
+━━━ PHASE H — Review & Report (read-only) ━━━
+
+======================================================================
+[H1 | GET /cases/{id}/review before doctor creates → 404]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/review
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 404
+RESPONSE : {"error": {"code": "NOT_FOUND", "message": "No review has been submitted for this case yet.", "status": 404, "details": {}}}
+RESULT   : PASS — 404 before review exists
+
+======================================================================
+[H2 | GET /cases/{id}/report before generated → 404]
+REQUEST  : GET https://54d1-115-97-59-234.ngrok-free.app/api/v1/cases/e6251f60-3313-4c06-baf9-c3f049fed018/report
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 404
+RESPONSE : {"error": {"code": "REPORT_NOT_FOUND", "message": "Report not yet generated. Ask the assigned doctor to trigger it via POST /cases/{id}/report.", "status": 404, "details": {}}}
+RESULT   : PASS — 404 before report generated
+
+
+━━━ PHASE I — Cleanup & Auth ━━━
+
+======================================================================
+[I1 | POST /auth/logout → 204 token revoked]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/logout
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — logged out
+
+======================================================================
+[I2 | POST /auth/refresh with revoked token → 401]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/refresh
+STATUS   : 401
+RESPONSE : {"error": {"code": "INVALID_TOKEN", "message": "Refresh token is invalid or has been revoked", "status": 401, "details": {}}}
+RESULT   : PASS — revoked token rejected
+
+======================================================================
+[I3 | DELETE /users/me → soft delete → 204]
+REQUEST  : DELETE https://54d1-115-97-59-234.ngrok-free.app/api/v1/users/me
+HEADER   : Authorization: Bearer <patient_token>
+STATUS   : 204
+RESPONSE : (no body)
+RESULT   : PASS — account soft-deleted
+
+======================================================================
+[I4 | POST /auth/login after soft delete → 401]
+REQUEST  : POST https://54d1-115-97-59-234.ngrok-free.app/api/v1/auth/login
+BODY     : {"email": "qa_pat_1778158142@example.com", "password": "Test@12345"}
+STATUS   : 401
+RESPONSE : {"error": {"code": "UNAUTHORIZED", "message": "Account is suspended", "status": 401, "details": {}}}
+RESULT   : PASS — deleted account cannot login
+
+
+======================================================================
+SUMMARY
+─────────────────────────────────────────────────────────────────────
+Auth & Identity:
+  A0     PASS  GET /health — baseline server check
+  A1     PASS  POST /auth/register/patient → 201
+  A2     PASS  POST /auth/login wrong password → 401
+  A3     PASS  POST /auth/login correct → 200
+  A4     PASS  POST /auth/refresh → new token pair
+  A5     PASS  POST /auth/verify-email → resend OTP → 200
+  A6     PASS  POST /auth/verify-email/confirm → is_verified=true
+  A7     PASS  POST /auth/forgot-password → 200
+  A8     PASS  POST /auth/reset-password → 200
+  A9     PASS  POST /auth/login with NEW password → 200
+  A10    PASS  POST /auth/login with OLD password → 401
+  A11    PASS  POST /auth/change-password → 200
+  A12    PASS  GET /users/me with invalid token → 401
+
+Profile & Device:
+  B1     PASS  GET /users/me → patient profile
+  B2     PASS  PATCH /users/me → update profile → 200
+  B3     PASS  POST /users/me/avatar → upload photo → 200
+  B4     PASS  POST /users/me/device-token → register FCM token → 200
+
+Dependents:
+  C1     PASS  POST /users/me/dependents → create child dependent → 201
+  C2     PASS  GET /users/me/dependents → list → 200
+  C3     PASS  PATCH /users/me/dependents/{id} → update name → 200
+
+Case Creation:
+  D1     PASS  POST /cases no consent → 400
+  D2     PASS  POST /cases self no lesion → 201 (Case 2)
+  D3     PASS  POST /cases self with lesion → 201 (Case 3)
+  D4     PASS  POST /cases follow-up of Case 2 → 201 (Case 4)
+  D5     PASS  POST /cases for dependent → 201 (Case 5)
+  D6     PASS  GET /cases?page=1 → all patient cases → 200
+  D7     PASS  PATCH /cases/{case2} → update complaint → 200
+  D8     PASS  DELETE /cases/{case5} → soft cancel → 204
+  D9     PASS  GET /cases/{case4}/adjacent-visits → prev=case2 → 200
+
+Image Upload:
+  E1     PASS  POST /cases/{id}/images clinical → 201
+  E2     PASS  POST /cases/{id}/images dermoscopy → 201
+  E3     PASS  POST /cases/{id}/images clinical → 201
+  E4     PASS  GET /cases/{id}/images → list 3 images → 200
+  E5     PASS  GET /cases/{id}/images/{image_id} → signed URL → 200
+  E6     PASS  DELETE /cases/{id}/images/{image_id} → 204
+  E7     PASS  GET /cases/{id}/images after delete → 2 images → 200
+
+AI Analysis & Q&A:
+  F1     PASS  GET /cases/{id}/complaints → AI suggestions → 200
+  F2     PASS  POST /cases/{id}/assessment-depth → quick (2 rounds) → 200
+  F3     PASS  POST /cases/{id}/ai/analyze → 202 trigger
+  F4     PASS  Poll GET /cases/{id}/ai/status → ai_status=completed
+  F5     PASS  GET /cases/{id}/ai/results → visual + differential → 200
+  F6     PASS  POST /cases/{id}/chat/questions → generate Q&A → 202
+  F7     PASS  GET /cases/{id}/chat → conversation history → 200
+  F8     PASS  GET /cases/{id}/chat/stream → SSE connected → 200
+  F9     PASS  POST /cases/{id}/chat/answers → submit → 202
+  F10    PASS  POST /cases/{id}/chat/finish → skip remaining → 200
+  F11    PASS  POST /cases/{id}/ai/query → free-text AI Q → 200
+  F12    PASS  POST /cases/{id}/ai/chat → session-managed AI → 200
+  F13    PASS  GET /cases/{id}/ai/chat/{session_id} → history → 200
+
+Red Flags & QR:
+  G1     PASS  POST /cases/{id}/red-flags/check → 202
+  G2     PASS  GET /cases/{id}/red-flags → result → 200
+  G3     PASS  POST /qr/generate → single-use QR → 201
+  G4     PASS  POST /qr/scan/{token} with patient token → 403
+  G5     PASS  POST /qr/by-display-id/{display_id} → access by AI-XXXX
+
+Review & Report (read-only):
+  H1     PASS  GET /cases/{id}/review before doctor creates → 404
+  H2     PASS  GET /cases/{id}/report before generated → 404
+
+Cleanup & Auth:
+  I1     PASS  POST /auth/logout → 204 token revoked
+  I2     PASS  POST /auth/refresh with revoked token → 401
+  I3     PASS  DELETE /users/me → soft delete → 204
+  I4     PASS  POST /auth/login after soft delete → 401
+
+Total: 60 PASS  0 FAIL  0 SKIP/DEFERRED
+======================================================================

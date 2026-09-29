@@ -12,6 +12,15 @@ as opposed to the patient-consultation prompts which use layman's terms.
 from __future__ import annotations
 
 
+def _p(key: str, default: str) -> str:
+    try:
+        from src.ai.prompt_registry import get_prompt
+        v = get_prompt(key)
+        return v if v else default
+    except Exception:
+        return default
+
+
 class DoctorReviewPrompts:
     """Factory for doctor-facing clinical review prompts."""
 
@@ -30,7 +39,7 @@ class DoctorReviewPrompts:
         Returns: {{"Complaint": ["<clinical term 1>", ...]}}
         Used in: doctor review screen — complaint-confirmation checkbox.
         """
-        return """You are an AI assistant for a dermatologist. Your primary goal is to generate a list of potential clinical findings using precise, technical dermatological terminology. These terms will be presented to the doctor as checkboxes to confirm the findings.
+        return _p("doctor_complaints", """You are an AI assistant for a dermatologist. Your primary goal is to generate a list of potential clinical findings using precise, technical dermatological terminology. These terms will be presented to the doctor as checkboxes to confirm the findings.
 
 You will be given the following information:
 1. **Conversation History:** A transcript of the conversation between the patient and another AI assistant. This is the most important source of information.
@@ -57,7 +66,7 @@ Sex: {sex}
 {{
     "Complaint": ["<technical term 1>", "<technical term 2>", "<technical term 3>", ...]
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 2. Doctor-facing diagnosis generation
@@ -77,7 +86,7 @@ Sex: {sex}
         NOTE: This prompt supports optional image input. Pass image bytes
         alongside this prompt when calling the multimodal LLM endpoint.
         """
-        return """You are an AI diagnostic assistant for a dermatologist. Based on the provided patient information (conversation, visual description, prescription history, and clinical images), generate a comprehensive differential diagnosis.
+        return _p("doctor_diagnosis", """You are an AI diagnostic assistant for a dermatologist. Based on the provided patient information (conversation, visual description, prescription history, and clinical images), generate a comprehensive differential diagnosis.
 
 The output must be a JSON object that includes:
 - Most Probable Diagnosis: The most likely diagnosis with its likelihood and key supporting features.
@@ -94,19 +103,21 @@ The JSON format must be strictly as follows:
 {{
   "most_probable_diagnosis": {{
     "diagnosis": "",
-    "likelihood": "",
+    "likelihood": "high",
     "key_supporting_features": ""
   }},
   "differential_diagnoses": [
     {{
       "diagnosis": "",
-      "likelihood": "",
+      "likelihood": "medium",
       "key_supporting_features": ""
     }}
   ],
   "confidence in answer": "<one out of high, medium, low>"
 }}
-"""
+
+IMPORTANT: "likelihood" must be one of these exact strings: "very low", "low", "medium", "high", "very high". Do not use numbers.
+""")
 
     # ------------------------------------------------------------------
     # 3. Doctor-agent doubts (doctor-side)
@@ -194,6 +205,55 @@ The response must be in the following JSON format:
 """
 
     # ------------------------------------------------------------------
+    # 4b. Direct single-call question generation (replaces doubts + questions)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def generate_doctor_question_direct() -> str:
+        """
+        Single Gemini call that replaces the previous 2-call chain:
+            generate_doctor_doubts() → generate_doctor_questions()
+
+        Combines doubt detection + question formatting into one prompt.
+        Cuts response time by ~50% and eliminates the Flutter 20s timeout.
+
+        Template vars: {visual_description}, {diagnoses}, {conversation},
+                       {qa_history}, {age}, {sex}, {questions_left}
+        Returns:
+            Question needed : {"has_question": true, "question": "...",
+                               "answer_options": [...], "reason": "..."}
+            No question     : {"has_question": false}
+        """
+        return _p("doctor_question", """You are a dermatologist AI assistant helping a doctor review a patient case.
+
+Based on the clinical context below, decide if you need ONE more clarifying question from the doctor to better refine the diagnosis. If yes, generate that single most important question. If no more clarification is needed, say so.
+
+Be mindful: you have {questions_left} question(s) remaining. Prioritize only the most critical gap in information.
+
+--- CLINICAL CONTEXT ---
+Visual Description: {visual_description}
+Differential Diagnosis: {diagnoses}
+Patient Q&A History: {conversation}
+Doctor Q&A So Far: {qa_history}
+Age: {age}
+Sex: {sex}
+------------------------
+
+Rules:
+- Ask only if the answer would meaningfully change or confirm the diagnosis.
+- Use direct clinical language appropriate for a dermatologist.
+- If questions_left is 0 or all critical gaps are already covered, return has_question: false.
+
+Respond ONLY with valid JSON in one of these two formats:
+
+If a question is needed:
+{{"has_question": true, "question": "<direct clinical question>", "answer_options": ["<option 1>", "<option 2>", "<option 3>"], "reason": "<why this question matters for the diagnosis>"}}
+
+If no question is needed:
+{{"has_question": false}}
+""")
+
+    # ------------------------------------------------------------------
     # 5. Final clinical summary (doctor-ready)
     # ------------------------------------------------------------------
 
@@ -208,30 +268,31 @@ The response must be in the following JSON format:
         Returns: structured summary JSON.
         Used in: case finalisation, before report generation.
         """
-        return """You are an AI assistant tasked with creating a final, comprehensive clinical summary for a dermatologist. Based on the entire interaction (initial visual analysis, conversation with the doctor, and the final confirmed diagnosis), generate a structured summary. This summary should be clear, concise, and ready for inclusion in a medical record.
-
-The summary should include:
-1. **Presenting Complaint:** A brief, technical description of the initial lesion.
-2. **Clinical Dialogue Summary:** Key points from the conversation with the doctor, including their specific findings.
-3. **Final Diagnosis:** The confirmed diagnosis.
-4. **Key Supporting Features:** The features that most strongly support the final diagnosis.
+        return _p("doctor_final_summary", """You are an AI assistant tasked with creating a final, comprehensive clinical summary for a dermatologist. Based on the entire interaction (initial visual analysis, conversation with the doctor, the confirmed clinical indicators, and the final confirmed diagnosis), generate a structured summary. This summary should be clear, concise, and ready for inclusion in a medical record.
 
 Conversation: {conversation}
 Visual Description: {visual_description}
 Final Diagnosis: {final_diagnosis}
+Clinical Indicators confirmed by doctor: {clinical_indicators}
 Age: {age}
 Sex: {sex}
 
 The output must be a JSON object in the following format:
 {{
   "summary": {{
-    "presenting_complaint": "<technical description>",
-    "clinical_dialogue_summary": "<summary of key findings>",
-    "final_diagnosis": "<final diagnosis>",
-    "key_supporting_features": "<list of features>"
+    "presenting_complaint": "<brief technical description of initial lesion>",
+    "clinical_dialogue_summary": "<key points from conversation with the doctor>",
+    "final_diagnosis": "<confirmed diagnosis>",
+    "key_supporting_features": "<features most strongly supporting the diagnosis>",
+    "key_findings": ["<clinical finding 1>", "<clinical finding 2>", "<clinical finding 3>"],
+    "lesion_distribution": ["<location 1>", "<location 2>", "<location 3>"],
+    "abstract": "<2-3 sentence clinical abstract suitable for a medical record>",
+    "case_summary": "<1 paragraph narrative summary of the case>",
+    "discussion": "<clinical discussion covering differential reasoning and key distinguishing features>",
+    "conclusion": "<1-2 sentence conclusion with management recommendations>"
   }}
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 6. Treatment plan (doctor-facing, detailed prescription)
@@ -246,7 +307,7 @@ The output must be a JSON object in the following format:
         Returns: treatment plan + prescription JSON.
         Used in: doctor review — treatment plan section.
         """
-        return """You are an AI assistant providing treatment recommendations to a dermatologist. Based on the final diagnosis, patient demographics, and conversation history, generate a comprehensive treatment plan.
+        return _p("doctor_treatment_plan", """You are an AI assistant providing treatment recommendations to a dermatologist. Based on the final diagnosis, patient demographics, and conversation history, generate a comprehensive treatment plan.
 
 The plan should be structured and include sections for:
 1. **Medications:** Suggest specific medications, dosages, and frequencies.
@@ -275,7 +336,7 @@ The output must be a JSON object in the following format:
     }}
   ]
 }}
-"""
+""")
 
     # ------------------------------------------------------------------
     # 7. Reconcile visual description fields with doctor's override
